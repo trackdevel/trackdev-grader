@@ -5,6 +5,16 @@ use tracing::info;
 
 use sprint_grader_core::stats::mean;
 
+type MethodMetricsRow = (Option<i64>, Option<i64>, Option<i64>, Option<f64>);
+type AvgQualityTuple = (
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+);
+type PrevQualityRow = (Option<f64>, Option<f64>, Option<f64>, Option<f64>);
+
 pub fn compute_student_quality(
     conn: &Connection,
     student_id: &str,
@@ -15,7 +25,7 @@ pub fn compute_student_quality(
          FROM method_metrics
          WHERE author_id = ? AND sprint_id = ?",
     )?;
-    let rows: Vec<(Option<i64>, Option<i64>, Option<i64>, Option<f64>)> = stmt
+    let rows: Vec<MethodMetricsRow> = stmt
         .query_map(params![student_id, sprint_id], |r| {
             Ok((
                 r.get::<_, Option<i64>>(0)?,
@@ -27,13 +37,7 @@ pub fn compute_student_quality(
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
-    let (avg_cc, avg_cog, avg_loc, pct_cc_10, avg_mi): (
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    ) = if rows.is_empty() {
+    let (avg_cc, avg_cog, avg_loc, pct_cc_10, avg_mi): AvgQualityTuple = if rows.is_empty() {
         (None, None, None, None, None)
     } else {
         let n = rows.len() as f64;
@@ -89,7 +93,7 @@ pub fn compute_student_quality(
     };
 
     // Previous-sprint aggregates for the delta columns.
-    let prev: Option<(Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = conn
+    let prev: Option<PrevQualityRow> = conn
         .query_row(
             "SELECT sq.avg_cc, sq.avg_cognitive_complexity, sq.pct_methods_cc_over_10,
                     sq.avg_maintainability

@@ -25,6 +25,42 @@ use serde_json::{json, Value};
 use sprint_grader_core::stats::round_half_even;
 use tracing::info;
 
+type BehavioralRow = (
+    Option<bool>,
+    Option<i64>,
+    Option<bool>,
+    Option<bool>,
+    Option<bool>,
+    Option<bool>,
+);
+
+type FileStyleRow = (
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    bool,
+    bool,
+    bool,
+    bool,
+);
+
+type FileAiProbRow = (
+    String,
+    String,
+    f64,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+);
+
 pub struct SignalWeights {
     pub behavioral: f64,
     pub stylometric: f64,
@@ -69,14 +105,7 @@ pub const PR_RISK_HIGH_THRESHOLD: f64 = 0.70;
 // ── PR-level fusion (legacy) ────────────────────────────────────────────────
 
 pub fn compute_behavioral_score(conn: &Connection, pr_id: &str) -> Option<f64> {
-    let row: Option<(
-        Option<bool>,
-        Option<i64>,
-        Option<bool>,
-        Option<bool>,
-        Option<bool>,
-        Option<bool>,
-    )> = conn
+    let row: Option<BehavioralRow> = conn
         .query_row(
             "SELECT single_commit_pr, max_lines_per_commit, has_fixup_pattern,
                     productivity_anomaly, has_test_adjustments, has_intermediate_changes
@@ -384,20 +413,7 @@ fn get_file_stylometry_score(
     sprint_id: i64,
 ) -> Option<f64> {
     use crate::stylometry::{compute_ai_style_score, StyleFeatureVector};
-    let row: Option<(
-        f64,
-        f64,
-        f64,
-        f64,
-        f64,
-        f64,
-        f64,
-        f64,
-        bool,
-        bool,
-        bool,
-        bool,
-    )> = conn
+    let row: Option<FileStyleRow> = conn
         .query_row(
             "SELECT avg_identifier_length, identifier_length_stddev,
                     camelcase_ratio, comment_density,
@@ -583,17 +599,7 @@ pub fn attribute_to_students(
          FROM file_ai_probability
          WHERE project_id = ? AND sprint_id = ?",
     )?;
-    let files: Vec<(
-        String,
-        String,
-        f64,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    )> = stmt
+    let files: Vec<FileAiProbRow> = stmt
         .query_map(params![project_id, sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,

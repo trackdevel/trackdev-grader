@@ -469,7 +469,7 @@ fn main() -> Result<()> {
                     if proj_dir.is_dir() {
                         if let Ok(repo_dirs) = std::fs::read_dir(&proj_dir) {
                             for entry in repo_dirs.flatten() {
-                                if !entry.file_type().map_or(false, |t| t.is_dir()) {
+                                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                                     continue;
                                 }
                                 let repo_path = entry.path();

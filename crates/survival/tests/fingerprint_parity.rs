@@ -72,8 +72,7 @@ fn fingerprints_match_python_reference() {
         // Per-statement fingerprints.
         let ref_stmts = entry["statements"].as_array().cloned().unwrap_or_default();
         let limit = ff.statements.len().min(ref_stmts.len());
-        for i in 0..limit {
-            let r = &ff.statements[i];
+        for (i, r) in ff.statements.iter().enumerate().take(limit) {
             let p = &ref_stmts[i];
             let py_raw = p["raw_fp"].as_str().unwrap_or("");
             let py_norm = p["normalized_fp"].as_str().unwrap_or("");
@@ -104,8 +103,7 @@ fn fingerprints_match_python_reference() {
         // Per-method fingerprints.
         let ref_methods = entry["methods"].as_array().cloned().unwrap_or_default();
         let mlimit = ff.methods.len().min(ref_methods.len());
-        for i in 0..mlimit {
-            let r = &ff.methods[i];
+        for (i, r) in ff.methods.iter().enumerate().take(mlimit) {
             let p = &ref_methods[i];
             let py_name = p["name"].as_str().unwrap_or("");
             let py_fp = p["method_fp"].as_str().unwrap_or("");

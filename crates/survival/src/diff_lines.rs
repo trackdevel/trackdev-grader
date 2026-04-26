@@ -338,7 +338,7 @@ fn find_base_sha(
         let rev_text = String::from_utf8_lossy(&rev_out.stdout).into_owned();
         for line in rev_text.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 && parts[2..].iter().any(|p| *p == last_sha) {
+            if parts.len() >= 3 && parts[2..].contains(&last_sha) {
                 return Some(parts[1].to_string());
             }
         }

@@ -348,7 +348,7 @@ fn run_ai_detection_block(
     };
     let fusion_cfg = sprint_grader_ai_detect::fusion::FusionConfig::default();
     for entry in repo_dirs.flatten() {
-        if !entry.file_type().map_or(false, |t| t.is_dir()) {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let repo_path = entry.path();

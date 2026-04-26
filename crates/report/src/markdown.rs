@@ -20,6 +20,34 @@ use tracing::info;
 use crate::charts::{html_escape, sparkline_svg, stacked_bars_svg, StackedRow};
 use crate::flag_details::{enrich_flag_details, render_flag_details, render_flag_severity};
 
+type DoneTaskRow = (
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<String>,
+);
+
+type DonePrRow = (
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+);
+
+type GroupMemberRow = (
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<f64>,
+);
+
 /// Aggregated per-student LS and LD for the team. LS captures surviving new
 /// code; LD (cosmetic-filtered) captures legitimate cleanup/refactor value
 /// that LS alone misses. Both are distributed across shared PRs using the
@@ -271,7 +299,7 @@ fn pr_ls_for_team(
 
 fn md_escape(s: &str) -> String {
     // Minimal escaping for table cells: pipes break tables, newlines break rows.
-    s.replace('|', "\\|").replace('\n', " ").replace('\r', " ")
+    s.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
 fn push_table_header(buf: &mut String, headers: &[&str]) {
@@ -928,13 +956,7 @@ fn write_section_b(
                AND t.type != 'USER_STORY' AND t.status = 'DONE'
              ORDER BY t.task_key",
         )?;
-        let tasks: Vec<(
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<f64>,
-            Option<String>,
-        )> = stmt
+        let tasks: Vec<DoneTaskRow> = stmt
             .query_map(rusqlite::params![sprint_id, sid], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -990,15 +1012,7 @@ fn write_section_b(
                AND t.type != 'USER_STORY' AND t.status = 'DONE'
              ORDER BY pr.pr_number",
         )?;
-        let prs: Vec<(
-            String,
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-        )> = stmt
+        let prs: Vec<DonePrRow> = stmt
             .query_map(rusqlite::params![sprint_id, sid], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -1191,15 +1205,7 @@ fn write_section_c(
                AND t.type != 'USER_STORY' AND t.status = 'DONE'
              ORDER BY tgm.is_outlier DESC, t.task_key",
         )?;
-        let members: Vec<(
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-            Option<String>,
-            Option<f64>,
-        )> = stmt
+        let members: Vec<GroupMemberRow> = stmt
             .query_map([g.group_id], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,

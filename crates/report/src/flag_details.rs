@@ -734,8 +734,7 @@ fn fmt_num(v: f64) -> String {
 
 fn md_escape(s: &str) -> String {
     s.replace('|', "\\|")
-        .replace('\n', " ")
-        .replace('\r', " ")
+        .replace(['\n', '\r'], " ")
         .replace('[', "\\[")
         .replace(']', "\\]")
 }

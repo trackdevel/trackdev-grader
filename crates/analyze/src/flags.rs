@@ -10,6 +10,107 @@ use tracing::{info, warn};
 use sprint_grader_core::config::{Config, ThresholdConfig};
 use sprint_grader_core::stats::{median_upper, percentile_pos, round_half_even, stddev_pop};
 
+#[allow(clippy::type_complexity)]
+mod row_aliases {
+    pub type PrAuthorRepoLines = (String, Option<i64>, Option<String>, Option<String>, i64);
+    pub type PrAuthorRepoLogin = (
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    pub type PrAuthorRepoNum = (String, Option<i64>, Option<String>, Option<String>);
+    pub type PrFingerprintRow = (
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+    pub type CrossTeamRow = (
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+    pub type PrReviewRow = (
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+    );
+    pub type PrCommitsRow = (
+        String,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+    pub type DoneTaskRow = (i64, Option<String>, Option<String>, Option<String>, i64);
+    pub type DonePrFullRow = (
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        i64,
+    );
+    pub type FlagDetailRow = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    );
+    pub type StudentMetricRow = (i64, String, Option<f64>, Option<f64>, Option<f64>);
+    pub type StudentFloatsRow = (
+        String,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    );
+    pub type CompilationRow = (
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    pub type ApprovedBrokenRow = (String, Option<String>, Option<String>, Option<i64>);
+    pub type SuspectFastTaskRow = (
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<String>,
+    );
+}
+use row_aliases::*;
+
 #[derive(Debug, Clone)]
 pub struct Flag {
     pub student_id: String,
@@ -408,7 +509,7 @@ fn single_commit_dump(
          JOIN tasks t ON t.id = tpr.task_id
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY'",
     )?;
-    let rows: Vec<(String, Option<i64>, Option<String>, Option<String>, i64)> = stmt
+    let rows: Vec<PrAuthorRepoLines> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -519,13 +620,7 @@ fn author_mismatch(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
          JOIN tasks t ON t.id = tpr.task_id
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY'",
     )?;
-    let rows: Vec<(
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<PrAuthorRepoLogin> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -615,7 +710,7 @@ fn orphan_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(&sql)?;
     let params_vec: Vec<&dyn rusqlite::ToSql> =
         repos.iter().map(|r| r as &dyn rusqlite::ToSql).collect();
-    let rows: Vec<(String, Option<i64>, Option<String>, Option<String>)> = stmt
+    let rows: Vec<PrAuthorRepoNum> = stmt
         .query_map(&params_vec[..], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -655,13 +750,7 @@ fn foreign_merge(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY'
            AND t.status = 'DONE' AND pr.merged = 1",
     )?;
-    let rows: Vec<(
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<PrFingerprintRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, Option<String>>(0)?,
@@ -701,17 +790,13 @@ fn unknown_contributor(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Ve
     let mut known: BTreeSet<String> = BTreeSet::new();
     let mut stmt =
         conn.prepare("SELECT github_login FROM students WHERE github_login IS NOT NULL")?;
-    for r in stmt.query_map([], |r| r.get::<_, String>(0))? {
-        if let Ok(s) = r {
-            known.insert(s.to_lowercase());
-        }
+    for s in stmt.query_map([], |r| r.get::<_, String>(0))?.flatten() {
+        known.insert(s.to_lowercase());
     }
     drop(stmt);
     let mut stmt = conn.prepare("SELECT login FROM github_users WHERE student_id IS NOT NULL")?;
-    for r in stmt.query_map([], |r| r.get::<_, String>(0))? {
-        if let Ok(s) = r {
-            known.insert(s.to_lowercase());
-        }
+    for s in stmt.query_map([], |r| r.get::<_, String>(0))?.flatten() {
+        known.insert(s.to_lowercase());
     }
     drop(stmt);
 
@@ -953,14 +1038,7 @@ fn cross_team_similarity(conn: &Connection, sprint_id: i64) -> rusqlite::Result<
                 method_name, fingerprint
          FROM cross_team_matches WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(
-        i64,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    )> = stmt
+    let rows: Vec<CrossTeamRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1007,14 +1085,7 @@ fn bulk_rename_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fla
          JOIN tasks t ON t.id = tpr.task_id
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY' AND pr.merged = 1",
     )?;
-    let rows: Vec<(
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        i64,
-        i64,
-    )> = stmt
+    let rows: Vec<PrReviewRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1091,14 +1162,7 @@ fn cosmetic_heavy_pr(
          JOIN pull_requests pr ON pr.id = plm.pr_id
          WHERE plm.sprint_id = ? AND plm.lat > 0",
     )?;
-    let rows: Vec<(
-        String,
-        i64,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<PrCommitsRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1240,7 +1304,7 @@ fn task_evidence_for_member(
          WHERE sprint_id = ? AND assignee_id = ? AND status = 'DONE' AND type != 'USER_STORY'
          ORDER BY task_key, id",
     )?;
-    let rows: Vec<(i64, Option<String>, Option<String>, Option<String>, i64)> = stmt
+    let rows: Vec<DoneTaskRow> = stmt
         .query_map(params![sprint_id, student_id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1287,21 +1351,7 @@ fn pr_evidence_for_author(
            AND pr.author_id = ? AND s.team_project_id = ?
          ORDER BY pr.repo_full_name, pr.pr_number, pr.id",
     )?;
-    let rows: Vec<(
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        i64,
-    )> = stmt
+    let rows: Vec<DonePrFullRow> = stmt
         .query_map(params![sprint_id, sprint_id, student_id, project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1377,20 +1427,7 @@ fn review_evidence_for_member(
          WHERE s.id = ? AND t.sprint_id = ? AND t.type != 'USER_STORY'
          ORDER BY rv.submitted_at, rv.pr_id",
     )?;
-    let rows: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    )> = stmt
+    let rows: Vec<FlagDetailRow> = stmt
         .query_map(params![sprint_id, student_id, sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1539,7 +1576,7 @@ fn team_inequality(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
         "SELECT project_id, metric_name, gini, hoover, cv
          FROM team_sprint_inequality WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(i64, String, Option<f64>, Option<f64>, Option<f64>)> = stmt
+    let rows: Vec<StudentMetricRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1648,14 +1685,7 @@ fn low_composite_score(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Ve
                 task_signal, process_signal
          FROM student_sprint_contribution WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(
-        String,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    )> = stmt
+    let rows: Vec<StudentFloatsRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1785,13 +1815,7 @@ fn pr_does_not_compile(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Ve
          JOIN pull_requests pr ON pr.id = pc.pr_id
          WHERE pc.sprint_id = ? AND pc.compiles = 0 AND pr.merged = 1",
     )?;
-    let rows: Vec<(
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<CompilationRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, Option<i64>>(0)?,
@@ -1828,7 +1852,7 @@ fn approved_broken_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec
          FROM pr_compilation pc
          WHERE pc.sprint_id = ? AND pc.compiles = 0",
     )?;
-    let rows: Vec<(String, Option<String>, Option<String>, Option<i64>)> = stmt
+    let rows: Vec<ApprovedBrokenRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1913,15 +1937,7 @@ fn last_minute_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fla
          JOIN pull_requests pr ON pr.id = prr.pr_id
          WHERE prr.sprint_id = ? AND prr.regularity_band = 'last_minute'",
     )?;
-    let rows: Vec<(
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<f64>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<SuspectFastTaskRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, Option<i64>>(0)?,

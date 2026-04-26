@@ -7,6 +7,9 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 use tracing::info;
 
+type FpKey = (String, String, i64);
+type FpData = (Option<String>, Option<String>, Option<String>);
+
 pub fn detect_rewrites(
     conn: &Connection,
     current_sprint_ids: &[i64],
@@ -55,10 +58,7 @@ pub fn detect_rewrites(
                 r.get::<_, Option<String>>(5)?,
             ))
         })?;
-        let mut prev_lookup: HashMap<
-            (String, String, i64),
-            (Option<String>, Option<String>, Option<String>),
-        > = HashMap::new();
+        let mut prev_lookup: HashMap<FpKey, FpData> = HashMap::new();
         for r in rows {
             let (fp, repo, idx, raw, norm, author) = r?;
             prev_lookup.insert((fp, repo, idx), (raw, norm, author));

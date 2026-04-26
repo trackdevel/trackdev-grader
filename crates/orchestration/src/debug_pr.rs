@@ -14,6 +14,8 @@ use sprint_grader_core::Database;
 use sprint_grader_survival::diff_lines::compute_metrics_for_pr;
 use tracing::warn;
 
+type PrLineMetricsRow = (String, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
+
 pub fn debug_pr_lines(
     db: &Database,
     data_dir: &Path,
@@ -34,7 +36,7 @@ pub fn debug_pr_lines(
         let mut stmt = db.conn.prepare(
             "SELECT pr_id, lat, lar, ls, cosmetic_lines FROM pr_line_metrics WHERE sprint_id = ?",
         )?;
-        let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = stmt
+        let rows: Vec<PrLineMetricsRow> = stmt
             .query_map([sid], |r| {
                 Ok((
                     r.get::<_, String>(0)?,

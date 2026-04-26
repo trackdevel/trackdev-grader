@@ -84,9 +84,11 @@ pub fn compute_halstead(node: Node, source: &[u8]) -> HalsteadMetrics {
         // Tree-sitter exposes symbolic tokens as kind == "&&" etc., and exposes
         // keyword children with kind == "if" etc. The Python reference checks
         // both the node type and the text; we mirror the priority order.
-        if OPERATOR_NODE_TYPES.contains(&kind) || OPERATOR_NODE_TYPES.contains(&text.as_str()) {
-            *operators.entry(text).or_insert(0) += 1;
-        } else if OPERATOR_KEYWORDS.contains(&kind) || OPERATOR_KEYWORDS.contains(&text.as_str()) {
+        if OPERATOR_NODE_TYPES.contains(&kind)
+            || OPERATOR_NODE_TYPES.contains(&text.as_str())
+            || OPERATOR_KEYWORDS.contains(&kind)
+            || OPERATOR_KEYWORDS.contains(&text.as_str())
+        {
             *operators.entry(text).or_insert(0) += 1;
         } else if OPERAND_NODE_TYPES.contains(&kind) {
             *operands.entry(text).or_insert(0) += 1;

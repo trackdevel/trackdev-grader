@@ -14,6 +14,8 @@ use walkdir::WalkDir;
 
 use sprint_grader_core::stats;
 
+type StyleFileEntry = (Vec<Option<f64>>, Option<bool>);
+
 #[derive(Debug, Clone, Default)]
 pub struct StyleFeatureVector {
     // Naming
@@ -168,7 +170,7 @@ fn extract_identifiers(code_no_comments: &str) -> Vec<String> {
         .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
         .filter(|ident| {
             !JAVA_KEYWORDS.contains(ident.as_str())
-                && !ident.chars().next().map_or(false, |c| c.is_ascii_digit())
+                && !ident.chars().next().is_some_and(|c| c.is_ascii_digit())
         })
         .collect()
 }
@@ -337,7 +339,7 @@ fn compute_method_features(code_no_comments: &str, fv: &mut StyleFeatureVector) 
     let mut param_counts: Vec<f64> = Vec::new();
     let mut nesting_depths: Vec<i64> = Vec::new();
 
-    for cap in METHOD_RE.captures_iter(&code_no_comments).flatten() {
+    for cap in METHOD_RE.captures_iter(code_no_comments).flatten() {
         let params_match = match cap.get(2) {
             Some(p) => p,
             None => continue,
@@ -692,7 +694,7 @@ pub fn build_student_baselines(
         "blank_line_ratio",
     ];
 
-    let mut student_files: HashMap<String, Vec<(Vec<Option<f64>>, Option<bool>)>> = HashMap::new();
+    let mut student_files: HashMap<String, Vec<StyleFileEntry>> = HashMap::new();
     let rows = stmt
         .query_map(
             params![baseline_sprint_id, baseline_sprint_id, project_id],
@@ -831,7 +833,7 @@ pub fn analyze_repo_stylometry(
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "java"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "java"))
         .collect();
 
     let mut count = 0;
@@ -937,13 +939,15 @@ mod tests {
 
     #[test]
     fn score_rises_with_ai_indicators() {
-        let mut fv = StyleFeatureVector::default();
-        fv.avg_method_length = 10.0;
-        fv.method_length_stddev = 1.0; // uniform
-        fv.import_alphabetized = true;
-        fv.has_comprehensive_javadoc = true;
-        fv.uniform_formatting = true;
-        fv.empty_catch_ratio = 0.0;
+        let fv = StyleFeatureVector {
+            avg_method_length: 10.0,
+            method_length_stddev: 1.0,
+            import_alphabetized: true,
+            has_comprehensive_javadoc: true,
+            uniform_formatting: true,
+            empty_catch_ratio: 0.0,
+            ..Default::default()
+        };
         let s = compute_ai_style_score(&fv);
         assert!(s > 0.4);
         assert!(s <= 1.0);

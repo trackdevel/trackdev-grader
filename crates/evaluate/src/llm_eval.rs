@@ -13,6 +13,15 @@ use tracing::{info, warn};
 
 use crate::llm_client::{AnthropicClient, Conversation};
 
+type LlmPrRow = (
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// PR documentation rubric response shape. `total_doc_score` is optional
 /// because the model sometimes omits it; we fall back to the sum.
 #[derive(Debug, Deserialize)]
@@ -307,14 +316,7 @@ fn evaluate_prs_llm(
                AND s.team_project_id = ?
              ORDER BY pr.pr_number",
         )?;
-        let prs: Vec<(
-            String,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = stmt
+        let prs: Vec<LlmPrRow> = stmt
             .query_map(params![sprint_id, project_id], |r| {
                 Ok((
                     r.get::<_, String>(0)?,

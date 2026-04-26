@@ -201,8 +201,8 @@ fn parallel_worker_conn_isolation_is_deterministic() {
     let cfg = default_config();
 
     let c1 = rusqlite::Connection::open(&db_path).unwrap();
-    c1.pragma_update(None, "journal_mode", &"WAL").unwrap();
-    c1.pragma_update(None, "busy_timeout", &10_000).unwrap();
+    c1.pragma_update(None, "journal_mode", "WAL").unwrap();
+    c1.pragma_update(None, "busy_timeout", 10_000).unwrap();
     sprint_grader_analyze::metrics::compute_metrics_for_sprint_id(
         &c1,
         10,

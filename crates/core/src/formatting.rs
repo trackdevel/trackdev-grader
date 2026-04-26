@@ -71,7 +71,7 @@ mod tests {
         let some = Some(4.567);
         let none = None;
         assert_eq!(fmt_float(some, 2), "4.57");
-        assert_eq!(fmt_float(&Some(4.0), 2), "4");
-        assert_eq!(fmt_float(&none, 2), "None");
+        assert_eq!(fmt_float(Some(4.0), 2), "4");
+        assert_eq!(fmt_float(none, 2), "None");
     }
 }

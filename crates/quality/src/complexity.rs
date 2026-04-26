@@ -66,7 +66,7 @@ fn node_text(node: Node, source: &[u8]) -> String {
 
 pub fn cyclomatic_complexity(node: Node, source: &[u8]) -> i64 {
     let mut cc = 1i64;
-    fn walk(node: Node, source: &[u8], cc: &mut i64) {
+    fn walk(node: Node, _source: &[u8], cc: &mut i64) {
         let kind = node.kind();
         if CC_NODE_TYPES.contains(&kind) {
             *cc += 1;
@@ -80,7 +80,7 @@ pub fn cyclomatic_complexity(node: Node, source: &[u8]) -> i64 {
             *cc += 1;
         }
         for c in children(node) {
-            walk(c, source, cc);
+            walk(c, _source, cc);
         }
     }
     walk(node, source, &mut cc);
@@ -89,7 +89,7 @@ pub fn cyclomatic_complexity(node: Node, source: &[u8]) -> i64 {
 
 pub fn cognitive_complexity(node: Node, source: &[u8]) -> i64 {
     let mut total = 0i64;
-    fn walk(node: Node, source: &[u8], nesting: i64, total: &mut i64) {
+    fn walk(node: Node, _source: &[u8], nesting: i64, total: &mut i64) {
         let kind = node.kind();
         if COGNITIVE_INCREMENT_NODES.contains(&kind) {
             *total += 1 + nesting;
@@ -109,7 +109,7 @@ pub fn cognitive_complexity(node: Node, source: &[u8]) -> i64 {
                 0
             };
         for c in children(node) {
-            walk(c, source, new_nesting, total);
+            walk(c, _source, new_nesting, total);
         }
     }
     walk(node, source, 0, &mut total);
@@ -118,7 +118,7 @@ pub fn cognitive_complexity(node: Node, source: &[u8]) -> i64 {
 
 pub fn max_nesting_depth(node: Node, source: &[u8]) -> i64 {
     let mut max_depth = 0i64;
-    fn walk(node: Node, source: &[u8], depth: i64, max_depth: &mut i64) {
+    fn walk(node: Node, _source: &[u8], depth: i64, max_depth: &mut i64) {
         let d = if COGNITIVE_NESTING_NODES.contains(&node.kind()) {
             let nd = depth + 1;
             if nd > *max_depth {
@@ -129,7 +129,7 @@ pub fn max_nesting_depth(node: Node, source: &[u8]) -> i64 {
             depth
         };
         for c in children(node) {
-            walk(c, source, d, max_depth);
+            walk(c, _source, d, max_depth);
         }
     }
     walk(node, source, 0, &mut max_depth);

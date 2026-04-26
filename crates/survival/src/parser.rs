@@ -261,11 +261,7 @@ fn walk_java_tree(node: Node, source: &[u8], result: &mut ParseResult, prefix: &
                 let new_prefix = format!("{prefix}{short_name}.");
                 find_anon_classes(body, source, result, &new_prefix);
             }
-        } else if is_class_level(kind) {
-            result
-                .class_level_statements
-                .push(node_stmt(child, source, None));
-        } else if kind == "package_declaration" {
+        } else if is_class_level(kind) || kind == "package_declaration" {
             result
                 .class_level_statements
                 .push(node_stmt(child, source, None));
