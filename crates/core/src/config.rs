@@ -22,6 +22,10 @@ pub struct Config {
     pub curriculum_slides_dir: Option<PathBuf>,
     pub curriculum_extra_imports: Vec<String>,
     pub curriculum_template_repos: HashMap<String, PathBuf>,
+    /// When true, the pipeline auto-freezes the curriculum snapshot
+    /// (`curriculum_concepts_snapshot`) for any sprint whose `end_date` is
+    /// already in the past. Default false. T-P2.5.
+    pub curriculum_freeze_after_sprint_end: bool,
     pub repo_analysis: RepoAnalysisConfig,
     pub build_profiles: Vec<BuildProfile>,
     pub build: BuildConfig,
@@ -264,6 +268,8 @@ struct RawCurriculum {
     extra_allowed_imports: Vec<String>,
     android_template_repo: Option<PathBuf>,
     spring_template_repo: Option<PathBuf>,
+    #[serde(default)]
+    freeze_after_sprint_end: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -366,6 +372,7 @@ impl Config {
             curriculum_slides_dir: None,
             curriculum_extra_imports: Vec::new(),
             curriculum_template_repos: HashMap::new(),
+            curriculum_freeze_after_sprint_end: false,
             repo_analysis: RepoAnalysisConfig::default(),
             build_profiles: Vec::new(),
             build: BuildConfig::default(),
@@ -613,6 +620,7 @@ impl Config {
             curriculum_slides_dir: raw.curriculum.slides_dir,
             curriculum_extra_imports: raw.curriculum.extra_allowed_imports,
             curriculum_template_repos: template_repos,
+            curriculum_freeze_after_sprint_end: raw.curriculum.freeze_after_sprint_end,
             repo_analysis,
             build_profiles,
             build,
@@ -683,6 +691,23 @@ contribution_imbalance_stddev = 1.5
             defaults.bulk_rename_adds_dels_ratio
         );
         assert_eq!(dt.bulk_rename_line_floor, defaults.bulk_rename_line_floor);
+    }
+
+    #[test]
+    fn curriculum_freeze_after_sprint_end_defaults_to_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_config(tmp.path(), MINIMAL_TOML);
+        let cfg = Config::load(tmp.path()).expect("load minimal config");
+        assert!(!cfg.curriculum_freeze_after_sprint_end);
+    }
+
+    #[test]
+    fn curriculum_freeze_after_sprint_end_can_be_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!("{MINIMAL_TOML}\n[curriculum]\nfreeze_after_sprint_end = true\n");
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("load with freeze flag");
+        assert!(cfg.curriculum_freeze_after_sprint_end);
     }
 
     #[test]

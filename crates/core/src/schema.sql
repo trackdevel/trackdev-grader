@@ -484,6 +484,20 @@ CREATE TABLE IF NOT EXISTS curriculum_concepts (
     UNIQUE(category, value)
 );
 
+-- Per-sprint frozen view of `curriculum_concepts` (T-P2.5). Once a sprint
+-- ends, instructors freeze the curriculum-as-taught into this snapshot so
+-- editing a future sprint's slide deck cannot silently re-grade past sprints.
+-- Rows for a given `sprint_id` are written once and treated as immutable;
+-- `freeze_curriculum_for_sprint` is a no-op on subsequent calls.
+CREATE TABLE IF NOT EXISTS curriculum_concepts_snapshot (
+    sprint_id     INTEGER NOT NULL,
+    category      TEXT NOT NULL,
+    value         TEXT NOT NULL,
+    source_file   TEXT,
+    sprint_taught INTEGER,
+    PRIMARY KEY (sprint_id, category, value)
+);
+
 CREATE TABLE IF NOT EXISTS curriculum_violations (
     file_path       TEXT NOT NULL,
     repo_name       TEXT NOT NULL,

@@ -11,7 +11,7 @@ use rusqlite::{params, Connection};
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
-use sprint_grader_curriculum::get_allowed_concepts;
+use sprint_grader_curriculum::get_allowed_concepts_with_snapshot;
 
 // ── High-severity patterns ──────────────────────────────────────────────────
 
@@ -461,7 +461,9 @@ pub fn scan_repo_curriculum(
     sprint_id: i64,
     sprint_number: i64,
 ) -> rusqlite::Result<usize> {
-    let allowed = get_allowed_concepts(conn, sprint_number)?;
+    // T-P2.5: snapshot wins when present (past sprints stay frozen),
+    // otherwise fall through to the live curriculum table (active sprint).
+    let allowed = get_allowed_concepts_with_snapshot(conn, sprint_id, sprint_number)?;
     let total_allowed: usize = allowed.values().map(|v| v.len()).sum();
     info!(
         repo = repo_name,

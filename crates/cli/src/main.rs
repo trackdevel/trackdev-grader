@@ -190,6 +190,15 @@ enum Command {
         #[arg(long)]
         rebuild: bool,
     },
+    /// Freeze the curriculum-as-taught for a specific sprint into
+    /// `curriculum_concepts_snapshot`. Idempotent: re-running for a sprint
+    /// that's already frozen is a no-op. T-P2.5.
+    FreezeCurriculum {
+        /// 1-based sprint ordinal (e.g. `--sprint 2` for the second sprint).
+        /// All projects' sprints with this ordinal are frozen.
+        #[arg(long)]
+        sprint: u32,
+    },
     /// Generate Excel (.xlsx) + Markdown (.md) multi-sprint project report.
     Report {
         #[command(flatten)]
@@ -591,6 +600,43 @@ fn main() -> Result<()> {
                 )
                 .context("curriculum rebuild failed")?;
             }
+        }
+        Command::FreezeCurriculum { sprint } => {
+            // Resolve the DB sprint_id for every project at the requested
+            // ordinal (1-based). The same ordinal can map to several
+            // sprint_id rows when multiple projects share a course.
+            let mut stmt = db.conn.prepare(
+                "SELECT sp.id FROM sprints sp
+                 WHERE (
+                     SELECT COUNT(*) FROM sprints sp2
+                     WHERE sp2.project_id = sp.project_id AND sp2.start_date <= sp.start_date
+                 ) = ?",
+            )?;
+            let sprint_ids: Vec<i64> = stmt
+                .query_map([sprint as i64], |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(stmt);
+            if sprint_ids.is_empty() {
+                anyhow::bail!(
+                    "no sprint with ordinal {} found — run `collect` first or check num_sprints",
+                    sprint
+                );
+            }
+            let mut total_written = 0usize;
+            for sid in sprint_ids {
+                let n = sprint_grader_curriculum::freeze_curriculum_for_sprint(
+                    &db.conn,
+                    sid,
+                    sprint as i64,
+                )
+                .with_context(|| format!("freeze sprint_id={sid}"))?;
+                total_written += n;
+            }
+            info!(
+                sprint = sprint,
+                rows_written = total_written,
+                "curriculum frozen"
+            );
         }
         Command::Report { projects } => {
             let filter = parse_project_filter(projects.projects);

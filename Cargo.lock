@@ -1543,6 +1543,7 @@ dependencies = [
  "sprint-grader-collect",
  "sprint-grader-compile",
  "sprint-grader-core",
+ "sprint-grader-curriculum",
  "sprint-grader-evaluate",
  "sprint-grader-process",
  "sprint-grader-quality",

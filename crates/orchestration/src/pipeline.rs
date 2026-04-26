@@ -635,6 +635,32 @@ pub fn run_pipeline(
     // Re-open the master DB for the tail (AI detection + trajectory + reports).
     let db = Database::open(db_path).context("reopening grading DB")?;
 
+    // T-P2.5: auto-freeze the curriculum for any sprint whose end_date has
+    // passed. The freeze is idempotent so running this on every pipeline
+    // invocation is safe — already-frozen sprints become no-ops.
+    if config.curriculum_freeze_after_sprint_end {
+        for sid in &flat_sprint_ids {
+            let end_date: Option<String> = db
+                .conn
+                .query_row("SELECT end_date FROM sprints WHERE id = ?", [*sid], |r| {
+                    r.get::<_, Option<String>>(0)
+                })
+                .ok()
+                .flatten();
+            if let Some(end_date) = end_date {
+                if end_date.as_str() < opts.today.as_str() {
+                    let ord = sprint_grader_survival::survival::ordinal_for_sprint_id(&db, *sid)
+                        .unwrap_or(1) as i64;
+                    if let Err(e) =
+                        sprint_grader_curriculum::freeze_curriculum_for_sprint(&db.conn, *sid, ord)
+                    {
+                        warn!(sprint_id = sid, error = %e, "curriculum freeze failed");
+                    }
+                }
+            }
+        }
+    }
+
     // Stage 4: AI detection (go / go-quick) — per (project, sprint).
     if variant.ai_detection() {
         info!(stage = 4, total = total_stages, "AI detection");
