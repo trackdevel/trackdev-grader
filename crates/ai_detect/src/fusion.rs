@@ -192,7 +192,10 @@ pub fn compute_heuristic_score(conn: &Connection, pr_id: &str) -> f64 {
     if set.contains("LOW_SURVIVAL_RATE") {
         score += 0.20;
     }
-    if set.contains("COSMETIC_REWRITE") {
+    // Post-T-P1.2 the detector emits COSMETIC_REWRITE_ACTOR (rewriter) and
+    // COSMETIC_REWRITE_VICTIM (original author). Only the actor variant
+    // signals AI-likely behaviour. Match the legacy type too for old DB rows.
+    if set.contains("COSMETIC_REWRITE_ACTOR") || set.contains("COSMETIC_REWRITE") {
         score += 0.20;
     }
     score.min(1.0)

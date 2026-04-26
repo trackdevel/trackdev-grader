@@ -1005,18 +1005,49 @@ fn cosmetic_rewrite(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<F
             r.get::<_, Option<String>>(5)?,
         ))
     })?;
+    // Emit two flags per rewrite (T-P1.2):
+    //   VICTIM (INFO)   — original author is told their code was rewritten.
+    //   ACTOR  (WARNING) — rewriter is told to avoid churn-only changes.
+    // Legacy COSMETIC_REWRITE rows in old DBs are still rendered via a
+    // fallback in report::flag_details; this detector no longer emits them.
     let mut flags = Vec::new();
     for r in rows {
         let (orig, rewriter, affected, change, file, repo) = r?;
-        if let Some(orig) = orig {
+        if let (Some(orig), Some(rewriter)) = (orig.clone(), rewriter.clone()) {
             flags.push(Flag {
-                student_id: orig,
-                flag_type: "COSMETIC_REWRITE",
+                student_id: orig.clone(),
+                flag_type: "COSMETIC_REWRITE_VICTIM",
+                severity: "INFO",
+                details: json!({
+                    "file": file,
+                    "repo": repo,
+                    "counterpart_user_id": rewriter.clone(),
+                    "statements_affected": affected,
+                    "change_type": change,
+                }),
+            });
+            flags.push(Flag {
+                student_id: rewriter,
+                flag_type: "COSMETIC_REWRITE_ACTOR",
                 severity: "WARNING",
                 details: json!({
                     "file": file,
                     "repo": repo,
-                    "rewriter": rewriter,
+                    "counterpart_user_id": orig,
+                    "statements_affected": affected,
+                    "change_type": change,
+                }),
+            });
+        } else if let Some(orig) = orig {
+            // Rewriter unknown — keep the victim notice only, INFO severity.
+            flags.push(Flag {
+                student_id: orig,
+                flag_type: "COSMETIC_REWRITE_VICTIM",
+                severity: "INFO",
+                details: json!({
+                    "file": file,
+                    "repo": repo,
+                    "counterpart_user_id": rewriter,
                     "statements_affected": affected,
                     "change_type": change,
                 }),
@@ -2145,7 +2176,10 @@ pub fn detect_flags_for_sprint_id(
         "RAW_NORMALIZED_DIVERGENCE",
         raw_normalized_divergence(conn, sprint_id, t)
     );
-    total += run!("COSMETIC_REWRITE", cosmetic_rewrite(conn, sprint_id));
+    total += run!(
+        "COSMETIC_REWRITE_VICTIM/ACTOR",
+        cosmetic_rewrite(conn, sprint_id)
+    );
     total += run!(
         "CROSS_TEAM_SIMILARITY",
         cross_team_similarity(conn, sprint_id)
@@ -2346,6 +2380,75 @@ mod tests {
             flags[0].details["threshold"].as_f64(),
             Some(mk_thresh().cramming_commit_pct),
         );
+    }
+
+    fn mk_cosmetic_conn(rows: &[(&str, &str, i64)]) -> Connection {
+        // rows: (original_author_id, rewriter_id, statements_affected).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cosmetic_rewrites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sprint_id INTEGER,
+                file_path TEXT,
+                repo_full_name TEXT,
+                original_author_id TEXT,
+                rewriter_id TEXT,
+                statements_affected INTEGER,
+                change_type TEXT);",
+        )
+        .unwrap();
+        for (orig, rewriter, affected) in rows {
+            conn.execute(
+                "INSERT INTO cosmetic_rewrites
+                    (sprint_id, file_path, repo_full_name, original_author_id,
+                     rewriter_id, statements_affected, change_type)
+                 VALUES (10, 'src/A.java', 'org/repo', ?, ?, ?, 'rename_local')",
+                params![orig, rewriter, affected],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn cosmetic_rewrite_emits_victim_info_and_actor_warning() {
+        // Alice rewrote 50 statements originally authored by Bob.
+        let conn = mk_cosmetic_conn(&[("bob", "alice", 50)]);
+        let flags = cosmetic_rewrite(&conn, 10).unwrap();
+        assert_eq!(flags.len(), 2, "expected exactly two flags, got {flags:?}");
+
+        let victim = flags
+            .iter()
+            .find(|f| f.flag_type == "COSMETIC_REWRITE_VICTIM")
+            .expect("victim flag missing");
+        assert_eq!(victim.student_id, "bob");
+        assert_eq!(victim.severity, "INFO");
+        assert_eq!(
+            victim.details["counterpart_user_id"].as_str(),
+            Some("alice")
+        );
+        assert_eq!(victim.details["statements_affected"].as_i64(), Some(50));
+
+        let actor = flags
+            .iter()
+            .find(|f| f.flag_type == "COSMETIC_REWRITE_ACTOR")
+            .expect("actor flag missing");
+        assert_eq!(actor.student_id, "alice");
+        assert_eq!(actor.severity, "WARNING");
+        assert_eq!(actor.details["counterpart_user_id"].as_str(), Some("bob"));
+
+        // Severity-aggregation invariant: rewriter accumulates WARNING+CRITICAL,
+        // victim does not.
+        let warn_or_crit = |sid: &str| -> usize {
+            flags
+                .iter()
+                .filter(|f| {
+                    f.student_id == sid && (f.severity == "WARNING" || f.severity == "CRITICAL")
+                })
+                .count()
+        };
+        assert_eq!(warn_or_crit("alice"), 1);
+        assert_eq!(warn_or_crit("bob"), 0);
     }
 
     #[test]
