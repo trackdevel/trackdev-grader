@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params_from_iter, types::Value, Connection};
 use tracing::info;
 
-use crate::charts::{html_escape, sparkline_svg, stacked_bars_svg, StackedRow};
+use crate::charts::{
+    html_escape, sparkline_svg, stacked_bars_svg, treemap_svg, StackedRow, TreemapTile,
+};
 use crate::flag_details::{enrich_flag_details, render_flag_details, render_flag_severity};
 
 type DoneTaskRow = (
@@ -888,6 +890,52 @@ fn write_section_a(
         buf.push_str("\n\n");
     }
 
+    // Code ownership treemap (T-P2.3): one tile per file, sized by attributed
+    // statement count, coloured by dominant author. Truck factor below.
+    let ownership =
+        sprint_grader_repo_analysis::file_ownership_for_project(conn, sprint_id, project_id)?;
+    if !ownership.is_empty() {
+        let _ = writeln!(buf, "{} Code ownership\n", h3);
+        let tiles: Vec<TreemapTile> = ownership
+            .iter()
+            .map(|f| TreemapTile {
+                label: f.file_path.clone(),
+                category: f.dominant_author.clone(),
+                value: f.statements as f64,
+            })
+            .collect();
+        let svg = treemap_svg(
+            "Files (sized by statement count, coloured by owner)",
+            &tiles,
+            720,
+            320,
+        );
+        buf.push_str(&svg);
+        buf.push_str("\n\n");
+
+        let truck: Option<(i64, Option<String>)> = conn
+            .query_row(
+                "SELECT truck_factor, owners_csv FROM team_sprint_ownership
+                 WHERE project_id = ? AND sprint_id = ?",
+                rusqlite::params![project_id, sprint_id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .ok();
+        if let Some((tf, owners_csv)) = truck {
+            let owners = owners_csv.unwrap_or_default();
+            let _ = writeln!(
+                buf,
+                "**Truck factor:** {} (top owners: {})\n",
+                tf,
+                if owners.is_empty() {
+                    "—".to_string()
+                } else {
+                    owners
+                }
+            );
+        }
+    }
+
     // Flag severity roll-up for the team
     let critical = count_severity(conn, sprint_id, project_id, "CRITICAL");
     let warning = count_severity(conn, sprint_id, project_id, "WARNING");
@@ -1702,6 +1750,16 @@ mod tests {
              CREATE TABLE flags (flag_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 student_id TEXT, sprint_id INTEGER, flag_type TEXT, severity TEXT,
                 details TEXT);
+             CREATE TABLE github_users (login TEXT PRIMARY KEY, name TEXT, email TEXT,
+                student_id TEXT, fetched_at TEXT);
+             CREATE TABLE fingerprints (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT, repo_full_name TEXT, statement_index INTEGER,
+                method_name TEXT, raw_fingerprint TEXT, normalized_fingerprint TEXT,
+                method_fingerprint TEXT, blame_commit TEXT, blame_author_login TEXT,
+                sprint_id INTEGER);
+             CREATE TABLE team_sprint_ownership (project_id INTEGER, sprint_id INTEGER,
+                truck_factor INTEGER, owners_csv TEXT,
+                PRIMARY KEY (project_id, sprint_id));
              CREATE TABLE task_similarity_groups (group_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sprint_id INTEGER, project_id INTEGER, representative_task_id INTEGER,
                 group_label TEXT, stack TEXT, layer TEXT, action TEXT,
@@ -1786,6 +1844,40 @@ mod tests {
         assert!(body.contains("https://github.com/udg-pds/spring-foo/pull/42"));
         // Flag bullet
         assert!(body.contains("LOW_DOC_SCORE"));
+    }
+
+    #[test]
+    fn ownership_treemap_renders_when_fingerprints_exist() {
+        let conn = mk_conn();
+        // Two files, two owners — keeps the "Code ownership" section
+        // populated and the truck factor non-trivial.
+        conn.execute_batch(
+            "INSERT INTO github_users (login, student_id) VALUES ('alice-gh', 'u1');
+             INSERT INTO students (id, full_name, github_login, team_project_id, email)
+                VALUES ('u2', 'Bob C', 'bob-gh', 1, 'b@ex.com');
+             INSERT INTO fingerprints (file_path, repo_full_name, statement_index,
+                raw_fingerprint, normalized_fingerprint, blame_author_login, sprint_id)
+                VALUES ('src/A.java', 'r', 0, 'ra', 'na', 'alice-gh', 10),
+                       ('src/A.java', 'r', 1, 'ra1', 'na1', 'alice-gh', 10),
+                       ('src/B.java', 'r', 0, 'rb', 'nb', 'bob-gh', 10);
+             INSERT INTO team_sprint_ownership (project_id, sprint_id, truck_factor, owners_csv)
+                VALUES (1, 10, 2, 'u1,u2');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("### Code ownership"),
+            "missing ownership heading"
+        );
+        assert!(
+            body.contains("Truck factor:** 2"),
+            "missing truck factor line"
+        );
+        // Treemap SVG embeds file paths as <title> tooltips.
+        assert!(body.contains("src/A.java"));
+        assert!(body.contains("src/B.java"));
     }
 
     #[test]

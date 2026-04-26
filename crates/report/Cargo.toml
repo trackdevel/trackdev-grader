@@ -18,6 +18,7 @@ tracing.workspace = true
 rusqlite.workspace = true
 rust_xlsxwriter = "0.94"
 sprint-grader-core = { path = "../core" }
+sprint-grader-repo-analysis = { path = "../repo_analysis" }
 
 [dev-dependencies]
 tempfile.workspace = true

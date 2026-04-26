@@ -1611,6 +1611,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sprint-grader-core",
+ "sprint-grader-repo-analysis",
  "tempfile",
  "thiserror 1.0.69",
  "tracing",

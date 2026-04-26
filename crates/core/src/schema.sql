@@ -700,6 +700,19 @@ CREATE INDEX IF NOT EXISTS idx_task_pull_requests_pr_id
 CREATE INDEX IF NOT EXISTS idx_pr_line_metrics_merge_sha
     ON pr_line_metrics(pr_id, merge_sha);
 
+-- Per-team ownership snapshot (T-P2.3). `truck_factor` is the smallest k
+-- such that the top-k authors jointly own >=95% of statements attributed in
+-- the project's fingerprints for this sprint. `owners_csv` lists those k
+-- student_ids in descending share order. Both columns are NULL when the
+-- project has no fingerprints yet (compile/survival did not produce data).
+CREATE TABLE IF NOT EXISTS team_sprint_ownership (
+    project_id   INTEGER NOT NULL,
+    sprint_id    INTEGER NOT NULL,
+    truck_factor INTEGER,
+    owners_csv   TEXT,
+    PRIMARY KEY (project_id, sprint_id)
+);
+
 CREATE TABLE IF NOT EXISTS student_sprint_ai_usage (
     student_id              TEXT NOT NULL,
     sprint_id               INTEGER NOT NULL,

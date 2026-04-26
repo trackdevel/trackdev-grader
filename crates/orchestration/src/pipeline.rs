@@ -342,6 +342,11 @@ fn run_project_stage_block(
         )
         .map(|_| ())
     });
+    // Ownership snapshot (T-P2.3): truck factor + per-file dominant author.
+    // Reads `fingerprints`, so depends on survival having populated them.
+    stage("ownership", &mut || {
+        sprint_grader_repo_analysis::compute_team_ownership(&conn, sprint_id).map(|_| ())
+    });
 
     ProjectResult {
         sprint_id,
