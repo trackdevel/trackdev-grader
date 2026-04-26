@@ -265,6 +265,11 @@ Tables fall into a few groups:
 - **Estimation** — `student_estimation_bias` (T-P2.1; per-student β_u
   posterior fitted by the `estimation` crate from log-points and
   per-task difficulty δ_i, with N(0,1) priors and a mean-β=0 gauge).
+- **Mutation testing** — `pr_mutation` (T-P2.4; one row per (PR, repo)
+  with `(mutants_total, mutants_killed, mutation_score, duration_seconds)`
+  parsed from Pitest's `mutations.xml`; populated only when
+  `[mutation] enabled = true` and the matching build profile has a
+  `mutation_command`).
 - **Audit** — `pipeline_run` (T-P2.6: one row per `run_pipeline` invocation;
   records the seed, jitter %, and the realised threshold map when
   `[grading] hidden_thresholds = true`).
@@ -336,6 +341,17 @@ types changed behaviour during the P0/P1 wave and warrant calling out:
   under-estimates (▼). The cumulative student summary in Section A
   prints the realised β_u with the directional symbol; `≈` denotes a
   calibrated student whose CrI does not clear the margin.
+- **`LOW_MUTATION_SCORE`** (per-PR, attributed to the PR author)
+  surfaces PRs whose Pitest mutation score is below the configured
+  thresholds: WARNING below `[mutation] warning_threshold` (default
+  0.30) and INFO below `info_threshold` (default 0.50) (T-P2.4). PRs
+  with no `pr_mutation` row (mutation testing disabled or the profile
+  has no `mutation_command`) and PRs with a NULL `mutation_score`
+  (every mutant non-viable, or the run timed out) are silently
+  skipped — we don't grade what we couldn't measure. Enable with
+  `[mutation] enabled = true` and per-profile
+  `mutation_command = "./gradlew pitest --info"` (or your build
+  tool's equivalent in `scmMutationCoverage` mode).
 
 ## Subcommand reference
 

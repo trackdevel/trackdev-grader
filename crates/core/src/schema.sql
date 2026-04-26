@@ -760,6 +760,26 @@ CREATE TABLE IF NOT EXISTS team_sprint_ownership (
     PRIMARY KEY (project_id, sprint_id)
 );
 
+-- Per-PR mutation-testing summary (T-P2.4). Populated by the
+-- `compile_stage` builder when the matching `BuildProfile` sets
+-- `mutation_command` (typically `./gradlew pitest --info` for the
+-- Pitest Gradle plugin in `scmMutationCoverage` mode). One row per
+-- (PR, repo); subsequent runs `INSERT OR REPLACE`. `mutation_score`
+-- is `(killed + timed_out) / (total − non_viable)` in `[0, 1]` —
+-- non-viable mutants don't compile so they're excluded from the
+-- denominator. `duration_seconds` measures the mutation run only,
+-- not the primary build.
+CREATE TABLE IF NOT EXISTS pr_mutation (
+    pr_id            TEXT NOT NULL,
+    repo_name        TEXT NOT NULL,
+    sprint_id        INTEGER,
+    mutants_total    INTEGER,
+    mutants_killed   INTEGER,
+    mutation_score   REAL,
+    duration_seconds REAL,
+    PRIMARY KEY (pr_id, repo_name)
+);
+
 -- Per-student estimation-bias posterior (T-P2.1). Fitted by the
 -- `estimation` crate via a Rasch-style additive model
 -- log(estimation_points) = β_u + δ_i + ε with N(0,1) priors. β > 0 means

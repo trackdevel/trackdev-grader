@@ -138,3 +138,17 @@ bulk_rename_line_floor = 50
 [grading]
 hidden_thresholds = false
 jitter_pct = 0.05
+
+# Mutation testing (T-P2.4). When `enabled = true` and a build profile
+# sets `mutation_command` (typically `./gradlew pitest --info` for the
+# Pitest Gradle plugin in `scmMutationCoverage` mode), the compile
+# stage runs the mutation command after a successful primary build and
+# parses the resulting `mutations.xml`. Per-PR rows go into
+# `pr_mutation` and feed the `LOW_MUTATION_SCORE` flag (WARNING below
+# `warning_threshold`, INFO below `info_threshold`). Default off
+# because mutation testing is slow; enable per-course once Pitest is
+# wired into the projects' Gradle builds.
+[mutation]
+enabled = false
+info_threshold = 0.50
+warning_threshold = 0.30

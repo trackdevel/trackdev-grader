@@ -32,6 +32,33 @@ pub struct Config {
     pub regularity: RegularityConfig,
     pub detector_thresholds: DetectorThresholdsConfig,
     pub grading: GradingConfig,
+    pub mutation: MutationConfig,
+}
+
+/// Mutation-testing config (T-P2.4). The actual mutation command lives
+/// per-profile on `BuildProfile.mutation_command`; this block holds the
+/// global on/off switch and the LOW_MUTATION_SCORE detector
+/// thresholds. Default `enabled = false` so existing courses don't
+/// accidentally pay the mutation-testing tax.
+#[derive(Debug, Clone, Copy)]
+pub struct MutationConfig {
+    pub enabled: bool,
+    /// LOW_MUTATION_SCORE fires INFO when mutation_score is below this
+    /// (default 0.50).
+    pub info_threshold: f64,
+    /// LOW_MUTATION_SCORE escalates to WARNING below this threshold
+    /// (default 0.30).
+    pub warning_threshold: f64,
+}
+
+impl Default for MutationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            info_threshold: 0.50,
+            warning_threshold: 0.30,
+        }
+    }
 }
 
 /// Anti-gaming config (T-P2.6). When `hidden_thresholds = true`, every
@@ -124,6 +151,19 @@ pub struct BuildProfile {
     pub timeout_seconds: u64,
     pub working_dir: String,
     pub env: HashMap<String, String>,
+    /// T-P2.4: when set, run after a successful primary build to mutate
+    /// only the lines changed by the PR. Typically `./gradlew pitest
+    /// --info` for the Pitest Gradle plugin in `scmMutationCoverage`
+    /// mode. `None` (the default) skips mutation testing for this
+    /// profile silently.
+    pub mutation_command: Option<String>,
+    /// T-P2.4: hard timeout for the mutation run. Mutation testing is
+    /// substantially slower than the primary build, so this defaults
+    /// higher than `timeout_seconds`.
+    pub mutation_timeout_seconds: u64,
+    /// T-P2.4: relative path (from `working_dir`) of the Pitest XML
+    /// report. Defaults to Pitest's standard output location.
+    pub mutation_report_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +270,8 @@ struct RawConfig {
     detector_thresholds: RawDetectorThresholds,
     #[serde(default)]
     grading: RawGrading,
+    #[serde(default)]
+    mutation: RawMutation,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -238,6 +280,16 @@ struct RawGrading {
     hidden_thresholds: bool,
     #[serde(default)]
     jitter_pct: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawMutation {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    info_threshold: Option<f64>,
+    #[serde(default)]
+    warning_threshold: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -337,10 +389,24 @@ struct RawBuildProfile {
     working_dir: String,
     #[serde(default)]
     env: HashMap<String, String>,
+    #[serde(default)]
+    mutation_command: Option<String>,
+    #[serde(default = "default_mutation_timeout_seconds")]
+    mutation_timeout_seconds: u64,
+    #[serde(default = "default_mutation_report_path")]
+    mutation_report_path: String,
 }
 
 fn default_working_dir() -> String {
     ".".to_string()
+}
+
+fn default_mutation_timeout_seconds() -> u64 {
+    600
+}
+
+fn default_mutation_report_path() -> String {
+    "build/reports/pitest/mutations.xml".to_string()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -410,6 +476,7 @@ impl Config {
             regularity: RegularityConfig::default(),
             detector_thresholds: DetectorThresholdsConfig::default(),
             grading: GradingConfig::default(),
+            mutation: MutationConfig::default(),
         }
     }
 
@@ -552,6 +619,9 @@ impl Config {
                 timeout_seconds: p.timeout_seconds,
                 working_dir: p.working_dir,
                 env: p.env,
+                mutation_command: p.mutation_command,
+                mutation_timeout_seconds: p.mutation_timeout_seconds,
+                mutation_report_path: p.mutation_report_path,
             })
             .collect();
 
@@ -661,6 +731,17 @@ impl Config {
             grading: GradingConfig {
                 hidden_thresholds: raw.grading.hidden_thresholds,
                 jitter_pct: raw.grading.jitter_pct.unwrap_or(0.0),
+            },
+            mutation: MutationConfig {
+                enabled: raw.mutation.enabled,
+                info_threshold: raw
+                    .mutation
+                    .info_threshold
+                    .unwrap_or(MutationConfig::default().info_threshold),
+                warning_threshold: raw
+                    .mutation
+                    .warning_threshold
+                    .unwrap_or(MutationConfig::default().warning_threshold),
             },
         })
     }

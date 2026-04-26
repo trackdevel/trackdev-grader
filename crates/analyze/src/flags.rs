@@ -2250,6 +2250,92 @@ fn estimation_bias(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
     Ok(flags)
 }
 
+/// LOW_MUTATION_SCORE (T-P2.4). Per-PR flag, attributed to the PR
+/// author. Severity escalates with mutation score:
+/// * `mutation_score < warning_threshold` (default 0.30) → WARNING
+/// * `mutation_score < info_threshold` (default 0.50)    → INFO
+///
+/// PRs with no Pitest run (no row in `pr_mutation`) are silently
+/// skipped — mutation testing is opt-in via `[mutation] enabled` and
+/// `BuildProfile.mutation_command`. PRs with a NULL `mutation_score`
+/// (every mutant non-viable, or the run timed out) also skip — we
+/// don't grade what we couldn't measure.
+fn low_mutation_score(
+    conn: &Connection,
+    sprint_id: i64,
+    info_thresh: f64,
+    warning_thresh: f64,
+) -> rusqlite::Result<Vec<Flag>> {
+    let mut stmt = conn.prepare(
+        "SELECT pm.pr_id, pm.mutation_score, pm.mutants_total, pm.mutants_killed,
+                pr.pr_number, pr.author_id, pr.title, pr.url, pr.repo_full_name
+         FROM pr_mutation pm
+         JOIN pull_requests pr ON pr.id = pm.pr_id
+         WHERE pm.sprint_id = ? AND pm.mutation_score IS NOT NULL",
+    )?;
+    struct MutationRow {
+        score: f64,
+        total: Option<i64>,
+        killed: Option<i64>,
+        pr_number: Option<i64>,
+        author_id: Option<String>,
+        title: Option<String>,
+        url: Option<String>,
+        repo: Option<String>,
+    }
+    let rows: Vec<MutationRow> = stmt
+        .query_map([sprint_id], |r| {
+            Ok(MutationRow {
+                score: r.get::<_, f64>(1)?,
+                total: r.get::<_, Option<i64>>(2)?,
+                killed: r.get::<_, Option<i64>>(3)?,
+                pr_number: r.get::<_, Option<i64>>(4)?,
+                author_id: r.get::<_, Option<String>>(5)?,
+                title: r.get::<_, Option<String>>(6)?,
+                url: r.get::<_, Option<String>>(7)?,
+                repo: r.get::<_, Option<String>>(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    let mut flags = Vec::new();
+    for row in rows {
+        let MutationRow {
+            score,
+            total,
+            killed,
+            pr_number,
+            author_id,
+            title,
+            url,
+            repo,
+        } = row;
+        let Some(sid) = author_id else { continue };
+        let severity = if score < warning_thresh {
+            "WARNING"
+        } else if score < info_thresh {
+            "INFO"
+        } else {
+            continue;
+        };
+        flags.push(Flag {
+            student_id: sid,
+            flag_type: "LOW_MUTATION_SCORE",
+            severity,
+            details: json!({
+                "pr_number": pr_number,
+                "pr_title": title,
+                "pr_url": url,
+                "repo": repo,
+                "mutation_score": score,
+                "mutants_total": total,
+                "mutants_killed": killed,
+            }),
+        });
+    }
+    Ok(flags)
+}
+
 // ---- Dispatcher ----
 
 fn persist_flags(conn: &Connection, sprint_id: i64, flags: &[Flag]) -> rusqlite::Result<()> {
@@ -2356,6 +2442,15 @@ pub fn detect_flags_for_sprint_id(
     );
     total += run!("ARCHITECTURE_DRIFT", architecture_drift(conn, sprint_id));
     total += run!("ESTIMATION_BIAS", estimation_bias(conn, sprint_id));
+    total += run!(
+        "LOW_MUTATION_SCORE",
+        low_mutation_score(
+            conn,
+            sprint_id,
+            config.mutation.info_threshold,
+            config.mutation.warning_threshold
+        )
+    );
 
     // Config-dependent detector.
     total += run!(

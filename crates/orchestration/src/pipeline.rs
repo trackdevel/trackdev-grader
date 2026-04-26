@@ -242,6 +242,7 @@ fn run_project_stage_block(
             let max_parallel = config.build.max_parallel_builds as usize;
             let stderr_cap = config.build.stderr_max_chars as usize;
             let skip_tested = config.build.skip_already_tested;
+            let mutation_enabled = config.mutation.enabled;
             stage("compile", &mut || {
                 sprint_grader_compile::check_sprint_compilations_parallel(
                     &conn,
@@ -251,6 +252,7 @@ fn run_project_stage_block(
                     max_parallel,
                     stderr_cap,
                     skip_tested,
+                    mutation_enabled,
                 )?;
                 sprint_grader_compile::summarize_compilation(&conn, sid)?;
                 Ok(())

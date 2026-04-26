@@ -434,6 +434,7 @@ fn main() -> Result<()> {
                         config.build.max_parallel_builds as usize,
                         config.build.stderr_max_chars as usize,
                         skip_tested,
+                        config.mutation.enabled,
                     )
                     .with_context(|| format!("compile failed for sprint_id {sid}"))?;
                     sprint_grader_compile::summarize_compilation(&db.conn, *sid)
