@@ -1,0 +1,33 @@
+[package]
+name = "sprint-grader-blackbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+regex = "1"
+assert_cmd = "2"
+sprint-grader-core = { path = "../core" }
+
+[dev-dependencies]
+predicates = "3"
+insta = { version = "1", features = ["filters"] }
+sprint-grader-analyze = { path = "../analyze" }
+sprint-grader-compile = { path = "../compile_stage" }
+sprint-grader-estimation = { path = "../estimation" }
+sprint-grader-architecture = { path = "../architecture" }
+sprint-grader-report = { path = "../report" }
+sprint-grader-evaluate = { path = "../evaluate" }
+sprint-grader-process = { path = "../process_stage" }
+sprint-grader-repo-analysis = { path = "../repo_analysis" }
+sprint-grader-curriculum = { path = "../curriculum" }
