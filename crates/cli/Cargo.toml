@@ -1,0 +1,32 @@
+[package]
+name = "sprint-grader-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sprint-grader"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rusqlite.workspace = true
+sprint-grader-core = { path = "../core" }
+sprint-grader-collect = { path = "../collect" }
+sprint-grader-survival = { path = "../survival" }
+sprint-grader-compile = { path = "../compile_stage" }
+sprint-grader-analyze = { path = "../analyze" }
+sprint-grader-evaluate = { path = "../evaluate" }
+sprint-grader-quality = { path = "../quality" }
+sprint-grader-process = { path = "../process_stage" }
+sprint-grader-curriculum = { path = "../curriculum" }
+sprint-grader-repo-analysis = { path = "../repo_analysis" }
+sprint-grader-ai-detect = { path = "../ai_detect" }
+sprint-grader-report = { path = "../report" }
+sprint-grader-orchestration = { path = "../orchestration" }

@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+/data
+Cargo.lock.bak
+CLAUDE.md
+*.code-workspace
+.vscode/
+.idea/
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+*.env

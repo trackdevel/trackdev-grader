@@ -1,0 +1,20 @@
+[package]
+name = "sprint-grader-process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+sprint-grader-core = { path = "../core" }
+petgraph = "0.6"

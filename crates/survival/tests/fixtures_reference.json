@@ -1,0 +1,1343 @@
+[
+  {
+    "file": "EdgeCases.java",
+    "language": "java",
+    "statement_count": 26,
+    "method_count": 9,
+    "statements": [
+      {
+        "idx": 0,
+        "method": null,
+        "start_line": 1,
+        "end_line": 1,
+        "raw_fp": "b58329d75f26db577544660579d817cac2fef4efca35d5b44bab281d71c6168f",
+        "normalized_fp": "b58329d75f26db577544660579d817cac2fef4efca35d5b44bab281d71c6168f",
+        "normalized_text": "package com.example.edge;"
+      },
+      {
+        "idx": 1,
+        "method": null,
+        "start_line": 3,
+        "end_line": 3,
+        "raw_fp": "f837f73e7cb71342cb4588491329d98055ec86f5f86217b89cbd46627063b968",
+        "normalized_fp": "f837f73e7cb71342cb4588491329d98055ec86f5f86217b89cbd46627063b968",
+        "normalized_text": "import java.io.BufferedReader;"
+      },
+      {
+        "idx": 2,
+        "method": null,
+        "start_line": 4,
+        "end_line": 4,
+        "raw_fp": "8f26679198230af992d5ffdd029d58465680a753c4af3334fe62e32aedf922ac",
+        "normalized_fp": "8f26679198230af992d5ffdd029d58465680a753c4af3334fe62e32aedf922ac",
+        "normalized_text": "import java.io.FileReader;"
+      },
+      {
+        "idx": 3,
+        "method": "EdgeCases.oneLiner",
+        "start_line": 13,
+        "end_line": 13,
+        "raw_fp": "6a98d35093f15c84a9ccc34b0265e824ea49910551c181a250b362448204a253",
+        "normalized_fp": "c1e048916b90a0d418e385b767e148aa85bfea7b6e340cdd093f3aaa7193c6b3",
+        "normalized_text": "return _NUM_;"
+      },
+      {
+        "idx": 4,
+        "method": "EdgeCases.classify",
+        "start_line": 17,
+        "end_line": 25,
+        "raw_fp": "1dadcb7461da68d1a011a43c97e362a2f57c1ad5911e08d000d49e22503900b8",
+        "normalized_fp": "a3718798de72964b3d53d10a810054f59bd4ed69f06e39f47a770390f4984031",
+        "normalized_text": "if (_v0 < 0) { return \"_STR_\"; } else if (_v0 == 0) { return \"_STR_\"; } else if (_v0 < _NUM_) { return \"_STR_\"; } else { return \"_STR_\"; }"
+      },
+      {
+        "idx": 5,
+        "method": "EdgeCases.classify",
+        "start_line": 18,
+        "end_line": 18,
+        "raw_fp": "e2ba3eebf37c2524323596c02f1698605af271e20d2033e9a41fc0bc63a956f6",
+        "normalized_fp": "f658b0b1651294cc16f17c033acbc965d80cc3f6367c4cc9d564aabf4d4fb7be",
+        "normalized_text": "return \"_STR_\";"
+      },
+      {
+        "idx": 6,
+        "method": "EdgeCases.classify",
+        "start_line": 19,
+        "end_line": 25,
+        "raw_fp": "738e11fefc1c75faaf90ed7ca24cecac49d72c115a6ffca461d90b2de45e4b48",
+        "normalized_fp": "3affe162bd3828cad4ba2f898f0bf257f3e8ba832b242c1c1e8a5fbe8ccf30ea",
+        "normalized_text": "if (_v0 == 0) { return \"_STR_\"; } else if (_v0 < _NUM_) { return \"_STR_\"; } else { return \"_STR_\"; }"
+      },
+      {
+        "idx": 7,
+        "method": "EdgeCases.classify",
+        "start_line": 20,
+        "end_line": 20,
+        "raw_fp": "2719dbaf281f28db516766cb2641c8d97511f59548b7c26319859162202ee2c2",
+        "normalized_fp": "f658b0b1651294cc16f17c033acbc965d80cc3f6367c4cc9d564aabf4d4fb7be",
+        "normalized_text": "return \"_STR_\";"
+      },
+      {
+        "idx": 8,
+        "method": "EdgeCases.classify",
+        "start_line": 21,
+        "end_line": 25,
+        "raw_fp": "48aec7734e31b826cb46333cc63589ed8eaf2d2addb4b17f49b5f3a83072b9b2",
+        "normalized_fp": "c2bf7569eee5f76368d3bb72fcefdff4122b29f26d2586679e3c078061a7d97e",
+        "normalized_text": "if (_v0 < _NUM_) { return \"_STR_\"; } else { return \"_STR_\"; }"
+      },
+      {
+        "idx": 9,
+        "method": "EdgeCases.classify",
+        "start_line": 22,
+        "end_line": 22,
+        "raw_fp": "0124dc8ff5dc6600953ce2f324d38df343c84dbcae29524c3efa1298aa7087dd",
+        "normalized_fp": "f658b0b1651294cc16f17c033acbc965d80cc3f6367c4cc9d564aabf4d4fb7be",
+        "normalized_text": "return \"_STR_\";"
+      },
+      {
+        "idx": 10,
+        "method": "EdgeCases.classify",
+        "start_line": 24,
+        "end_line": 24,
+        "raw_fp": "1ca070a288cff664df9ed04514087272e48fdfda813e859cf107e5f81201f058",
+        "normalized_fp": "f658b0b1651294cc16f17c033acbc965d80cc3f6367c4cc9d564aabf4d4fb7be",
+        "normalized_text": "return \"_STR_\";"
+      },
+      {
+        "idx": 11,
+        "method": "EdgeCases.readFile",
+        "start_line": 30,
+        "end_line": 35,
+        "raw_fp": "a0504f81872587080cf07518980556609a9ca3e1c918aa79dc662bad541cbcfa",
+        "normalized_fp": "94fb903bffa7877b8f15c2ea8f50006d8ba35574a23a5166f6d6bea0d430f4bd",
+        "normalized_text": "try (BufferedReader _v1 = new BufferedReader(new FileReader(_v0))) { String _v2 = _v1.readLine(); return _v2; } catch (Exception _v3) { return null; }"
+      },
+      {
+        "idx": 12,
+        "method": "EdgeCases.readFile",
+        "start_line": 31,
+        "end_line": 31,
+        "raw_fp": "95ab758f087f9869d4e147fb3762b3dcbd7ee92ff787b91a2c509376e01e65c3",
+        "normalized_fp": "dbcfd0f8ffe47bfe355990f681b1a4398b720f4015fe7d9a0582c351684a54f5",
+        "normalized_text": "String _v2 = _v1.readLine();"
+      },
+      {
+        "idx": 13,
+        "method": "EdgeCases.readFile",
+        "start_line": 32,
+        "end_line": 32,
+        "raw_fp": "ac9816998db74dc8f15f4868b6292b9cceac6725bf1c4aa5b9625ee4ceff29a1",
+        "normalized_fp": "7d468d32323e2de5919fb4ddcff30ab162ad3c4f639aa54e48fb6b5f6301b61f",
+        "normalized_text": "return _v2;"
+      },
+      {
+        "idx": 14,
+        "method": "EdgeCases.readFile",
+        "start_line": 34,
+        "end_line": 34,
+        "raw_fp": "4ad2292cb6c5c2d31325739acfa4452421493ab7819e55fbaef0c55ac99bab33",
+        "normalized_fp": "4ad2292cb6c5c2d31325739acfa4452421493ab7819e55fbaef0c55ac99bab33",
+        "normalized_text": "return null;"
+      },
+      {
+        "idx": 15,
+        "method": "EdgeCases.dayName",
+        "start_line": 40,
+        "end_line": 44,
+        "raw_fp": "32ab41f0d7b233bec2456b68a928b548c6c61082f366864c93cbe36746db2e3d",
+        "normalized_fp": "3cde9ccfd8123c3c4ab6406eb41bcf0ea47e2115b9801de52c664d4bbe986a47",
+        "normalized_text": "switch (_v0) { case 1: return \"_STR_\"; case _NUM_: return \"_STR_\"; default: return \"_STR_\"; }"
+      },
+      {
+        "idx": 16,
+        "method": "EdgeCases.dayName",
+        "start_line": 41,
+        "end_line": 41,
+        "raw_fp": "7a7525dbadc1e909cfd69567705e2f070466eb82814f6d8ba62730168bc0d33f",
+        "normalized_fp": "f658b0b1651294cc16f17c033acbc965d80cc3f6367c4cc9d564aabf4d4fb7be",
+        "normalized_text": "return \"_STR_\";"
+      },
+      {
+        "idx": 17,
+        "method": "EdgeCases.dayName",
+        "start_line": 42,
+        "end_line": 42,
+        "raw_fp": "9e17d80673cf29db7f8bdce935d0a17859fe8f477af664a36ffc368ac91837da",
+        "normalized_fp": "f658b0b1651294cc16f17c033acbc965d80cc3f6367c4cc9d564aabf4d4fb7be",
+        "normalized_text": "return \"_STR_\";"
+      },
+      {
+        "idx": 18,
+        "method": "EdgeCases.dayName",
+        "start_line": 43,
+        "end_line": 43,
+        "raw_fp": "1a12cd386a83de44f095af397b08cdb62894ae1be2fff7b38e89fb5e88619f82",
+        "normalized_fp": "f658b0b1651294cc16f17c033acbc965d80cc3f6367c4cc9d564aabf4d4fb7be",
+        "normalized_text": "return \"_STR_\";"
+      },
+      {
+        "idx": 19,
+        "method": "EdgeCases.anonymousClass",
+        "start_line": 49,
+        "end_line": 55,
+        "raw_fp": "fd4041d5d4d4d80022d2aa2669f4c68941012e8318aa6a257e06213fc8539039",
+        "normalized_fp": "ce5dc00f733c31ccad8cafe0dcb8a99de907006275ffd254abe1d84a78106634",
+        "normalized_text": "Runnable _v0 = new Runnable() { @Override public void run() { int x = 1; System.out.println(x); } };"
+      },
+      {
+        "idx": 20,
+        "method": "EdgeCases.anonymousClass",
+        "start_line": 56,
+        "end_line": 56,
+        "raw_fp": "8d3ead58e1ced0967989c21f7ab455e2a3fecf9cf71e2c4086d8a97036ba0eef",
+        "normalized_fp": "84d89163a374c6bdcde3cf7c33356e077e0ee209babd5462f031d247f07c9b23",
+        "normalized_text": "_v0.run();"
+      },
+      {
+        "idx": 21,
+        "method": "EdgeCases.anonymousClass.Runnable.run",
+        "start_line": 52,
+        "end_line": 52,
+        "raw_fp": "b1b0343cdc338c1cb48ffa1c209b965d071e9baac0d96f8c3fb879ab8d3d60f5",
+        "normalized_fp": "3745407379e81b32d29667f8101ed8b7e0c049b20f9c20e6af9bcbefa83888cf",
+        "normalized_text": "int _v0 = 1;"
+      },
+      {
+        "idx": 22,
+        "method": "EdgeCases.anonymousClass.Runnable.run",
+        "start_line": 53,
+        "end_line": 53,
+        "raw_fp": "955500fe65a7477017df1785c486adedac8d46d515bc6846b98268bbcaab6807",
+        "normalized_fp": "4bd15bc42fc7edf8b6790587cc0e1b1d834a7d7c094eac5c6e7bd8881de39a99",
+        "normalized_text": "System.out.println(_v0);"
+      },
+      {
+        "idx": 23,
+        "method": "EdgeCases.<clinit>",
+        "start_line": 61,
+        "end_line": 61,
+        "raw_fp": "83b3e143b3001c3510625d1dc99a1f39ccd2f555811e01fb509ff014f267373b",
+        "normalized_fp": "7df3d771a70aa032a9005aedef42590484edf189311a3797c5df527a3a1c40ad",
+        "normalized_text": "System.out.println(\"_STR_\");"
+      },
+      {
+        "idx": 24,
+        "method": "EdgeCases.Status.ACTIVE.label",
+        "start_line": 68,
+        "end_line": 68,
+        "raw_fp": "7d1cbde8538717ccb0a2fb2ad39e4c3b27cd8f6f1a70759ca98fba196e205bc7",
+        "normalized_fp": "f658b0b1651294cc16f17c033acbc965d80cc3f6367c4cc9d564aabf4d4fb7be",
+        "normalized_text": "return \"_STR_\";"
+      },
+      {
+        "idx": 25,
+        "method": "EdgeCases.Status.INACTIVE.label",
+        "start_line": 72,
+        "end_line": 72,
+        "raw_fp": "4ed543dd811072a32c188f0dfe99630ecfe892ab633a183cd72825c7312fb6c0",
+        "normalized_fp": "f658b0b1651294cc16f17c033acbc965d80cc3f6367c4cc9d564aabf4d4fb7be",
+        "normalized_text": "return \"_STR_\";"
+      }
+    ],
+    "methods": [
+      {
+        "name": "EdgeCases.oneLiner",
+        "method_fp": "a53e4e6dd535825072a2e2a8150da0a10255c680577b7eebbc60a70ac34b9ef2"
+      },
+      {
+        "name": "EdgeCases.classify",
+        "method_fp": "3babafb77f5c4dd8c0cd4554ef2d1bd8e4bb230ddd6e6644947e32811982e987"
+      },
+      {
+        "name": "EdgeCases.readFile",
+        "method_fp": "ad3da463cdc951727f37409d7475a33bc10b8ac9edad11ccdcdce6a995ca6a68"
+      },
+      {
+        "name": "EdgeCases.dayName",
+        "method_fp": "dcf884de03590bb9059202bf753439c47d5cd3a31aaa509c178645aa563de96f"
+      },
+      {
+        "name": "EdgeCases.anonymousClass",
+        "method_fp": "9e9558c8b223ba0854d0a5a68950f2b9b643f951ef77fe6cef7989292bd6b104"
+      },
+      {
+        "name": "EdgeCases.anonymousClass.Runnable.run",
+        "method_fp": "e89a9eec258fa34eb909699796abb0449b248ff0aa77ca15b264e97f3a297744"
+      },
+      {
+        "name": "EdgeCases.<clinit>",
+        "method_fp": "d388c97262a3b4f947da0007fe96f8a463756c8df1a653b98212751f9ee954f7"
+      },
+      {
+        "name": "EdgeCases.Status.ACTIVE.label",
+        "method_fp": "b145d006b449d29937744ad914281fd3637eff15de356e72fb9ca053d67cb3a7"
+      },
+      {
+        "name": "EdgeCases.Status.INACTIVE.label",
+        "method_fp": "b145d006b449d29937744ad914281fd3637eff15de356e72fb9ca053d67cb3a7"
+      }
+    ]
+  },
+  {
+    "file": "Empty.java",
+    "language": "java",
+    "statement_count": 1,
+    "method_count": 0,
+    "statements": [
+      {
+        "idx": 0,
+        "method": null,
+        "start_line": 1,
+        "end_line": 1,
+        "raw_fp": "97aee30754d6020e1523f618cf79dc4b30d6a7e32636586a18bbddb8f2ed688c",
+        "normalized_fp": "97aee30754d6020e1523f618cf79dc4b30d6a7e32636586a18bbddb8f2ed688c",
+        "normalized_text": "package com.example.demo;"
+      }
+    ],
+    "methods": []
+  },
+  {
+    "file": "NormalizerA.java",
+    "language": "java",
+    "statement_count": 21,
+    "method_count": 4,
+    "statements": [
+      {
+        "idx": 0,
+        "method": null,
+        "start_line": 1,
+        "end_line": 1,
+        "raw_fp": "975a297f9a32571a3c13e660c9b522d34d0c292a4bc8e683eb7c381f6e558250",
+        "normalized_fp": "975a297f9a32571a3c13e660c9b522d34d0c292a4bc8e683eb7c381f6e558250",
+        "normalized_text": "package com.example.norm;"
+      },
+      {
+        "idx": 1,
+        "method": null,
+        "start_line": 3,
+        "end_line": 3,
+        "raw_fp": "f1ffd4ee5c3a62453b2190cdc167b73da6f6de9eb55cd7a2a1aafe454fd9b4fc",
+        "normalized_fp": "f1ffd4ee5c3a62453b2190cdc167b73da6f6de9eb55cd7a2a1aafe454fd9b4fc",
+        "normalized_text": "import java.util.ArrayList;"
+      },
+      {
+        "idx": 2,
+        "method": null,
+        "start_line": 4,
+        "end_line": 4,
+        "raw_fp": "c7bf8cb907acb4b0d6e6fddaf47d772c5f0336e85f853a81815767441d7dff94",
+        "normalized_fp": "c7bf8cb907acb4b0d6e6fddaf47d772c5f0336e85f853a81815767441d7dff94",
+        "normalized_text": "import java.util.List;"
+      },
+      {
+        "idx": 3,
+        "method": null,
+        "start_line": 8,
+        "end_line": 8,
+        "raw_fp": "e34d8a34ec08ad48c5e4a4144af9ae71fe1841748265c8a7bcdb23297bc2dd87",
+        "normalized_fp": "e34d8a34ec08ad48c5e4a4144af9ae71fe1841748265c8a7bcdb23297bc2dd87",
+        "normalized_text": "private String name;"
+      },
+      {
+        "idx": 4,
+        "method": "NormalizerA.compute",
+        "start_line": 11,
+        "end_line": 11,
+        "raw_fp": "314f2b658139ea4f8b09f88338533c997b76a06c27e6c0cbd12c625d31dda0f8",
+        "normalized_fp": "ef864b384e47f289a3ce59431c0bcf052715b385a6005e8c9708dd93e0955df7",
+        "normalized_text": "int _v2 = _v0 + _v1;"
+      },
+      {
+        "idx": 5,
+        "method": "NormalizerA.compute",
+        "start_line": 12,
+        "end_line": 14,
+        "raw_fp": "cf2200ef3987bf86da40d5da1726cde86a944764ad026ac44916b2de64b14ff2",
+        "normalized_fp": "47c25c2cc9e8ea6c2d4406089e375ee4e5ef2116090f2d60115a574a1b142cda",
+        "normalized_text": "if (_v2 > _NUM_) { return _NUM_; }"
+      },
+      {
+        "idx": 6,
+        "method": "NormalizerA.compute",
+        "start_line": 13,
+        "end_line": 13,
+        "raw_fp": "fce82e0e638e8e16cddc7270ed9d86e5fe4196ed0f527f5dd5244c4a5231e89f",
+        "normalized_fp": "c1e048916b90a0d418e385b767e148aa85bfea7b6e340cdd093f3aaa7193c6b3",
+        "normalized_text": "return _NUM_;"
+      },
+      {
+        "idx": 7,
+        "method": "NormalizerA.compute",
+        "start_line": 15,
+        "end_line": 15,
+        "raw_fp": "ec7211407632db1a6cfe3e9109236f58d4ac805a34358e5faf12d0ce13d5d5e7",
+        "normalized_fp": "b8318b0917bf6db36e4d14c334c22432d1028c45a620388f4b510bd12fc34771",
+        "normalized_text": "String _v3 = \"_STR_\" + _v2;"
+      },
+      {
+        "idx": 8,
+        "method": "NormalizerA.compute",
+        "start_line": 16,
+        "end_line": 16,
+        "raw_fp": "124c353e14f064fcafecbe40bc9856d55bf644c60b2cf224c34f3959af4e096f",
+        "normalized_fp": "3bbb4a9c409654ffd65a2783c687cedcc444524794f06229e96d2e29be702cc9",
+        "normalized_text": "System.out.println(_v3);"
+      },
+      {
+        "idx": 9,
+        "method": "NormalizerA.compute",
+        "start_line": 17,
+        "end_line": 17,
+        "raw_fp": "882101dd8697a52e0480af0873d4640b6bb8b487665fdc6013a1e87120badb76",
+        "normalized_fp": "7d468d32323e2de5919fb4ddcff30ab162ad3c4f639aa54e48fb6b5f6301b61f",
+        "normalized_text": "return _v2;"
+      },
+      {
+        "idx": 10,
+        "method": "NormalizerA.iterate",
+        "start_line": 21,
+        "end_line": 23,
+        "raw_fp": "fb9a61fa35d1cff5cea86695dfafcfbb78499a03dc52bbc4534317e8b3b748d4",
+        "normalized_fp": "45d25669886e684caf885ceb7ce5fd0a8bff91d719e8f259299cd0bd330f51fd",
+        "normalized_text": "for (String _v1 : _v0) { System.out.println(_v1); }"
+      },
+      {
+        "idx": 11,
+        "method": "NormalizerA.iterate",
+        "start_line": 22,
+        "end_line": 22,
+        "raw_fp": "bdabb7c618aba7e465bca45995fdffe3bde80303dc458d893ad69697ac48991c",
+        "normalized_fp": "fa77457a0bd8780582db1b76e0256ded3486d26abf3b1e4020b39b85de3ba853",
+        "normalized_text": "System.out.println(_v1);"
+      },
+      {
+        "idx": 12,
+        "method": "NormalizerA.iterate",
+        "start_line": 24,
+        "end_line": 24,
+        "raw_fp": "6e34f0a4cc7092cdeac9ce77f16e85d54eeafc7d742ce23734bd17499fa89123",
+        "normalized_fp": "e9b460d5104163879664d44a96514e09bd903f68ea13a518226e6a7a9c813fd7",
+        "normalized_text": "int _v2 = _v0.size();"
+      },
+      {
+        "idx": 13,
+        "method": "NormalizerA.iterate",
+        "start_line": 25,
+        "end_line": 25,
+        "raw_fp": "bf58f27ed98d009fc2c6a4cb2bf07733e172572ece7bffed26ff1ccebc969781",
+        "normalized_fp": "87530370b3b06a13e43d1c86b61bbb74b33bd5d8fe47fd843c52597114ba38ca",
+        "normalized_text": "System.out.println(_v2);"
+      },
+      {
+        "idx": 14,
+        "method": "NormalizerA.tryCatch",
+        "start_line": 29,
+        "end_line": 34,
+        "raw_fp": "32fa47636411e0ccea59c00be7b180f976eb3eb28110126105b9e545a7a814a4",
+        "normalized_fp": "65c236ef35967531c50c9a7d32f3d50df97dd3ee57a5774ba638eb01d8e71334",
+        "normalized_text": "try { int _v0 = Integer.parseInt(\"_STR_\"); System.out.println(_v0); } catch (NumberFormatException _v1) { System.err.println(_v1.getMessage()); }"
+      },
+      {
+        "idx": 15,
+        "method": "NormalizerA.tryCatch",
+        "start_line": 30,
+        "end_line": 30,
+        "raw_fp": "1b73c2884f0f0aee95a9cd86d869e76a5bbfb3fdd3a45e4058392d4e783b65b1",
+        "normalized_fp": "0d43914656581855913d1ac9dd3f4bfdd33f524e3bed6e94c79b62f5c5e5df4a",
+        "normalized_text": "int _v0 = Integer.parseInt(\"_STR_\");"
+      },
+      {
+        "idx": 16,
+        "method": "NormalizerA.tryCatch",
+        "start_line": 31,
+        "end_line": 31,
+        "raw_fp": "22472cc010bbeec0b57d5f26d5eaa6c4d62424cdd9216b309c3a6f24a46ba8f6",
+        "normalized_fp": "4bd15bc42fc7edf8b6790587cc0e1b1d834a7d7c094eac5c6e7bd8881de39a99",
+        "normalized_text": "System.out.println(_v0);"
+      },
+      {
+        "idx": 17,
+        "method": "NormalizerA.tryCatch",
+        "start_line": 33,
+        "end_line": 33,
+        "raw_fp": "7221119c93a9eb74ef6bc4d35ac0e3b24a5d5903ce36460a9b91e56cb850e12d",
+        "normalized_fp": "5c30fb3186bb84eb948ce0351f52ff81c44d0db5cb5ce221ae1d9f9f21e0f5d8",
+        "normalized_text": "System.err.println(_v1.getMessage());"
+      },
+      {
+        "idx": 18,
+        "method": "NormalizerA.withLambda",
+        "start_line": 38,
+        "end_line": 38,
+        "raw_fp": "e26176fc7dd997b4c49c4f5119a4f514a93b9da4d98f5809ffb0698d72e08478",
+        "normalized_fp": "cf9d8fbf23ea4f915d5ffc2ac64ff62bff798571c065e9950ec80c95651319a4",
+        "normalized_text": "_v0.forEach(_v1 -> System.out.println(_v1));"
+      },
+      {
+        "idx": 19,
+        "method": "NormalizerA.withLambda",
+        "start_line": 39,
+        "end_line": 39,
+        "raw_fp": "0677dafe08da6c7a09c74d3b27c78c0127ad7a49b54e50cd2c3c99092012d3c4",
+        "normalized_fp": "7c6ac0d2bf796b15668ea67c6acbac32a2a8854af3723431077e4b9ced5161d1",
+        "normalized_text": "List<String> _v2 = new ArrayList<>();"
+      },
+      {
+        "idx": 20,
+        "method": "NormalizerA.withLambda",
+        "start_line": 40,
+        "end_line": 42,
+        "raw_fp": "fe52a08cd0aef06f650c4f87eaa9f1ee5b6841fb6b9a9c11a65901b449058c8d",
+        "normalized_fp": "b28107c9ba1b7cf35478922b6d7a0c7075bae3f6b7930a7354d52e71dcd87755",
+        "normalized_text": "_v0.stream() .filter(_v3 -> _v3.length() > _NUM_) .forEach(_v3 -> _v2.add(_v3));"
+      }
+    ],
+    "methods": [
+      {
+        "name": "NormalizerA.compute",
+        "method_fp": "d4ea392472d7d65279cd2619cfde0d19fcbad807a9ddfe9406c8db607b64d1b0"
+      },
+      {
+        "name": "NormalizerA.iterate",
+        "method_fp": "0a4db5b8aefc450adfb8634baff19086ea071b7f0000ebb287a08c8833062f9f"
+      },
+      {
+        "name": "NormalizerA.tryCatch",
+        "method_fp": "86d5bcda6259a2e7447ac709ad618c505016242a9e12571232907396cb2bbd65"
+      },
+      {
+        "name": "NormalizerA.withLambda",
+        "method_fp": "ed39f1969a6a9a4a3a231a9e5acf3bbf33595180ddae7db2abbabd67343566ab"
+      }
+    ]
+  },
+  {
+    "file": "NormalizerB.java",
+    "language": "java",
+    "statement_count": 21,
+    "method_count": 4,
+    "statements": [
+      {
+        "idx": 0,
+        "method": null,
+        "start_line": 1,
+        "end_line": 1,
+        "raw_fp": "975a297f9a32571a3c13e660c9b522d34d0c292a4bc8e683eb7c381f6e558250",
+        "normalized_fp": "975a297f9a32571a3c13e660c9b522d34d0c292a4bc8e683eb7c381f6e558250",
+        "normalized_text": "package com.example.norm;"
+      },
+      {
+        "idx": 1,
+        "method": null,
+        "start_line": 3,
+        "end_line": 3,
+        "raw_fp": "f1ffd4ee5c3a62453b2190cdc167b73da6f6de9eb55cd7a2a1aafe454fd9b4fc",
+        "normalized_fp": "f1ffd4ee5c3a62453b2190cdc167b73da6f6de9eb55cd7a2a1aafe454fd9b4fc",
+        "normalized_text": "import java.util.ArrayList;"
+      },
+      {
+        "idx": 2,
+        "method": null,
+        "start_line": 4,
+        "end_line": 4,
+        "raw_fp": "c7bf8cb907acb4b0d6e6fddaf47d772c5f0336e85f853a81815767441d7dff94",
+        "normalized_fp": "c7bf8cb907acb4b0d6e6fddaf47d772c5f0336e85f853a81815767441d7dff94",
+        "normalized_text": "import java.util.List;"
+      },
+      {
+        "idx": 3,
+        "method": null,
+        "start_line": 8,
+        "end_line": 8,
+        "raw_fp": "e34d8a34ec08ad48c5e4a4144af9ae71fe1841748265c8a7bcdb23297bc2dd87",
+        "normalized_fp": "e34d8a34ec08ad48c5e4a4144af9ae71fe1841748265c8a7bcdb23297bc2dd87",
+        "normalized_text": "private String name;"
+      },
+      {
+        "idx": 4,
+        "method": "NormalizerB.compute",
+        "start_line": 12,
+        "end_line": 12,
+        "raw_fp": "d646cc1ee9025cf5ba6b360792137e2501f66dc3721f7b3e45b4d5fce7a12bd7",
+        "normalized_fp": "ef864b384e47f289a3ce59431c0bcf052715b385a6005e8c9708dd93e0955df7",
+        "normalized_text": "int _v2 = _v0 + _v1;"
+      },
+      {
+        "idx": 5,
+        "method": "NormalizerB.compute",
+        "start_line": 13,
+        "end_line": 15,
+        "raw_fp": "47ea002c5689caffa7e53337366135ee047550840a86d530128fb090aaec11d2",
+        "normalized_fp": "47c25c2cc9e8ea6c2d4406089e375ee4e5ef2116090f2d60115a574a1b142cda",
+        "normalized_text": "if (_v2 > _NUM_) { return _NUM_; }"
+      },
+      {
+        "idx": 6,
+        "method": "NormalizerB.compute",
+        "start_line": 14,
+        "end_line": 14,
+        "raw_fp": "fce82e0e638e8e16cddc7270ed9d86e5fe4196ed0f527f5dd5244c4a5231e89f",
+        "normalized_fp": "c1e048916b90a0d418e385b767e148aa85bfea7b6e340cdd093f3aaa7193c6b3",
+        "normalized_text": "return _NUM_;"
+      },
+      {
+        "idx": 7,
+        "method": "NormalizerB.compute",
+        "start_line": 16,
+        "end_line": 16,
+        "raw_fp": "bcc8b00f9736fe08a716adc93315870f48546796787419dd47a14b6e90fb01ce",
+        "normalized_fp": "b8318b0917bf6db36e4d14c334c22432d1028c45a620388f4b510bd12fc34771",
+        "normalized_text": "String _v3 = \"_STR_\" + _v2;"
+      },
+      {
+        "idx": 8,
+        "method": "NormalizerB.compute",
+        "start_line": 17,
+        "end_line": 17,
+        "raw_fp": "303257ca08287ea41d1bfb1f0e95fe1d01889ab53be3606658e535407443653f",
+        "normalized_fp": "3bbb4a9c409654ffd65a2783c687cedcc444524794f06229e96d2e29be702cc9",
+        "normalized_text": "System.out.println(_v3);"
+      },
+      {
+        "idx": 9,
+        "method": "NormalizerB.compute",
+        "start_line": 18,
+        "end_line": 18,
+        "raw_fp": "cba0189786e98d37eaa2812c9028cb1fde5edaa59dbf3be2d0e13144a7109545",
+        "normalized_fp": "7d468d32323e2de5919fb4ddcff30ab162ad3c4f639aa54e48fb6b5f6301b61f",
+        "normalized_text": "return _v2;"
+      },
+      {
+        "idx": 10,
+        "method": "NormalizerB.iterate",
+        "start_line": 23,
+        "end_line": 25,
+        "raw_fp": "4e38bfe553f8422b550e9906792fbcc4f5582b156d5753fa712d346ae69b199a",
+        "normalized_fp": "45d25669886e684caf885ceb7ce5fd0a8bff91d719e8f259299cd0bd330f51fd",
+        "normalized_text": "for (String _v1 : _v0) { System.out.println(_v1); }"
+      },
+      {
+        "idx": 11,
+        "method": "NormalizerB.iterate",
+        "start_line": 24,
+        "end_line": 24,
+        "raw_fp": "a3e860be0f33463cc51a4fc2fd69534caaaca059fbcb8faf1c554d7e9e362044",
+        "normalized_fp": "fa77457a0bd8780582db1b76e0256ded3486d26abf3b1e4020b39b85de3ba853",
+        "normalized_text": "System.out.println(_v1);"
+      },
+      {
+        "idx": 12,
+        "method": "NormalizerB.iterate",
+        "start_line": 26,
+        "end_line": 26,
+        "raw_fp": "45edf91fb554ada302b69abf07b3aae077a98e3156dbb4f7a7f7df71b09d9dca",
+        "normalized_fp": "e9b460d5104163879664d44a96514e09bd903f68ea13a518226e6a7a9c813fd7",
+        "normalized_text": "int _v2 = _v0.size();"
+      },
+      {
+        "idx": 13,
+        "method": "NormalizerB.iterate",
+        "start_line": 27,
+        "end_line": 27,
+        "raw_fp": "5091db655f92b90dc31f11b5c2d744aaeeed06ad24518a8cc4be3db2033f79e2",
+        "normalized_fp": "87530370b3b06a13e43d1c86b61bbb74b33bd5d8fe47fd843c52597114ba38ca",
+        "normalized_text": "System.out.println(_v2);"
+      },
+      {
+        "idx": 14,
+        "method": "NormalizerB.tryCatch",
+        "start_line": 32,
+        "end_line": 37,
+        "raw_fp": "660639b05a20f87b7f17d6bda3c90fcef8d2ac9a5c5ff50275a22a0450aa7831",
+        "normalized_fp": "65c236ef35967531c50c9a7d32f3d50df97dd3ee57a5774ba638eb01d8e71334",
+        "normalized_text": "try { int _v0 = Integer.parseInt(\"_STR_\"); System.out.println(_v0); } catch (NumberFormatException _v1) { System.err.println(_v1.getMessage()); }"
+      },
+      {
+        "idx": 15,
+        "method": "NormalizerB.tryCatch",
+        "start_line": 33,
+        "end_line": 33,
+        "raw_fp": "a4b4a343d7ba231f013a84cf675df0b64f8c39357dcfec556a21952af123cfa1",
+        "normalized_fp": "0d43914656581855913d1ac9dd3f4bfdd33f524e3bed6e94c79b62f5c5e5df4a",
+        "normalized_text": "int _v0 = Integer.parseInt(\"_STR_\");"
+      },
+      {
+        "idx": 16,
+        "method": "NormalizerB.tryCatch",
+        "start_line": 34,
+        "end_line": 34,
+        "raw_fp": "f24d1692f820eeb0043e0b1bcef93c0bf8dc2257ee30cf34a8e1d8207e97084c",
+        "normalized_fp": "4bd15bc42fc7edf8b6790587cc0e1b1d834a7d7c094eac5c6e7bd8881de39a99",
+        "normalized_text": "System.out.println(_v0);"
+      },
+      {
+        "idx": 17,
+        "method": "NormalizerB.tryCatch",
+        "start_line": 36,
+        "end_line": 36,
+        "raw_fp": "9bf48a9dffee9faa238fd0fd8fb59f5542d8d45843c995fa7ed223caa34092b2",
+        "normalized_fp": "5c30fb3186bb84eb948ce0351f52ff81c44d0db5cb5ce221ae1d9f9f21e0f5d8",
+        "normalized_text": "System.err.println(_v1.getMessage());"
+      },
+      {
+        "idx": 18,
+        "method": "NormalizerB.withLambda",
+        "start_line": 45,
+        "end_line": 45,
+        "raw_fp": "e85041e48817b94187222fa4056addcc00e69270fbb433dd92527ba8554bd301",
+        "normalized_fp": "cf9d8fbf23ea4f915d5ffc2ac64ff62bff798571c065e9950ec80c95651319a4",
+        "normalized_text": "_v0.forEach(_v1 -> System.out.println(_v1));"
+      },
+      {
+        "idx": 19,
+        "method": "NormalizerB.withLambda",
+        "start_line": 46,
+        "end_line": 46,
+        "raw_fp": "aab29642327ebe5002d0fdc3c9ec6e73f71d5237918b2fd3162c0988371057be",
+        "normalized_fp": "7c6ac0d2bf796b15668ea67c6acbac32a2a8854af3723431077e4b9ced5161d1",
+        "normalized_text": "List<String> _v2 = new ArrayList<>();"
+      },
+      {
+        "idx": 20,
+        "method": "NormalizerB.withLambda",
+        "start_line": 47,
+        "end_line": 49,
+        "raw_fp": "d4a55ec1693fdbef2acfa218fbb9a3749f369a988b888469d8fef33be24b1faa",
+        "normalized_fp": "b28107c9ba1b7cf35478922b6d7a0c7075bae3f6b7930a7354d52e71dcd87755",
+        "normalized_text": "_v0.stream() .filter(_v3 -> _v3.length() > _NUM_) .forEach(_v3 -> _v2.add(_v3));"
+      }
+    ],
+    "methods": [
+      {
+        "name": "NormalizerB.compute",
+        "method_fp": "d4ea392472d7d65279cd2619cfde0d19fcbad807a9ddfe9406c8db607b64d1b0"
+      },
+      {
+        "name": "NormalizerB.iterate",
+        "method_fp": "0a4db5b8aefc450adfb8634baff19086ea071b7f0000ebb287a08c8833062f9f"
+      },
+      {
+        "name": "NormalizerB.tryCatch",
+        "method_fp": "86d5bcda6259a2e7447ac709ad618c505016242a9e12571232907396cb2bbd65"
+      },
+      {
+        "name": "NormalizerB.withLambda",
+        "method_fp": "ed39f1969a6a9a4a3a231a9e5acf3bbf33595180ddae7db2abbabd67343566ab"
+      }
+    ]
+  },
+  {
+    "file": "NormalizerC.java",
+    "language": "java",
+    "statement_count": 14,
+    "method_count": 2,
+    "statements": [
+      {
+        "idx": 0,
+        "method": null,
+        "start_line": 1,
+        "end_line": 1,
+        "raw_fp": "975a297f9a32571a3c13e660c9b522d34d0c292a4bc8e683eb7c381f6e558250",
+        "normalized_fp": "975a297f9a32571a3c13e660c9b522d34d0c292a4bc8e683eb7c381f6e558250",
+        "normalized_text": "package com.example.norm;"
+      },
+      {
+        "idx": 1,
+        "method": null,
+        "start_line": 3,
+        "end_line": 3,
+        "raw_fp": "f1ffd4ee5c3a62453b2190cdc167b73da6f6de9eb55cd7a2a1aafe454fd9b4fc",
+        "normalized_fp": "f1ffd4ee5c3a62453b2190cdc167b73da6f6de9eb55cd7a2a1aafe454fd9b4fc",
+        "normalized_text": "import java.util.ArrayList;"
+      },
+      {
+        "idx": 2,
+        "method": null,
+        "start_line": 4,
+        "end_line": 4,
+        "raw_fp": "c7bf8cb907acb4b0d6e6fddaf47d772c5f0336e85f853a81815767441d7dff94",
+        "normalized_fp": "c7bf8cb907acb4b0d6e6fddaf47d772c5f0336e85f853a81815767441d7dff94",
+        "normalized_text": "import java.util.List;"
+      },
+      {
+        "idx": 3,
+        "method": null,
+        "start_line": 8,
+        "end_line": 8,
+        "raw_fp": "e34d8a34ec08ad48c5e4a4144af9ae71fe1841748265c8a7bcdb23297bc2dd87",
+        "normalized_fp": "e34d8a34ec08ad48c5e4a4144af9ae71fe1841748265c8a7bcdb23297bc2dd87",
+        "normalized_text": "private String name;"
+      },
+      {
+        "idx": 4,
+        "method": "NormalizerC.compute",
+        "start_line": 13,
+        "end_line": 13,
+        "raw_fp": "1240b3f3a5c37a52896c4ec79ac09b054319c9028438a55113b332e823fbb595",
+        "normalized_fp": "d6f225c0fbcd5b6dcedbb1fa1d517bcb5c3871fdb665dc5f659207f0d8ed7b0d",
+        "normalized_text": "int _v2 = _v0 * _v1;"
+      },
+      {
+        "idx": 5,
+        "method": "NormalizerC.compute",
+        "start_line": 14,
+        "end_line": 16,
+        "raw_fp": "09130771a91b4364522614246ab1d240be1a982a334626eec5b9ef64bd9057e0",
+        "normalized_fp": "7df05db241a7ce6ae2d9042ad12669c4656ed968d6343631111692a48335d21e",
+        "normalized_text": "if (_v2 >= _NUM_) { return _v2; }"
+      },
+      {
+        "idx": 6,
+        "method": "NormalizerC.compute",
+        "start_line": 15,
+        "end_line": 15,
+        "raw_fp": "882101dd8697a52e0480af0873d4640b6bb8b487665fdc6013a1e87120badb76",
+        "normalized_fp": "7d468d32323e2de5919fb4ddcff30ab162ad3c4f639aa54e48fb6b5f6301b61f",
+        "normalized_text": "return _v2;"
+      },
+      {
+        "idx": 7,
+        "method": "NormalizerC.compute",
+        "start_line": 17,
+        "end_line": 17,
+        "raw_fp": "ec7211407632db1a6cfe3e9109236f58d4ac805a34358e5faf12d0ce13d5d5e7",
+        "normalized_fp": "b8318b0917bf6db36e4d14c334c22432d1028c45a620388f4b510bd12fc34771",
+        "normalized_text": "String _v3 = \"_STR_\" + _v2;"
+      },
+      {
+        "idx": 8,
+        "method": "NormalizerC.compute",
+        "start_line": 18,
+        "end_line": 18,
+        "raw_fp": "124c353e14f064fcafecbe40bc9856d55bf644c60b2cf224c34f3959af4e096f",
+        "normalized_fp": "3bbb4a9c409654ffd65a2783c687cedcc444524794f06229e96d2e29be702cc9",
+        "normalized_text": "System.out.println(_v3);"
+      },
+      {
+        "idx": 9,
+        "method": "NormalizerC.compute",
+        "start_line": 19,
+        "end_line": 19,
+        "raw_fp": "882101dd8697a52e0480af0873d4640b6bb8b487665fdc6013a1e87120badb76",
+        "normalized_fp": "7d468d32323e2de5919fb4ddcff30ab162ad3c4f639aa54e48fb6b5f6301b61f",
+        "normalized_text": "return _v2;"
+      },
+      {
+        "idx": 10,
+        "method": "NormalizerC.iterate",
+        "start_line": 24,
+        "end_line": 26,
+        "raw_fp": "94846abf48982682ca359949f79c44bfed6435832c91af9c1f5725cb1948af5a",
+        "normalized_fp": "96596e1dd7815b937fe8e78b9be551febba495a3b8d74f8c69256dc6b72474ec",
+        "normalized_text": "for (String _v1 : _v0) { System.out.println(_v1.toUpperCase()); }"
+      },
+      {
+        "idx": 11,
+        "method": "NormalizerC.iterate",
+        "start_line": 25,
+        "end_line": 25,
+        "raw_fp": "610b8973b928558ce8a3a05b5629afe3871dd4791f60662b34ff5e374cca050e",
+        "normalized_fp": "52b221c2a85d93fde3eebda8c77d3e70e65d1910b7cbc514069c1971814fe809",
+        "normalized_text": "System.out.println(_v1.toUpperCase());"
+      },
+      {
+        "idx": 12,
+        "method": "NormalizerC.iterate",
+        "start_line": 27,
+        "end_line": 27,
+        "raw_fp": "6f678155f3a9875377242fc9aedbff30b63bc705ffa4b07add9e3dcc743e3f9e",
+        "normalized_fp": "932eaee601c54de4919ee2ab45a881e71cdfc6111b64b2ec63ef5358414469f4",
+        "normalized_text": "int _v2 = _v0.size() * _NUM_;"
+      },
+      {
+        "idx": 13,
+        "method": "NormalizerC.iterate",
+        "start_line": 28,
+        "end_line": 28,
+        "raw_fp": "bf58f27ed98d009fc2c6a4cb2bf07733e172572ece7bffed26ff1ccebc969781",
+        "normalized_fp": "87530370b3b06a13e43d1c86b61bbb74b33bd5d8fe47fd843c52597114ba38ca",
+        "normalized_text": "System.out.println(_v2);"
+      }
+    ],
+    "methods": [
+      {
+        "name": "NormalizerC.compute",
+        "method_fp": "4badea92a743e56c44f01ab726f983543db36b4b1ab2ebdb6e77d027d0a28133"
+      },
+      {
+        "name": "NormalizerC.iterate",
+        "method_fp": "5474bfabb46b76485a277432337cbb3974e9ce34349f9d5b366b63d8d64956b2"
+      }
+    ]
+  },
+  {
+    "file": "Sample.java",
+    "language": "java",
+    "statement_count": 31,
+    "method_count": 7,
+    "statements": [
+      {
+        "idx": 0,
+        "method": null,
+        "start_line": 1,
+        "end_line": 1,
+        "raw_fp": "97aee30754d6020e1523f618cf79dc4b30d6a7e32636586a18bbddb8f2ed688c",
+        "normalized_fp": "97aee30754d6020e1523f618cf79dc4b30d6a7e32636586a18bbddb8f2ed688c",
+        "normalized_text": "package com.example.demo;"
+      },
+      {
+        "idx": 1,
+        "method": null,
+        "start_line": 3,
+        "end_line": 3,
+        "raw_fp": "c7bf8cb907acb4b0d6e6fddaf47d772c5f0336e85f853a81815767441d7dff94",
+        "normalized_fp": "c7bf8cb907acb4b0d6e6fddaf47d772c5f0336e85f853a81815767441d7dff94",
+        "normalized_text": "import java.util.List;"
+      },
+      {
+        "idx": 2,
+        "method": null,
+        "start_line": 4,
+        "end_line": 4,
+        "raw_fp": "f1ffd4ee5c3a62453b2190cdc167b73da6f6de9eb55cd7a2a1aafe454fd9b4fc",
+        "normalized_fp": "f1ffd4ee5c3a62453b2190cdc167b73da6f6de9eb55cd7a2a1aafe454fd9b4fc",
+        "normalized_text": "import java.util.ArrayList;"
+      },
+      {
+        "idx": 3,
+        "method": null,
+        "start_line": 8,
+        "end_line": 8,
+        "raw_fp": "e34d8a34ec08ad48c5e4a4144af9ae71fe1841748265c8a7bcdb23297bc2dd87",
+        "normalized_fp": "e34d8a34ec08ad48c5e4a4144af9ae71fe1841748265c8a7bcdb23297bc2dd87",
+        "normalized_text": "private String name;"
+      },
+      {
+        "idx": 4,
+        "method": null,
+        "start_line": 9,
+        "end_line": 9,
+        "raw_fp": "56dbf9cd94226db1d29fd232ed630f03c27acb1afa050cb7bcce0e64fff61e21",
+        "normalized_fp": "56dbf9cd94226db1d29fd232ed630f03c27acb1afa050cb7bcce0e64fff61e21",
+        "normalized_text": "private int count = 0;"
+      },
+      {
+        "idx": 5,
+        "method": "Sample.Sample",
+        "start_line": 12,
+        "end_line": 12,
+        "raw_fp": "95516a4f49df058027e8075d3adfa316a5a9feac0a2daef32574f9ea92a25957",
+        "normalized_fp": "f4f34bef4c7ac1899411be1244591126d881e3ff8893239f4544da440581327f",
+        "normalized_text": "this.name = _v0;"
+      },
+      {
+        "idx": 6,
+        "method": "Sample.Sample",
+        "start_line": 13,
+        "end_line": 13,
+        "raw_fp": "a21bbc603979f52bf78ad5764392b1fa9eeefbc86913ea91148be3ceb0ee96cd",
+        "normalized_fp": "a21bbc603979f52bf78ad5764392b1fa9eeefbc86913ea91148be3ceb0ee96cd",
+        "normalized_text": "this.count = 1;"
+      },
+      {
+        "idx": 7,
+        "method": "Sample.simpleMethod",
+        "start_line": 17,
+        "end_line": 17,
+        "raw_fp": "c8e35693ac742761398f5a81b1657119fd16de71cb25481e9da1ff16bf1e9525",
+        "normalized_fp": "bac7b30b3fc263c5ce63a8aed2a3a3d75a8252d7267097041aef8c0970bde8a7",
+        "normalized_text": "String _v0 = \"_STR_\";"
+      },
+      {
+        "idx": 8,
+        "method": "Sample.simpleMethod",
+        "start_line": 18,
+        "end_line": 18,
+        "raw_fp": "86d7cb8ede1001521337c8ae168b735df3e0e7e6c84704b35a1d66fae4291fa3",
+        "normalized_fp": "4bd15bc42fc7edf8b6790587cc0e1b1d834a7d7c094eac5c6e7bd8881de39a99",
+        "normalized_text": "System.out.println(_v0);"
+      },
+      {
+        "idx": 9,
+        "method": "Sample.simpleMethod",
+        "start_line": 19,
+        "end_line": 19,
+        "raw_fp": "8beaabe25ab7e0a80d1e25bada55a2f5a227101c2210eadf0b368d3c2be4a83f",
+        "normalized_fp": "8beaabe25ab7e0a80d1e25bada55a2f5a227101c2210eadf0b368d3c2be4a83f",
+        "normalized_text": "return;"
+      },
+      {
+        "idx": 10,
+        "method": "Sample.compute",
+        "start_line": 23,
+        "end_line": 23,
+        "raw_fp": "314f2b658139ea4f8b09f88338533c997b76a06c27e6c0cbd12c625d31dda0f8",
+        "normalized_fp": "ef864b384e47f289a3ce59431c0bcf052715b385a6005e8c9708dd93e0955df7",
+        "normalized_text": "int _v2 = _v0 + _v1;"
+      },
+      {
+        "idx": 11,
+        "method": "Sample.compute",
+        "start_line": 24,
+        "end_line": 27,
+        "raw_fp": "83869e779c7b6656e6a612a9f5c0b55dc85ccb8691442367a6d7256ab83ca9c7",
+        "normalized_fp": "9e0546ad157137a3ae94902c878c7ad0cdec45227b31baf0bfaf733ff953a068",
+        "normalized_text": "if (_v2 > _NUM_) { System.out.println(\"_STR_\"); return _NUM_; }"
+      },
+      {
+        "idx": 12,
+        "method": "Sample.compute",
+        "start_line": 25,
+        "end_line": 25,
+        "raw_fp": "c445b501b6d830bdcbb2e14e2fc3a071c50aff2cb1b2d8d2ebdd80aa2bd5a6eb",
+        "normalized_fp": "7df3d771a70aa032a9005aedef42590484edf189311a3797c5df527a3a1c40ad",
+        "normalized_text": "System.out.println(\"_STR_\");"
+      },
+      {
+        "idx": 13,
+        "method": "Sample.compute",
+        "start_line": 26,
+        "end_line": 26,
+        "raw_fp": "fce82e0e638e8e16cddc7270ed9d86e5fe4196ed0f527f5dd5244c4a5231e89f",
+        "normalized_fp": "c1e048916b90a0d418e385b767e148aa85bfea7b6e340cdd093f3aaa7193c6b3",
+        "normalized_text": "return _NUM_;"
+      },
+      {
+        "idx": 14,
+        "method": "Sample.compute",
+        "start_line": 28,
+        "end_line": 30,
+        "raw_fp": "6953d499dd6eb3cd015618c06060f70881770e3142962ea42cbc29cedc37d5e8",
+        "normalized_fp": "594f351eb2f1f0d2db23b80a8fd7c66e965bd1d84afebedca479205cbc3466aa",
+        "normalized_text": "for (int _v3 = 0; _v3 < _v2; _v3++) { count += _v3; }"
+      },
+      {
+        "idx": 15,
+        "method": "Sample.compute",
+        "start_line": 28,
+        "end_line": 28,
+        "raw_fp": "968fedf755193421a143c0e25b789be105c6c7cbb34c3262a83fed4721914f81",
+        "normalized_fp": "8b7632000e65d56bfa345bdcd51837033ba49e30983cec8dd1c4fa9bead1ec71",
+        "normalized_text": "int _v3 = 0;"
+      },
+      {
+        "idx": 16,
+        "method": "Sample.compute",
+        "start_line": 29,
+        "end_line": 29,
+        "raw_fp": "ea5f96978ea5ef32dd1baea370f0bed754923b444937b172bea8f742e363bf80",
+        "normalized_fp": "ebb68258e921463595c2a77a184de974cc971611c159b788168f63ff8ae5330c",
+        "normalized_text": "count += _v3;"
+      },
+      {
+        "idx": 17,
+        "method": "Sample.compute",
+        "start_line": 31,
+        "end_line": 31,
+        "raw_fp": "882101dd8697a52e0480af0873d4640b6bb8b487665fdc6013a1e87120badb76",
+        "normalized_fp": "7d468d32323e2de5919fb4ddcff30ab162ad3c4f639aa54e48fb6b5f6301b61f",
+        "normalized_text": "return _v2;"
+      },
+      {
+        "idx": 18,
+        "method": "Sample.iterateList",
+        "start_line": 35,
+        "end_line": 37,
+        "raw_fp": "fb9a61fa35d1cff5cea86695dfafcfbb78499a03dc52bbc4534317e8b3b748d4",
+        "normalized_fp": "45d25669886e684caf885ceb7ce5fd0a8bff91d719e8f259299cd0bd330f51fd",
+        "normalized_text": "for (String _v1 : _v0) { System.out.println(_v1); }"
+      },
+      {
+        "idx": 19,
+        "method": "Sample.iterateList",
+        "start_line": 36,
+        "end_line": 36,
+        "raw_fp": "bdabb7c618aba7e465bca45995fdffe3bde80303dc458d893ad69697ac48991c",
+        "normalized_fp": "fa77457a0bd8780582db1b76e0256ded3486d26abf3b1e4020b39b85de3ba853",
+        "normalized_text": "System.out.println(_v1);"
+      },
+      {
+        "idx": 20,
+        "method": "Sample.iterateList",
+        "start_line": 38,
+        "end_line": 38,
+        "raw_fp": "6e34f0a4cc7092cdeac9ce77f16e85d54eeafc7d742ce23734bd17499fa89123",
+        "normalized_fp": "e9b460d5104163879664d44a96514e09bd903f68ea13a518226e6a7a9c813fd7",
+        "normalized_text": "int _v2 = _v0.size();"
+      },
+      {
+        "idx": 21,
+        "method": "Sample.iterateList",
+        "start_line": 39,
+        "end_line": 39,
+        "raw_fp": "bf58f27ed98d009fc2c6a4cb2bf07733e172572ece7bffed26ff1ccebc969781",
+        "normalized_fp": "87530370b3b06a13e43d1c86b61bbb74b33bd5d8fe47fd843c52597114ba38ca",
+        "normalized_text": "System.out.println(_v2);"
+      },
+      {
+        "idx": 22,
+        "method": "Sample.tryCatchExample",
+        "start_line": 43,
+        "end_line": 48,
+        "raw_fp": "32fa47636411e0ccea59c00be7b180f976eb3eb28110126105b9e545a7a814a4",
+        "normalized_fp": "65c236ef35967531c50c9a7d32f3d50df97dd3ee57a5774ba638eb01d8e71334",
+        "normalized_text": "try { int _v0 = Integer.parseInt(\"_STR_\"); System.out.println(_v0); } catch (NumberFormatException _v1) { System.err.println(_v1.getMessage()); }"
+      },
+      {
+        "idx": 23,
+        "method": "Sample.tryCatchExample",
+        "start_line": 44,
+        "end_line": 44,
+        "raw_fp": "1b73c2884f0f0aee95a9cd86d869e76a5bbfb3fdd3a45e4058392d4e783b65b1",
+        "normalized_fp": "0d43914656581855913d1ac9dd3f4bfdd33f524e3bed6e94c79b62f5c5e5df4a",
+        "normalized_text": "int _v0 = Integer.parseInt(\"_STR_\");"
+      },
+      {
+        "idx": 24,
+        "method": "Sample.tryCatchExample",
+        "start_line": 45,
+        "end_line": 45,
+        "raw_fp": "22472cc010bbeec0b57d5f26d5eaa6c4d62424cdd9216b309c3a6f24a46ba8f6",
+        "normalized_fp": "4bd15bc42fc7edf8b6790587cc0e1b1d834a7d7c094eac5c6e7bd8881de39a99",
+        "normalized_text": "System.out.println(_v0);"
+      },
+      {
+        "idx": 25,
+        "method": "Sample.tryCatchExample",
+        "start_line": 47,
+        "end_line": 47,
+        "raw_fp": "7221119c93a9eb74ef6bc4d35ac0e3b24a5d5903ce36460a9b91e56cb850e12d",
+        "normalized_fp": "5c30fb3186bb84eb948ce0351f52ff81c44d0db5cb5ce221ae1d9f9f21e0f5d8",
+        "normalized_text": "System.err.println(_v1.getMessage());"
+      },
+      {
+        "idx": 26,
+        "method": "Sample.lambdaExample",
+        "start_line": 52,
+        "end_line": 52,
+        "raw_fp": "e26176fc7dd997b4c49c4f5119a4f514a93b9da4d98f5809ffb0698d72e08478",
+        "normalized_fp": "cf9d8fbf23ea4f915d5ffc2ac64ff62bff798571c065e9950ec80c95651319a4",
+        "normalized_text": "_v0.forEach(_v1 -> System.out.println(_v1));"
+      },
+      {
+        "idx": 27,
+        "method": "Sample.lambdaExample",
+        "start_line": 53,
+        "end_line": 53,
+        "raw_fp": "0677dafe08da6c7a09c74d3b27c78c0127ad7a49b54e50cd2c3c99092012d3c4",
+        "normalized_fp": "7c6ac0d2bf796b15668ea67c6acbac32a2a8854af3723431077e4b9ced5161d1",
+        "normalized_text": "List<String> _v2 = new ArrayList<>();"
+      },
+      {
+        "idx": 28,
+        "method": "Sample.lambdaExample",
+        "start_line": 54,
+        "end_line": 56,
+        "raw_fp": "fe52a08cd0aef06f650c4f87eaa9f1ee5b6841fb6b9a9c11a65901b449058c8d",
+        "normalized_fp": "b28107c9ba1b7cf35478922b6d7a0c7075bae3f6b7930a7354d52e71dcd87755",
+        "normalized_text": "_v0.stream() .filter(_v3 -> _v3.length() > _NUM_) .forEach(_v3 -> _v2.add(_v3));"
+      },
+      {
+        "idx": 29,
+        "method": "Sample.Inner.innerMethod",
+        "start_line": 62,
+        "end_line": 62,
+        "raw_fp": "ec05d4169103c12c47250cb88f72a6e166fbb9b7efecd588a5f5b97130e7a16b",
+        "normalized_fp": "0b317573d801a0e1bc702dd4a38e3c92beec158bc1f6e2f7e0a34c2b8eb48e77",
+        "normalized_text": "int _v0 = _NUM_;"
+      },
+      {
+        "idx": 30,
+        "method": "Sample.Inner.innerMethod",
+        "start_line": 63,
+        "end_line": 63,
+        "raw_fp": "955500fe65a7477017df1785c486adedac8d46d515bc6846b98268bbcaab6807",
+        "normalized_fp": "4bd15bc42fc7edf8b6790587cc0e1b1d834a7d7c094eac5c6e7bd8881de39a99",
+        "normalized_text": "System.out.println(_v0);"
+      }
+    ],
+    "methods": [
+      {
+        "name": "Sample.Sample",
+        "method_fp": "e3f822f7d9eb85717a4eee08dee8293a2f9fdd0d36f7b22867f6cacf2ed0468d"
+      },
+      {
+        "name": "Sample.simpleMethod",
+        "method_fp": "4f61f22b67ce6a78d16eb6ce91c3121b113d439113e56eb582e53a98ded97118"
+      },
+      {
+        "name": "Sample.compute",
+        "method_fp": "6dbe48798531a2abca9e11206a404e7020a25d05cb0725d301814343e6559675"
+      },
+      {
+        "name": "Sample.iterateList",
+        "method_fp": "0a4db5b8aefc450adfb8634baff19086ea071b7f0000ebb287a08c8833062f9f"
+      },
+      {
+        "name": "Sample.tryCatchExample",
+        "method_fp": "86d5bcda6259a2e7447ac709ad618c505016242a9e12571232907396cb2bbd65"
+      },
+      {
+        "name": "Sample.lambdaExample",
+        "method_fp": "ed39f1969a6a9a4a3a231a9e5acf3bbf33595180ddae7db2abbabd67343566ab"
+      },
+      {
+        "name": "Sample.Inner.innerMethod",
+        "method_fp": "aaa79c7800dc12e8387a7f6544100483c9fffe7f50c4414d07fdada9eebaebfc"
+      }
+    ]
+  },
+  {
+    "file": "sample_layout.xml",
+    "language": "xml",
+    "statement_count": 6,
+    "method_count": 3,
+    "statements": [
+      {
+        "idx": 0,
+        "method": null,
+        "start_line": 2,
+        "end_line": 2,
+        "raw_fp": "b1dfdb34d222a4199a5de1ea8ea8bbb6b3138be7839fcea70ad1039265f02470",
+        "normalized_fp": "9540b5324cf5d09e81ab79952af6c0cc61dbe655659b945195abb561be405bc4",
+        "normalized_text": "<LinearLayout android:layout_height=\"match_parent\" android:layout_width=\"match_parent\" android:orientation=\"vertical\">"
+      },
+      {
+        "idx": 1,
+        "method": "TextView[0]",
+        "start_line": 7,
+        "end_line": 12,
+        "raw_fp": "84961b06db8eb7758b7988033563bdc9747f1b98fd0b1fff13cd895918b2bb9a",
+        "normalized_fp": "409f071a706887baaf4da5f7a45128904b668fd502aa73680a4e98900542c939",
+        "normalized_text": "<TextView android:id=\"@+id/_ID_\" android:layout_height=\"wrap_content\" android:layout_width=\"wrap_content\" android:text=\"Hello World\" android:textSize=\"_DIM_sp\" />"
+      },
+      {
+        "idx": 2,
+        "method": "Button[1]",
+        "start_line": 14,
+        "end_line": 18,
+        "raw_fp": "a1057fc09eb7545b418462a8900b2d1a90144f57be0339019b8e30b0fc3ce1d5",
+        "normalized_fp": "c950d81ec70dc9dc9acd21beda56672799f7ef1e8568a802c3ffe1f9108e4436",
+        "normalized_text": "<Button android:id=\"@+id/_ID_\" android:layout_height=\"_DIM_dp\" android:layout_width=\"match_parent\" android:text=\"Submit\" />"
+      },
+      {
+        "idx": 3,
+        "method": "LinearLayout[2]",
+        "start_line": 20,
+        "end_line": 38,
+        "raw_fp": "bd7872b494276ad535f9d19bd46310082a89da7865c8ac1fcc1bfc63985729e0",
+        "normalized_fp": "9f51ae0057464186a60ad3b1fd2bdc15fbccf7879062c908a28eb5a916c4af85",
+        "normalized_text": "<LinearLayout android:layout_height=\"wrap_content\" android:layout_width=\"match_parent\" android:orientation=\"horizontal\">"
+      },
+      {
+        "idx": 4,
+        "method": "LinearLayout[2]",
+        "start_line": 25,
+        "end_line": 29,
+        "raw_fp": "067cd9cea33a5f8426544797a8336c49b01eed44ff305c28a0755d2f1b8303a5",
+        "normalized_fp": "b6d67b6fba5fa51101750965fbbf69ed1446032b3780890957346aa427d5a5ca",
+        "normalized_text": "<ImageView android:id=\"@+id/_ID_\" android:layout_height=\"_DIM_dp\" android:layout_width=\"_DIM_dp\" android:src=\"@drawable/ic_star\" />"
+      },
+      {
+        "idx": 5,
+        "method": "LinearLayout[2]",
+        "start_line": 31,
+        "end_line": 36,
+        "raw_fp": "2708578297e5878834269903de2d47abacf8a9bda13aeb178a402d66908b9dfa",
+        "normalized_fp": "8c3995cc659571eb1a370009ec7623dd3eab2c8d3c5bad305b2644598d910488",
+        "normalized_text": "<TextView android:id=\"@+id/_ID_\" android:layout_height=\"wrap_content\" android:layout_width=\"wrap_content\" android:text=\"Label\" android:textColor=\"_COLOR_\" />"
+      }
+    ],
+    "methods": [
+      {
+        "name": "TextView[0]",
+        "method_fp": "150b759caf3c494d42ff58f5c9610362d65a291ac38fdfc192ea98fec9d364c0"
+      },
+      {
+        "name": "Button[1]",
+        "method_fp": "9b04ba13ebfc82b313e8d171836d76101d18db9e493d9a760021a9a9f32b09a2"
+      },
+      {
+        "name": "LinearLayout[2]",
+        "method_fp": "7d0a3c4ddc852afdbbefef9464de49fce5a6787f69028355f2a1591816e34736"
+      }
+    ]
+  },
+  {
+    "file": "sample_layout_variant.xml",
+    "language": "xml",
+    "statement_count": 6,
+    "method_count": 3,
+    "statements": [
+      {
+        "idx": 0,
+        "method": null,
+        "start_line": 2,
+        "end_line": 2,
+        "raw_fp": "a2c96b90e8c81d092544cda1d94a54de8739ae2b08dc9540235babd0b8b78038",
+        "normalized_fp": "9540b5324cf5d09e81ab79952af6c0cc61dbe655659b945195abb561be405bc4",
+        "normalized_text": "<LinearLayout android:layout_height=\"match_parent\" android:layout_width=\"match_parent\" android:orientation=\"vertical\">"
+      },
+      {
+        "idx": 1,
+        "method": "TextView[0]",
+        "start_line": 7,
+        "end_line": 12,
+        "raw_fp": "d71349412f28efd1b698c95eb640e82b7f8226ffd3744c5d96f0c292f302778a",
+        "normalized_fp": "409f071a706887baaf4da5f7a45128904b668fd502aa73680a4e98900542c939",
+        "normalized_text": "<TextView android:id=\"@+id/_ID_\" android:layout_height=\"wrap_content\" android:layout_width=\"wrap_content\" android:text=\"Hello World\" android:textSize=\"_DIM_sp\" />"
+      },
+      {
+        "idx": 2,
+        "method": "Button[1]",
+        "start_line": 14,
+        "end_line": 18,
+        "raw_fp": "5c2d922130cd481b00bc750cb1d287e3169d1cb284d43498df9dbbbcd1422744",
+        "normalized_fp": "c950d81ec70dc9dc9acd21beda56672799f7ef1e8568a802c3ffe1f9108e4436",
+        "normalized_text": "<Button android:id=\"@+id/_ID_\" android:layout_height=\"_DIM_dp\" android:layout_width=\"match_parent\" android:text=\"Submit\" />"
+      },
+      {
+        "idx": 3,
+        "method": "LinearLayout[2]",
+        "start_line": 20,
+        "end_line": 38,
+        "raw_fp": "bd7872b494276ad535f9d19bd46310082a89da7865c8ac1fcc1bfc63985729e0",
+        "normalized_fp": "9f51ae0057464186a60ad3b1fd2bdc15fbccf7879062c908a28eb5a916c4af85",
+        "normalized_text": "<LinearLayout android:layout_height=\"wrap_content\" android:layout_width=\"match_parent\" android:orientation=\"horizontal\">"
+      },
+      {
+        "idx": 4,
+        "method": "LinearLayout[2]",
+        "start_line": 25,
+        "end_line": 29,
+        "raw_fp": "38b2d1eb1742ab9bfe7c7e7a45a74c44fd35be93b4826b8622d1ac355b5c424b",
+        "normalized_fp": "b6d67b6fba5fa51101750965fbbf69ed1446032b3780890957346aa427d5a5ca",
+        "normalized_text": "<ImageView android:id=\"@+id/_ID_\" android:layout_height=\"_DIM_dp\" android:layout_width=\"_DIM_dp\" android:src=\"@drawable/ic_star\" />"
+      },
+      {
+        "idx": 5,
+        "method": "LinearLayout[2]",
+        "start_line": 31,
+        "end_line": 36,
+        "raw_fp": "fe1351282efe3fe50d8efd0b50763fbc5f07239df73afe21dff14c8a8f6dab3a",
+        "normalized_fp": "8c3995cc659571eb1a370009ec7623dd3eab2c8d3c5bad305b2644598d910488",
+        "normalized_text": "<TextView android:id=\"@+id/_ID_\" android:layout_height=\"wrap_content\" android:layout_width=\"wrap_content\" android:text=\"Label\" android:textColor=\"_COLOR_\" />"
+      }
+    ],
+    "methods": [
+      {
+        "name": "TextView[0]",
+        "method_fp": "150b759caf3c494d42ff58f5c9610362d65a291ac38fdfc192ea98fec9d364c0"
+      },
+      {
+        "name": "Button[1]",
+        "method_fp": "9b04ba13ebfc82b313e8d171836d76101d18db9e493d9a760021a9a9f32b09a2"
+      },
+      {
+        "name": "LinearLayout[2]",
+        "method_fp": "7d0a3c4ddc852afdbbefef9464de49fce5a6787f69028355f2a1591816e34736"
+      }
+    ]
+  }
+]

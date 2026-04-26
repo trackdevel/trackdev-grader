@@ -1,0 +1,4 @@
+# Boilerplate method fingerprints to exclude from cross-team similarity detection.
+# One SHA-256 hex digest per line. Lines starting with # are comments.
+# Populated during Phase 7 calibration: run cross-team detection, review matches,
+# add obvious boilerplate fingerprints here, then re-run.

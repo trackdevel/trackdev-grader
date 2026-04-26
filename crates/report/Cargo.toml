@@ -1,0 +1,23 @@
+[package]
+name = "sprint-grader-report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+rust_xlsxwriter = "0.94"
+sprint-grader-core = { path = "../core" }
+
+[dev-dependencies]
+tempfile.workspace = true
