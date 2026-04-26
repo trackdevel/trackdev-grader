@@ -528,7 +528,7 @@ pub fn run_pipeline(
                     projects = ?names,
                     "purging existing project data before collection"
                 );
-                crate::purge::purge_projects(&db.conn, &project_ids)
+                crate::purge::purge_projects(&db.conn, &project_ids, false)
                     .context("purge_projects failed")?;
             }
         }

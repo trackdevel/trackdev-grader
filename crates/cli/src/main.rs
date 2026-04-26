@@ -27,6 +27,44 @@ fn parse_project_filter(projects: Option<String>) -> Option<Vec<String>> {
     })
 }
 
+/// Render the table-by-table effect of `go` / `go-quick`'s purge step
+/// without touching the DB. Exits the parent command after printing.
+/// (T-P1.6 — `--dry-run` for go/go-quick previews the purge only.)
+fn preview_go_purge(db: &Database, project_filter: Option<&[String]>) -> Result<()> {
+    let names = match project_filter {
+        Some(n) if !n.is_empty() => n,
+        _ => {
+            println!(
+                "[dry-run] go/go-quick only purges when --projects is set; \
+                 nothing would be deleted."
+            );
+            return Ok(());
+        }
+    };
+    let mut project_ids: Vec<i64> = Vec::new();
+    for name in names {
+        if let Ok(pid) = db
+            .conn
+            .query_row("SELECT id FROM projects WHERE name = ?", [name], |r| {
+                r.get::<_, i64>(0)
+            })
+        {
+            project_ids.push(pid);
+        }
+    }
+    if project_ids.is_empty() {
+        println!("[dry-run] no projects matched filter; nothing would be deleted.");
+        return Ok(());
+    }
+    let report = sprint_grader_orchestration::purge_projects(&db.conn, &project_ids, true)
+        .context("purge_projects dry-run failed")?;
+    println!("[dry-run] go/go-quick purge would affect:");
+    for (table, count) in &report {
+        println!("  {table}: {count}");
+    }
+    Ok(())
+}
+
 /// Resolve the project root used for config and `.env` loading.
 /// Defaults to the directory where the CLI is executed.
 fn default_project_root() -> PathBuf {
@@ -193,6 +231,14 @@ enum Command {
         skip_llm_judge: bool,
         #[arg(long)]
         force_pr_refresh: bool,
+        /// Preview the purge step's effect and exit before any pipeline
+        /// stage runs. (T-P1.6)
+        #[arg(long)]
+        dry_run: bool,
+        /// Refuse to start if `git status --porcelain` reports a dirty
+        /// working tree.
+        #[arg(long)]
+        require_clean_tree: bool,
     },
     /// Like `go` but skips the Section-3 LLM code review.
     GoQuick {
@@ -208,6 +254,14 @@ enum Command {
         skip_llm_judge: bool,
         #[arg(long)]
         force_pr_refresh: bool,
+        /// Preview the purge step's effect and exit before any pipeline
+        /// stage runs. (T-P1.6)
+        #[arg(long)]
+        dry_run: bool,
+        /// Refuse to start if `git status --porcelain` reports a dirty
+        /// working tree.
+        #[arg(long)]
+        require_clean_tree: bool,
     },
 
     // Diagnostics
@@ -228,6 +282,14 @@ enum Command {
         compilation: bool,
         #[arg(long)]
         doc_eval: bool,
+        /// Preview the purge: print per-table row counts and exit without
+        /// modifying the DB.
+        #[arg(long)]
+        dry_run: bool,
+        /// Refuse to purge if `git status --porcelain` reports a dirty
+        /// working tree (guard against accidental purge during manual edits).
+        #[arg(long)]
+        require_clean_tree: bool,
     },
     /// Diff two `grading.db` files table-by-table (dual-run verification).
     DiffDb {
@@ -636,11 +698,25 @@ fn main() -> Result<()> {
             skip_perplexity: _,
             skip_llm_judge: _,
             force_pr_refresh,
+            dry_run,
+            require_clean_tree,
         } => {
+            let project_filter = parse_project_filter(projects.projects);
+            if require_clean_tree {
+                if let Err(msg) = sprint_grader_orchestration::ensure_clean_tree(
+                    std::env::current_dir()?.as_path(),
+                ) {
+                    anyhow::bail!(msg);
+                }
+            }
+            if dry_run {
+                preview_go_purge(&db, project_filter.as_deref())?;
+                return Ok(());
+            }
             drop(db);
             let opts = sprint_grader_orchestration::pipeline::PipelineOptions {
                 today: today.clone(),
-                project_filter: parse_project_filter(projects.projects),
+                project_filter,
                 entregues_dir: entregues_dir.clone(),
                 config_dir: config_dir.clone(),
                 skip_github,
@@ -664,11 +740,25 @@ fn main() -> Result<()> {
             skip_perplexity: _,
             skip_llm_judge: _,
             force_pr_refresh,
+            dry_run,
+            require_clean_tree,
         } => {
+            let project_filter = parse_project_filter(projects.projects);
+            if require_clean_tree {
+                if let Err(msg) = sprint_grader_orchestration::ensure_clean_tree(
+                    std::env::current_dir()?.as_path(),
+                ) {
+                    anyhow::bail!(msg);
+                }
+            }
+            if dry_run {
+                preview_go_purge(&db, project_filter.as_deref())?;
+                return Ok(());
+            }
             drop(db);
             let opts = sprint_grader_orchestration::pipeline::PipelineOptions {
                 today: today.clone(),
-                project_filter: parse_project_filter(projects.projects),
+                project_filter,
                 entregues_dir: entregues_dir.clone(),
                 config_dir: config_dir.clone(),
                 skip_github,
@@ -711,6 +801,8 @@ fn main() -> Result<()> {
             survival,
             compilation,
             doc_eval,
+            dry_run,
+            require_clean_tree,
         } => {
             let targets = sprint_grader_orchestration::CacheTargets {
                 line_metrics,
@@ -722,6 +814,13 @@ fn main() -> Result<()> {
                 anyhow::bail!(
                     "pass at least one of --line-metrics, --survival, --compilation, --doc-eval"
                 );
+            }
+            if require_clean_tree {
+                if let Err(msg) = sprint_grader_orchestration::ensure_clean_tree(
+                    std::env::current_dir()?.as_path(),
+                ) {
+                    anyhow::bail!(msg);
+                }
             }
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
@@ -739,10 +838,18 @@ fn main() -> Result<()> {
                 &sprint_ids,
                 project_ids.as_deref(),
                 targets,
+                dry_run,
             )
             .context("purge-cache failed")?;
-            for (table, count) in &deleted {
-                info!(table = %table, count, "purged");
+            if dry_run {
+                println!("[dry-run] purge-cache would affect:");
+                for (table, count) in &deleted {
+                    println!("  {table}: {count}");
+                }
+            } else {
+                for (table, count) in &deleted {
+                    info!(table = %table, count, "purged");
+                }
             }
         }
         Command::DiffDb {

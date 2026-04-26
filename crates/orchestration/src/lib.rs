@@ -15,7 +15,9 @@ pub use db_diff::{
 };
 pub use debug_pr::debug_pr_lines;
 pub use pipeline::{run_pipeline, PipelineVariant};
-pub use purge::{purge_cache, purge_projects, CacheTargets, PurgeCacheResult};
+pub use purge::{
+    ensure_clean_tree, purge_cache, purge_projects, CacheTargets, PurgeCacheResult, PurgeReport,
+};
 pub use report_sync::{
     android_repo_root, sync_reports_through_sprint, SyncReportsOptions, SyncReportsResult,
 };

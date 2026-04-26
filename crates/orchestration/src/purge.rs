@@ -1,6 +1,11 @@
 //! `purge_projects` (full cascade) and `purge_cache` (targeted derived-row
 //! deletion). Mirrors `Database.purge_projects` / `Database.purge_cache` in
 //! `src/db/schema.py`.
+//!
+//! T-P1.6: both functions accept `dry_run: bool`. When set, every DELETE is
+//! translated into `SELECT COUNT(*) ON THE SAME PREDICATE` so the caller
+//! can preview the effect; the DB is not modified. Per-table counts are
+//! returned in a `PurgeReport`.
 
 use std::collections::BTreeMap;
 
@@ -11,11 +16,51 @@ fn placeholders(n: usize) -> String {
     std::iter::repeat("?").take(n).collect::<Vec<_>>().join(",")
 }
 
+/// Per-table accounting. For real runs the count is the number of rows
+/// actually deleted; for dry runs it's the row count of the SELECT that
+/// matches the same predicate.
+pub type PurgeReport = BTreeMap<String, i64>;
+
+/// Older alias kept so the public surface from the legacy `purge_cache`
+/// signature continues to work.
+pub type PurgeCacheResult = PurgeReport;
+
+/// Either execute `sql` (a DELETE) or, when `dry_run`, run a SELECT COUNT(*)
+/// over the same predicate and return that count. The SELECT is built by
+/// substituting the leading `DELETE FROM` for `SELECT COUNT(*) FROM`.
+///
+/// Errors are surfaced; callers that previously used `let _ = conn.execute(...)`
+/// to swallow per-table errors keep that idiom by discarding the Err.
+fn run_or_count<P: rusqlite::Params>(
+    conn: &Connection,
+    dry_run: bool,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<i64> {
+    if dry_run {
+        let counted = sql.replacen("DELETE FROM", "SELECT COUNT(*) FROM", 1);
+        conn.query_row(&counted, params, |r| r.get::<_, i64>(0))
+    } else {
+        Ok(conn.execute(sql, params)? as i64)
+    }
+}
+
+fn record(deleted: &mut PurgeReport, table: &str, count: i64) {
+    *deleted.entry(table.to_string()).or_insert(0) += count;
+}
+
 /// Full cascade delete for a set of projects. Rows are removed leaves-first
-/// so foreign-key constraints stay satisfied throughout.
-pub fn purge_projects(conn: &Connection, project_ids: &[i64]) -> rusqlite::Result<()> {
+/// so foreign-key constraints stay satisfied throughout. Returns per-table
+/// row counts (T-P1.6); `dry_run = true` populates the report without
+/// modifying the DB.
+pub fn purge_projects(
+    conn: &Connection,
+    project_ids: &[i64],
+    dry_run: bool,
+) -> rusqlite::Result<PurgeReport> {
+    let mut deleted: PurgeReport = BTreeMap::new();
     if project_ids.is_empty() {
-        return Ok(());
+        return Ok(deleted);
     }
     let pp = placeholders(project_ids.len());
 
@@ -30,10 +75,12 @@ pub fn purge_projects(conn: &Connection, project_ids: &[i64]) -> rusqlite::Resul
     if sprint_ids.is_empty() {
         // No sprints yet — just drop students + projects and commit.
         let sql = format!("DELETE FROM students WHERE team_project_id IN ({})", pp);
-        conn.execute(&sql, params_from_iter(project_ids.iter()))?;
+        let count = run_or_count(conn, dry_run, &sql, params_from_iter(project_ids.iter()))?;
+        record(&mut deleted, "students", count);
         let sql = format!("DELETE FROM projects WHERE id IN ({})", pp);
-        conn.execute(&sql, params_from_iter(project_ids.iter()))?;
-        return Ok(());
+        let count = run_or_count(conn, dry_run, &sql, params_from_iter(project_ids.iter()))?;
+        record(&mut deleted, "projects", count);
+        return Ok(deleted);
     }
     let sp = placeholders(sprint_ids.len());
 
@@ -67,13 +114,18 @@ pub fn purge_projects(conn: &Connection, project_ids: &[i64]) -> rusqlite::Resul
             "pr_regularity",
             "pr_submission_tiers",
             "pr_survival",
+            "pr_pre_squash_authors",
         ];
         for table in pr_tables {
             let sql = format!("DELETE FROM {} WHERE pr_id IN ({})", table, pr_ph);
-            let _ = conn.execute(&sql, params_from_iter(pr_ids.iter()));
+            // Best-effort: legacy DBs may lack some optional tables.
+            if let Ok(count) = run_or_count(conn, dry_run, &sql, params_from_iter(pr_ids.iter())) {
+                record(&mut deleted, table, count);
+            }
         }
         let sql = format!("DELETE FROM pull_requests WHERE id IN ({})", pr_ph);
-        conn.execute(&sql, params_from_iter(pr_ids.iter()))?;
+        let count = run_or_count(conn, dry_run, &sql, params_from_iter(pr_ids.iter()))?;
+        record(&mut deleted, "pull_requests", count);
     }
 
     // Task-level.
@@ -82,20 +134,26 @@ pub fn purge_projects(conn: &Connection, project_ids: &[i64]) -> rusqlite::Resul
          (SELECT id FROM tasks WHERE sprint_id IN ({}))",
         sp
     );
-    conn.execute(&sql, params_from_iter(sprint_ids.iter()))?;
+    let count = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter()))?;
+    record(&mut deleted, "task_pull_requests", count);
 
     let sql = format!(
         "DELETE FROM task_description_evaluation WHERE sprint_id IN ({})",
         sp
     );
-    let _ = conn.execute(&sql, params_from_iter(sprint_ids.iter()));
+    if let Ok(count) = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter())) {
+        record(&mut deleted, "task_description_evaluation", count);
+    }
 
     for table in ["task_group_members", "task_similarity_groups"] {
         let sql = format!("DELETE FROM {} WHERE sprint_id IN ({})", table, sp);
-        let _ = conn.execute(&sql, params_from_iter(sprint_ids.iter()));
+        if let Ok(count) = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter())) {
+            record(&mut deleted, table, count);
+        }
     }
     let sql = format!("DELETE FROM tasks WHERE sprint_id IN ({})", sp);
-    conn.execute(&sql, params_from_iter(sprint_ids.iter()))?;
+    let count = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter()))?;
+    record(&mut deleted, "tasks", count);
 
     // Sprint-scoped tables (keyed by sprint_id).
     let sprint_tables = [
@@ -121,7 +179,9 @@ pub fn purge_projects(conn: &Connection, project_ids: &[i64]) -> rusqlite::Resul
     ];
     for table in sprint_tables {
         let sql = format!("DELETE FROM {} WHERE sprint_id IN ({})", table, sp);
-        let _ = conn.execute(&sql, params_from_iter(sprint_ids.iter()));
+        if let Ok(count) = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter())) {
+            record(&mut deleted, table, count);
+        }
     }
 
     // Project+sprint-scoped tables (keyed by project_id).
@@ -134,7 +194,9 @@ pub fn purge_projects(conn: &Connection, project_ids: &[i64]) -> rusqlite::Resul
     ];
     for table in project_sprint_tables {
         let sql = format!("DELETE FROM {} WHERE project_id IN ({})", table, pp);
-        let _ = conn.execute(&sql, params_from_iter(project_ids.iter()));
+        if let Ok(count) = run_or_count(conn, dry_run, &sql, params_from_iter(project_ids.iter())) {
+            record(&mut deleted, table, count);
+        }
     }
 
     // Project-scoped.
@@ -144,24 +206,30 @@ pub fn purge_projects(conn: &Connection, project_ids: &[i64]) -> rusqlite::Resul
         "student_trajectory",
     ] {
         let sql = format!("DELETE FROM {} WHERE project_id IN ({})", table, pp);
-        let _ = conn.execute(&sql, params_from_iter(project_ids.iter()));
+        if let Ok(count) = run_or_count(conn, dry_run, &sql, params_from_iter(project_ids.iter())) {
+            record(&mut deleted, table, count);
+        }
     }
 
     // Core entities.
     let sql = format!("DELETE FROM sprints WHERE project_id IN ({})", pp);
-    conn.execute(&sql, params_from_iter(project_ids.iter()))?;
+    let count = run_or_count(conn, dry_run, &sql, params_from_iter(project_ids.iter()))?;
+    record(&mut deleted, "sprints", count);
     let sql = format!("DELETE FROM students WHERE team_project_id IN ({})", pp);
-    conn.execute(&sql, params_from_iter(project_ids.iter()))?;
+    let count = run_or_count(conn, dry_run, &sql, params_from_iter(project_ids.iter()))?;
+    record(&mut deleted, "students", count);
     let sql = format!("DELETE FROM projects WHERE id IN ({})", pp);
-    conn.execute(&sql, params_from_iter(project_ids.iter()))?;
+    let count = run_or_count(conn, dry_run, &sql, params_from_iter(project_ids.iter()))?;
+    record(&mut deleted, "projects", count);
 
     info!(
         projects = project_ids.len(),
         sprints = sprint_ids.len(),
         prs = pr_ids.len(),
+        dry_run,
         "purge_projects complete"
     );
-    Ok(())
+    Ok(deleted)
 }
 
 /// Target flags for `purge_cache`. Mirrors the Python CLI flag surface.
@@ -179,19 +247,20 @@ impl CacheTargets {
     }
 }
 
-pub type PurgeCacheResult = BTreeMap<String, i64>;
-
 /// Drop derived cache rows for the given sprints so they are recomputed on
 /// the next pipeline run. When `project_ids` is `Some`, rows that are
 /// per-PR / per-student / per-repo are additionally scoped to those projects;
 /// otherwise the whole sprint is purged.
+///
+/// `dry_run = true` populates the report without modifying the DB (T-P1.6).
 pub fn purge_cache(
     conn: &Connection,
     sprint_ids: &[i64],
     project_ids: Option<&[i64]>,
     targets: CacheTargets,
-) -> rusqlite::Result<PurgeCacheResult> {
-    let mut deleted: PurgeCacheResult = BTreeMap::new();
+    dry_run: bool,
+) -> rusqlite::Result<PurgeReport> {
+    let mut deleted: PurgeReport = BTreeMap::new();
     if sprint_ids.is_empty() || !targets.any() {
         return Ok(deleted);
     }
@@ -234,11 +303,7 @@ pub fn purge_cache(
             (None, None)
         };
 
-    let record = |deleted: &mut PurgeCacheResult, table: &str, rowcount: i64| {
-        *deleted.entry(table.to_string()).or_insert(0) += rowcount;
-    };
-
-    let del_by_pr_sprint = |deleted: &mut PurgeCacheResult, table: &str| -> rusqlite::Result<()> {
+    let del_by_pr_sprint = |deleted: &mut PurgeReport, table: &str| -> rusqlite::Result<()> {
         if let Some(pr_ids) = &pr_ids {
             if pr_ids.is_empty() {
                 deleted.entry(table.to_string()).or_insert(0);
@@ -258,65 +323,63 @@ pub fn purge_cache(
                         .map(|x| Box::new(x.clone()) as Box<dyn rusqlite::ToSql>),
                 )
                 .collect();
-            let count = conn.execute(&sql, params_from_iter(args.iter()))?;
-            record(deleted, table, count as i64);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(args.iter()))?;
+            record(deleted, table, count);
         } else {
             let sql = format!("DELETE FROM {} WHERE sprint_id IN ({})", table, sp);
-            let count = conn.execute(&sql, params_from_iter(sprint_ids.iter()))?;
-            record(deleted, table, count as i64);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter()))?;
+            record(deleted, table, count);
         }
         Ok(())
     };
 
-    let del_by_repo_sprint =
-        |deleted: &mut PurgeCacheResult, table: &str| -> rusqlite::Result<()> {
-            if let Some(repos) = &repo_names {
-                if repos.is_empty() {
-                    deleted.entry(table.to_string()).or_insert(0);
-                    return Ok(());
-                }
-                let rp = placeholders(repos.len());
-                let sql = format!(
-                    "DELETE FROM {} WHERE sprint_id IN ({}) AND repo_full_name IN ({})",
-                    table, sp, rp
-                );
-                let args: Vec<Box<dyn rusqlite::ToSql>> = sprint_ids
-                    .iter()
-                    .map(|x| Box::new(*x) as Box<dyn rusqlite::ToSql>)
-                    .chain(
-                        repos
-                            .iter()
-                            .map(|x| Box::new(x.clone()) as Box<dyn rusqlite::ToSql>),
-                    )
-                    .collect();
-                let count = conn.execute(&sql, params_from_iter(args.iter()))?;
-                record(deleted, table, count as i64);
-            } else {
-                let sql = format!("DELETE FROM {} WHERE sprint_id IN ({})", table, sp);
-                let count = conn.execute(&sql, params_from_iter(sprint_ids.iter()))?;
-                record(deleted, table, count as i64);
+    let del_by_repo_sprint = |deleted: &mut PurgeReport, table: &str| -> rusqlite::Result<()> {
+        if let Some(repos) = &repo_names {
+            if repos.is_empty() {
+                deleted.entry(table.to_string()).or_insert(0);
+                return Ok(());
             }
-            Ok(())
-        };
+            let rp = placeholders(repos.len());
+            let sql = format!(
+                "DELETE FROM {} WHERE sprint_id IN ({}) AND repo_full_name IN ({})",
+                table, sp, rp
+            );
+            let args: Vec<Box<dyn rusqlite::ToSql>> = sprint_ids
+                .iter()
+                .map(|x| Box::new(*x) as Box<dyn rusqlite::ToSql>)
+                .chain(
+                    repos
+                        .iter()
+                        .map(|x| Box::new(x.clone()) as Box<dyn rusqlite::ToSql>),
+                )
+                .collect();
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(args.iter()))?;
+            record(deleted, table, count);
+        } else {
+            let sql = format!("DELETE FROM {} WHERE sprint_id IN ({})", table, sp);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter()))?;
+            record(deleted, table, count);
+        }
+        Ok(())
+    };
 
-    let del_by_sprint_project =
-        |deleted: &mut PurgeCacheResult, table: &str| -> rusqlite::Result<()> {
-            if let Some(pids) = project_ids {
-                let pp = placeholders(pids.len());
-                let sql = format!(
-                    "DELETE FROM {} WHERE sprint_id IN ({}) AND project_id IN ({})",
-                    table, sp, pp
-                );
-                let args: Vec<i64> = sprint_ids.iter().chain(pids.iter()).copied().collect();
-                let count = conn.execute(&sql, params_from_iter(args.iter()))?;
-                record(deleted, table, count as i64);
-            } else {
-                let sql = format!("DELETE FROM {} WHERE sprint_id IN ({})", table, sp);
-                let count = conn.execute(&sql, params_from_iter(sprint_ids.iter()))?;
-                record(deleted, table, count as i64);
-            }
-            Ok(())
-        };
+    let del_by_sprint_project = |deleted: &mut PurgeReport, table: &str| -> rusqlite::Result<()> {
+        if let Some(pids) = project_ids {
+            let pp = placeholders(pids.len());
+            let sql = format!(
+                "DELETE FROM {} WHERE sprint_id IN ({}) AND project_id IN ({})",
+                table, sp, pp
+            );
+            let args: Vec<i64> = sprint_ids.iter().chain(pids.iter()).copied().collect();
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(args.iter()))?;
+            record(deleted, table, count);
+        } else {
+            let sql = format!("DELETE FROM {} WHERE sprint_id IN ({})", table, sp);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter()))?;
+            record(deleted, table, count);
+        }
+        Ok(())
+    };
 
     if targets.line_metrics {
         del_by_pr_sprint(&mut deleted, "pr_line_metrics")?;
@@ -341,8 +404,8 @@ pub fn purge_cache(
                 .chain(pids.iter())
                 .copied()
                 .collect();
-            let count = conn.execute(&sql, params_from_iter(args.iter()))?;
-            record(&mut deleted, "cross_team_matches", count as i64);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(args.iter()))?;
+            record(&mut deleted, "cross_team_matches", count);
 
             let sql = format!(
                 "DELETE FROM student_sprint_survival WHERE sprint_id IN ({})
@@ -350,18 +413,18 @@ pub fn purge_cache(
                 sp, pp
             );
             let args: Vec<i64> = sprint_ids.iter().chain(pids.iter()).copied().collect();
-            let count = conn.execute(&sql, params_from_iter(args.iter()))?;
-            record(&mut deleted, "student_sprint_survival", count as i64);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(args.iter()))?;
+            record(&mut deleted, "student_sprint_survival", count);
         } else {
             let sql = format!("DELETE FROM cross_team_matches WHERE sprint_id IN ({})", sp);
-            let count = conn.execute(&sql, params_from_iter(sprint_ids.iter()))?;
-            record(&mut deleted, "cross_team_matches", count as i64);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter()))?;
+            record(&mut deleted, "cross_team_matches", count);
             let sql = format!(
                 "DELETE FROM student_sprint_survival WHERE sprint_id IN ({})",
                 sp
             );
-            let count = conn.execute(&sql, params_from_iter(sprint_ids.iter()))?;
-            record(&mut deleted, "student_sprint_survival", count as i64);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter()))?;
+            record(&mut deleted, "student_sprint_survival", count);
         }
     }
 
@@ -385,19 +448,43 @@ pub fn purge_cache(
                 sp, pp
             );
             let args: Vec<i64> = sprint_ids.iter().chain(pids.iter()).copied().collect();
-            let count = conn.execute(&sql, params_from_iter(args.iter()))?;
-            record(&mut deleted, "task_description_evaluation", count as i64);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(args.iter()))?;
+            record(&mut deleted, "task_description_evaluation", count);
         } else {
             let sql = format!(
                 "DELETE FROM task_description_evaluation WHERE sprint_id IN ({})",
                 sp
             );
-            let count = conn.execute(&sql, params_from_iter(sprint_ids.iter()))?;
-            record(&mut deleted, "task_description_evaluation", count as i64);
+            let count = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter()))?;
+            record(&mut deleted, "task_description_evaluation", count);
         }
     }
 
     Ok(deleted)
+}
+
+/// Refuse to operate when the working tree at `repo_root` has uncommitted
+/// changes. Returns Ok(()) when the tree is clean (or when `git status`
+/// itself fails — we fail open rather than blocking purges in non-git
+/// environments). Used by the CLI's `--require-clean-tree` guard (T-P1.6).
+pub fn ensure_clean_tree(repo_root: &std::path::Path) -> Result<(), String> {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_root)
+        .output();
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        // No git, or not a git repo: don't pretend to enforce something we
+        // can't observe. The caller asked for the check and we said yes —
+        // accept that the contract here is best-effort.
+        _ => return Ok(()),
+    };
+    let body = String::from_utf8_lossy(&out.stdout);
+    if body.trim().is_empty() {
+        Ok(())
+    } else {
+        Err("refusing to purge with dirty working tree (--require-clean-tree)".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -479,7 +566,7 @@ mod tests {
             line_metrics: true,
             ..Default::default()
         };
-        let deleted = purge_cache(&conn, &[10], None, targets).unwrap();
+        let deleted = purge_cache(&conn, &[10], None, targets, false).unwrap();
         assert_eq!(deleted.get("pr_line_metrics"), Some(&1));
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM pr_line_metrics", [], |r| r.get(0))
@@ -494,7 +581,7 @@ mod tests {
             survival: true,
             ..Default::default()
         };
-        let deleted = purge_cache(&conn, &[10], None, targets).unwrap();
+        let deleted = purge_cache(&conn, &[10], None, targets, false).unwrap();
         assert_eq!(deleted.get("fingerprints"), Some(&1));
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM fingerprints", [], |r| r.get(0))
@@ -505,7 +592,8 @@ mod tests {
     #[test]
     fn purge_projects_cascades_cleanly() {
         let conn = mk_conn();
-        purge_projects(&conn, &[1]).unwrap();
+        let report = purge_projects(&conn, &[1], false).unwrap();
+        assert!(report.get("projects").copied().unwrap_or(0) >= 1);
         let n_projects: i64 = conn
             .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
             .unwrap();
@@ -518,5 +606,45 @@ mod tests {
         assert_eq!(n_projects, 0);
         assert_eq!(n_sprints, 0);
         assert_eq!(n_prs, 0);
+    }
+
+    #[test]
+    fn purge_cache_dry_run_preserves_all_rows() {
+        let conn = mk_conn();
+        let targets = CacheTargets {
+            line_metrics: true,
+            survival: true,
+            ..Default::default()
+        };
+        let report = purge_cache(&conn, &[10], None, targets, true).unwrap();
+        assert_eq!(report.get("pr_line_metrics"), Some(&1));
+        assert_eq!(report.get("fingerprints"), Some(&1));
+        // Nothing actually deleted.
+        let n_lm: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pr_line_metrics", [], |r| r.get(0))
+            .unwrap();
+        let n_fp: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fingerprints", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n_lm, 1);
+        assert_eq!(n_fp, 1);
+    }
+
+    #[test]
+    fn purge_projects_dry_run_preserves_cascade() {
+        let conn = mk_conn();
+        let report = purge_projects(&conn, &[1], true).unwrap();
+        assert_eq!(report.get("pull_requests"), Some(&1));
+        assert_eq!(report.get("tasks"), Some(&1));
+        assert_eq!(report.get("projects"), Some(&1));
+        // Nothing actually deleted.
+        let n_projects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        let n_prs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pull_requests", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n_projects, 1);
+        assert_eq!(n_prs, 1);
     }
 }
