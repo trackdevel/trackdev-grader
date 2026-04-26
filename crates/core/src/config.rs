@@ -44,6 +44,7 @@ pub struct ThresholdConfig {
     pub low_doc_score: u32,
     pub contribution_imbalance_stddev: f64,
     pub low_survival_rate_stddev: f64,
+    pub low_survival_absolute_floor: f64,
     pub raw_normalized_divergence_threshold: f64,
 }
 
@@ -183,12 +184,17 @@ struct RawThresholds {
     contribution_imbalance_stddev: f64,
     #[serde(default = "default_low_survival_rate_stddev")]
     low_survival_rate_stddev: f64,
+    #[serde(default = "default_low_survival_absolute_floor")]
+    low_survival_absolute_floor: f64,
     #[serde(default = "default_raw_normalized_divergence_threshold")]
     raw_normalized_divergence_threshold: f64,
 }
 
 fn default_low_survival_rate_stddev() -> f64 {
     1.5
+}
+fn default_low_survival_absolute_floor() -> f64 {
+    0.85
 }
 fn default_raw_normalized_divergence_threshold() -> f64 {
     0.20
@@ -286,6 +292,7 @@ impl Config {
             low_doc_score: raw.thresholds.low_doc_score,
             contribution_imbalance_stddev: raw.thresholds.contribution_imbalance_stddev,
             low_survival_rate_stddev: raw.thresholds.low_survival_rate_stddev,
+            low_survival_absolute_floor: raw.thresholds.low_survival_absolute_floor,
             raw_normalized_divergence_threshold: raw.thresholds.raw_normalized_divergence_threshold,
         };
 

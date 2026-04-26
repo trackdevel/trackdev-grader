@@ -939,7 +939,7 @@ fn low_survival_rate(
     if std > 0.0 {
         for (sid, rate) in rows {
             let z = (m - rate) / std;
-            if z > thresh.low_survival_rate_stddev {
+            if z > thresh.low_survival_rate_stddev && rate < thresh.low_survival_absolute_floor {
                 flags.push(Flag {
                     student_id: sid,
                     flag_type: "LOW_SURVIVAL_RATE",
@@ -948,6 +948,7 @@ fn low_survival_rate(
                         "rate": round3(rate),
                         "team_avg": round3(m),
                         "z_score": round2(z),
+                        "absolute_floor": thresh.low_survival_absolute_floor,
                     }),
                 });
             }
@@ -2169,4 +2170,77 @@ pub fn detect_flags_for_sprint_id(
 
     info!(sprint_id, total, "Flag detection complete");
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn mk_thresh() -> ThresholdConfig {
+        ThresholdConfig {
+            carrying_team_pct: 0.40,
+            cramming_hours: 48,
+            cramming_commit_pct: 0.70,
+            single_commit_dump_lines: 200,
+            micro_pr_max_lines: 10,
+            low_doc_score: 2,
+            contribution_imbalance_stddev: 1.5,
+            low_survival_rate_stddev: 1.5,
+            low_survival_absolute_floor: 0.85,
+            raw_normalized_divergence_threshold: 0.20,
+        }
+    }
+
+    fn mk_survival_conn(rates: &[(&str, f64)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sprints (id INTEGER PRIMARY KEY, project_id INTEGER);
+             CREATE TABLE students (id TEXT PRIMARY KEY, team_project_id INTEGER);
+             CREATE TABLE student_sprint_survival (
+                student_id TEXT, sprint_id INTEGER,
+                survival_rate_normalized REAL,
+                PRIMARY KEY (student_id, sprint_id));
+             INSERT INTO sprints(id, project_id) VALUES (10, 1);",
+        )
+        .unwrap();
+        for (sid, rate) in rates {
+            conn.execute(
+                "INSERT INTO students(id, team_project_id) VALUES (?, 1)",
+                [sid],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO student_sprint_survival(student_id, sprint_id, survival_rate_normalized)
+                 VALUES (?, 10, ?)",
+                params![sid, rate],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn low_survival_rate_silent_when_team_all_high() {
+        let conn = mk_survival_conn(&[("a", 0.99), ("b", 0.99), ("c", 0.99), ("d", 0.95)]);
+        let flags = low_survival_rate(&conn, 10, &mk_thresh()).unwrap();
+        assert!(
+            flags.is_empty(),
+            "team uniformly high: must not flag — got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn low_survival_rate_fires_when_absolute_low_and_relative_low() {
+        let conn = mk_survival_conn(&[("a", 0.99), ("b", 0.99), ("c", 0.99), ("d", 0.50)]);
+        let flags = low_survival_rate(&conn, 10, &mk_thresh()).unwrap();
+        assert_eq!(flags.len(), 1, "expected exactly one flag, got {flags:?}");
+        assert_eq!(flags[0].student_id, "d");
+        assert_eq!(flags[0].flag_type, "LOW_SURVIVAL_RATE");
+        assert_eq!(
+            flags[0].details["absolute_floor"].as_f64(),
+            Some(0.85),
+            "details must record the floor used"
+        );
+    }
 }
