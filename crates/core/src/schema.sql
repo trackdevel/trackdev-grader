@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS student_sprint_metrics (
     commit_count INTEGER,
     files_touched INTEGER,
     reviews_given INTEGER,
-    temporal_spread TEXT,
+    temporal_spread TEXT, -- task-assignee-keyed JSON; for per-AUTHOR timing see student_sprint_temporal
     avg_doc_score REAL
 );
 

@@ -258,13 +258,14 @@ fn run_project_stage_block(
         }
     }
 
-    // Stage order matters: four flag detectors read derived tables.
+    // Stage order matters: several flag detectors read derived tables.
     //   team_inequality      reads team_sprint_inequality      (← inequality)
     //   low_composite_score  reads student_sprint_contribution (← contribution)
     //   ghost_contributor    reads student_sprint_contribution
     //   hidden_contributor   reads student_sprint_contribution
+    //   cramming             reads student_sprint_temporal     (← temporal)
     // On a fresh DB, running `flags` before its writers silently emits zero
-    // flags. Keep inequality + contribution before flags.
+    // flags. Keep inequality + contribution + temporal before flags.
     let cramming_hours = config.thresholds.cramming_hours;
     stage("metrics", &mut || {
         sprint_grader_analyze::metrics::compute_metrics_for_sprint_id(
@@ -295,6 +296,11 @@ fn run_project_stage_block(
     stage("contribution", &mut || {
         sprint_grader_analyze::compute_all_contributions(&conn, sprint_id, None)
     });
+    // temporal must run before `flags`: the cramming detector reads
+    // student_sprint_temporal (per-author timing), populated here.
+    stage("temporal", &mut || {
+        sprint_grader_process::compute_all_temporal(&conn, sprint_id)
+    });
     stage("flags", &mut || {
         sprint_grader_analyze::flags::detect_flags_for_sprint_id(&conn, sprint_id, config)
             .map(|_| ())
@@ -314,9 +320,6 @@ fn run_project_stage_block(
     });
     stage("regularity", &mut || {
         sprint_grader_process::compute_all_regularity(&conn, sprint_id, &config.regularity)
-    });
-    stage("temporal", &mut || {
-        sprint_grader_process::compute_all_temporal(&conn, sprint_id)
     });
     stage("collaboration", &mut || {
         sprint_grader_process::compute_all_collaboration(&conn, sprint_id)

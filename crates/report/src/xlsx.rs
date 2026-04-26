@@ -313,7 +313,10 @@ fn write_members_sheet(
             &[sid, &sprint_id],
         );
 
-        // Parse temporal_spread JSON
+        // Parse task-keyed temporal_spread JSON. Buckets are keyed on
+        // task.assignee_id, so a teammate's commits on this row's tasks count
+        // here. For per-author timing the source of truth is
+        // student_sprint_temporal.
         let spread: Value = metrics
             .as_ref()
             .and_then(|m| m.7.as_deref())

@@ -401,45 +401,38 @@ fn point_code_mismatch(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Ve
     Ok(flags)
 }
 
+// Reads `student_sprint_temporal` (per-author, keyed on the commit author's
+// github_login, populated by the `temporal` process stage). Previously this
+// detector read `student_sprint_metrics.temporal_spread`, which is keyed on
+// `task.assignee_id` — so a teammate's late-night commits on Bob's task
+// flagged Bob, not the actual late-night committer. See T-P1.1.
 fn cramming(
     conn: &Connection,
     sprint_id: i64,
     thresh: &ThresholdConfig,
 ) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(
-        "SELECT student_id, temporal_spread FROM student_sprint_metrics WHERE sprint_id = ?",
+        "SELECT student_id, cramming_ratio FROM student_sprint_temporal WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(String, Option<String>)> = stmt
+    let rows: Vec<(String, Option<f64>)> = stmt
         .query_map([sprint_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<f64>>(1)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
     let mut flags = Vec::new();
-    for (sid, spread_json) in rows {
-        let spread_json = match spread_json {
-            Some(s) => s,
+    for (sid, ratio) in rows {
+        let cramming_ratio = match ratio {
+            Some(r) => r,
             None => continue,
         };
-        let spread: Value = match serde_json::from_str(&spread_json) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let get = |k: &str| spread.get(k).and_then(Value::as_i64).unwrap_or(0);
-        let total = get("early") + get("mid") + get("late") + get("cramming");
-        if total == 0 {
-            continue;
-        }
-        let cramming_pct = get("cramming") as f64 / total as f64;
-        if cramming_pct > thresh.cramming_commit_pct {
+        if cramming_ratio > thresh.cramming_commit_pct {
             flags.push(Flag {
                 student_id: sid,
                 flag_type: "CRAMMING",
                 severity: "WARNING",
                 details: json!({
-                    "cramming_commits": get("cramming"),
-                    "total_commits": total,
-                    "cramming_pct": round3(cramming_pct),
+                    "cramming_ratio": round3(cramming_ratio),
                     "threshold": thresh.cramming_commit_pct,
                 }),
             });
@@ -2313,5 +2306,55 @@ mod tests {
         assert_eq!(flags[0].flag_type, "REGULARITY_DECLINING");
         assert_eq!(flags[0].details["pr_count"].as_i64(), Some(5));
         assert_eq!(flags[0].details["previous_pr_count"].as_i64(), Some(4));
+    }
+
+    fn mk_temporal_conn(rows: &[(&str, f64)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE student_sprint_temporal (
+                student_id TEXT NOT NULL,
+                sprint_id INTEGER NOT NULL,
+                cramming_ratio REAL,
+                PRIMARY KEY (student_id, sprint_id));",
+        )
+        .unwrap();
+        for (sid, ratio) in rows {
+            conn.execute(
+                "INSERT INTO student_sprint_temporal(student_id, sprint_id, cramming_ratio)
+                 VALUES (?, 10, ?)",
+                params![sid, ratio],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn cramming_attributes_to_commit_author_not_task_assignee() {
+        // Scenario: Alice (teammate) made all the late-night commits on Bob's
+        // task. student_sprint_temporal is per-author (it joins pr_commits on
+        // pc.author_login), so Alice's cramming_ratio is high and Bob's is 0.
+        // Pre-T-P1.1 the detector read student_sprint_metrics.temporal_spread,
+        // which is task-assignee-keyed, and flagged Bob.
+        let conn = mk_temporal_conn(&[("alice", 0.85), ("bob", 0.0)]);
+        let flags = cramming(&conn, 10, &mk_thresh()).unwrap();
+        assert_eq!(flags.len(), 1, "expected exactly one flag, got {flags:?}");
+        assert_eq!(flags[0].student_id, "alice");
+        assert_eq!(flags[0].flag_type, "CRAMMING");
+        assert_eq!(flags[0].severity, "WARNING");
+        assert_eq!(
+            flags[0].details["threshold"].as_f64(),
+            Some(mk_thresh().cramming_commit_pct),
+        );
+    }
+
+    #[test]
+    fn cramming_silent_below_threshold() {
+        let conn = mk_temporal_conn(&[("alice", 0.50), ("bob", 0.10)]);
+        let flags = cramming(&conn, 10, &mk_thresh()).unwrap();
+        assert!(
+            flags.is_empty(),
+            "below threshold must not flag — got {flags:?}"
+        );
     }
 }
