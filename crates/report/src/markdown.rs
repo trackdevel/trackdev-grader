@@ -36,6 +36,7 @@ type DonePrRow = (
     Option<String>,
     i64,
     i64,
+    Option<String>,
 );
 
 type GroupMemberRow = (
@@ -346,6 +347,41 @@ fn fmt_f2(v: f64) -> String {
 }
 fn fmt_pct(v: f64) -> String {
     format!("{}%", fmt_trim(v * 100.0, 1))
+}
+
+/// Render the per-PR attribution-errors warning glyph for the markdown report
+/// (T-P1.5). Returns an empty string when the column is NULL, empty, or the
+/// literal `[]`. Otherwise returns `⚠ (kind1, kind2)` where the kinds come
+/// from the JSON entries; if parsing fails we fall back to a bare ⚠ so a
+/// stale legacy value still surfaces as a signal.
+fn attribution_error_glyph(raw: Option<&str>) -> String {
+    let raw = match raw {
+        Some(s) if !s.trim().is_empty() && s.trim() != "[]" => s,
+        _ => return String::new(),
+    };
+    let parsed: Option<serde_json::Value> = serde_json::from_str(raw).ok();
+    let kinds: Vec<String> = match parsed.as_ref().and_then(|v| v.as_array()) {
+        Some(arr) => {
+            let mut out: Vec<String> = arr
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .get("kind")
+                        .and_then(|k| k.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            out.sort();
+            out.dedup();
+            out
+        }
+        None => Vec::new(),
+    };
+    if kinds.is_empty() {
+        "⚠".to_string()
+    } else {
+        format!("⚠ ({})", kinds.join(", "))
+    }
 }
 
 fn compact_reason_numbers(reason: &str) -> String {
@@ -1004,7 +1040,7 @@ fn write_section_b(
         // PR table — only PRs whose linked task is a DONE TASK/BUG show up.
         let mut stmt = conn.prepare(
             "SELECT DISTINCT pr.id, pr.pr_number, pr.repo_full_name, pr.title, pr.url,
-                    pr.additions, pr.deletions
+                    pr.additions, pr.deletions, pr.attribution_errors
              FROM pull_requests pr
              JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
              JOIN tasks t ON t.id = tpr.task_id
@@ -1022,6 +1058,7 @@ fn write_section_b(
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, Option<i64>>(5)?.unwrap_or(0),
                     r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    r.get::<_, Option<String>>(7)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -1041,7 +1078,7 @@ fn write_section_b(
                     "LS/pt",
                 ],
             );
-            for (pr_id, num, repo, title, url, adds, dels) in prs {
+            for (pr_id, num, repo, title, url, adds, dels, attr_errors) in prs {
                 let repo_short = repo
                     .as_deref()
                     .and_then(|s| s.rsplit('/').next())
@@ -1054,6 +1091,12 @@ fn write_section_b(
                     }
                     _ => (format!("#{}", num), md_escape(&title_str)),
                 };
+                let attr_glyph = attribution_error_glyph(attr_errors.as_deref());
+                let num_cell_with_glyph = if attr_glyph.is_empty() {
+                    num_cell
+                } else {
+                    format!("{num_cell} {attr_glyph}")
+                };
                 let (ls, ld, linked_pts) = pr_ls.get(&pr_id).copied().unwrap_or((0.0, 0.0, 0.0));
                 let ls_per_pt = if linked_pts > 0.0 {
                     ls / linked_pts
@@ -1065,7 +1108,7 @@ fn write_section_b(
                 let _ = writeln!(
                     buf,
                     "| {} | {} | {} | +{} / -{} | {} | {} | {} | {} |",
-                    num_cell,
+                    num_cell_with_glyph,
                     md_escape(&repo_short),
                     linked_title.replace('|', "\\|"),
                     adds,
@@ -1590,6 +1633,38 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::TempDir;
 
+    #[test]
+    fn attribution_error_glyph_empty_for_null_or_empty_array() {
+        assert_eq!(attribution_error_glyph(None), "");
+        assert_eq!(attribution_error_glyph(Some("")), "");
+        assert_eq!(attribution_error_glyph(Some("[]")), "");
+        assert_eq!(attribution_error_glyph(Some("   ")), "");
+    }
+
+    #[test]
+    fn attribution_error_glyph_lists_kinds() {
+        let raw = r#"[{"kind":"base_sha_fallback","detail":"x","observed_at":"t"},
+                       {"kind":"null_author_login","detail":"y","observed_at":"t"}]"#;
+        let s = attribution_error_glyph(Some(raw));
+        assert!(s.starts_with("⚠ ("));
+        assert!(s.contains("base_sha_fallback"));
+        assert!(s.contains("null_author_login"));
+    }
+
+    #[test]
+    fn attribution_error_glyph_dedupes_repeated_kinds() {
+        let raw = r#"[{"kind":"github_http_error","detail":"a","observed_at":"t"},
+                       {"kind":"github_http_error","detail":"b","observed_at":"t"}]"#;
+        let s = attribution_error_glyph(Some(raw));
+        assert_eq!(s, "⚠ (github_http_error)");
+    }
+
+    #[test]
+    fn attribution_error_glyph_falls_back_for_garbage() {
+        // Unparseable / non-array → bare glyph still signals.
+        assert_eq!(attribution_error_glyph(Some("not-json")), "⚠");
+    }
+
     fn mk_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -1604,7 +1679,8 @@ mod tests {
              CREATE TABLE pull_requests (id TEXT PRIMARY KEY, pr_number INTEGER,
                 repo_full_name TEXT, title TEXT, url TEXT, author_id TEXT,
                 additions INTEGER, deletions INTEGER, changed_files INTEGER,
-                created_at TEXT, merged INTEGER, merged_at TEXT, body TEXT);
+                created_at TEXT, merged INTEGER, merged_at TEXT, body TEXT,
+                attribution_errors TEXT);
              CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT,
                 PRIMARY KEY (task_id, pr_id));
              CREATE TABLE student_sprint_metrics (student_id TEXT, sprint_id INTEGER,

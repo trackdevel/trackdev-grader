@@ -223,6 +223,12 @@ pub struct PrLineMetrics {
     pub ld: i64,
     pub cosmetic_lines: i64,
     pub cosmetic_report: String,
+    /// Data-quality signals raised while computing this PR's metrics. The
+    /// caller (compute_pr_line_metrics) merges these into
+    /// `pull_requests.attribution_errors` after the parallel block finishes
+    /// — we cannot write from within Rayon workers because rusqlite
+    /// connections are not Send. (T-P1.5)
+    pub attribution_errors: Vec<(&'static str, String)>,
 }
 
 // ---- Git helpers ----
@@ -300,6 +306,7 @@ fn find_base_sha(
     default_branch: &str,
     first_sha: &str,
     last_sha: &str,
+    attribution_errors: &mut Vec<(&'static str, String)>,
 ) -> Option<String> {
     for branch_ref in [
         format!("origin/{default_branch}"),
@@ -351,16 +358,28 @@ fn find_base_sha(
         "find_base_sha: merge-base lookup failed, falling back to first_sha^1; \
          LAT/LAR/LS may be overstated for rebased PRs",
     );
+    attribution_errors.push((
+        sprint_grader_core::attribution::ATTR_ERR_BASE_SHA_FALLBACK,
+        format!("merge-base lookup failed against {default_branch}; using {first_sha}^1 as base"),
+    ));
     let out = Command::new("git")
         .args(["rev-parse", &format!("{first_sha}^1")])
         .current_dir(repo_path)
         .output()
         .ok()?;
     if !out.status.success() {
+        attribution_errors.push((
+            sprint_grader_core::attribution::ATTR_ERR_NO_BASE_CANDIDATE,
+            format!("rev-parse {first_sha}^1 failed; PR has no base candidate"),
+        ));
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() {
+        attribution_errors.push((
+            sprint_grader_core::attribution::ATTR_ERR_NO_BASE_CANDIDATE,
+            format!("rev-parse {first_sha}^1 returned empty; PR has no base candidate"),
+        ));
         None
     } else {
         Some(s)
@@ -425,7 +444,23 @@ pub fn compute_metrics_for_pr(
     let first_sha = &commit_shas[0];
     let last_sha = commit_shas.last().unwrap();
 
-    let base_sha = find_base_sha(repo_path, default_branch, first_sha, last_sha)?;
+    let mut attribution_errors: Vec<(&'static str, String)> = Vec::new();
+    let base_sha = match find_base_sha(
+        repo_path,
+        default_branch,
+        first_sha,
+        last_sha,
+        &mut attribution_errors,
+    ) {
+        Some(s) => s,
+        None => {
+            // Surface the no-base-candidate signal even when we abort early.
+            return Some(PrLineMetrics {
+                attribution_errors,
+                ..PrLineMetrics::default()
+            });
+        }
+    };
     warn_if_kotlin_present(repo_path, &base_sha, last_sha, pr_id, repo_full_name);
 
     let patterns = code_patterns(repo_full_name);
@@ -449,7 +484,10 @@ pub fn compute_metrics_for_pr(
     };
     if diff_text.trim().is_empty() {
         debug!(pr_id, base = %&base_sha[..12.min(base_sha.len())], head = %&last_sha[..12.min(last_sha.len())], "No diff output");
-        return Some(PrLineMetrics::default());
+        return Some(PrLineMetrics {
+            attribution_errors,
+            ..PrLineMetrics::default()
+        });
     }
     let diff_text = if diff_text.contains("Binary files") {
         diff_text
@@ -560,6 +598,7 @@ pub fn compute_metrics_for_pr(
         ld,
         cosmetic_lines: cosmetic_count,
         cosmetic_report,
+        attribution_errors,
     })
 }
 
@@ -784,6 +823,28 @@ pub fn compute_pr_line_metrics(
                 merge_sha,
             ],
         )?;
+        // T-P1.5: persist any attribution-error signals raised on this PR.
+        // We can't write from inside the rayon worker (rusqlite Connection
+        // isn't Send), so we accumulate per-result and merge here.
+        for (kind, detail) in &metrics.attribution_errors {
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT attribution_errors FROM pull_requests WHERE id = ?",
+                    [&pr_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten();
+            let merged = sprint_grader_core::attribution::merge_attribution_errors(
+                existing.as_deref(),
+                kind,
+                detail,
+            );
+            conn.execute(
+                "UPDATE pull_requests SET attribution_errors = ? WHERE id = ?",
+                params![merged, pr_id],
+            )?;
+        }
         count += 1;
     }
 
