@@ -335,6 +335,45 @@ struct RawRegularity {
 }
 
 impl Config {
+    /// Construct a `Config` populated with the same defaults that an empty
+    /// `course.toml` would produce. Intended for tests in dependent crates
+    /// that exercise pipeline functions taking `&Config` without wanting to
+    /// touch the filesystem.
+    pub fn test_default() -> Self {
+        Config {
+            course_name: "test-course".to_string(),
+            num_sprints: 4,
+            pm_base_url: "https://example.test".to_string(),
+            github_org: "example".to_string(),
+            course_id: 1,
+            claude_scripts_path: String::new(),
+            thresholds: ThresholdConfig {
+                carrying_team_pct: 0.40,
+                cramming_hours: 48,
+                cramming_commit_pct: 0.70,
+                single_commit_dump_lines: 200,
+                micro_pr_max_lines: 10,
+                low_doc_score: 2,
+                contribution_imbalance_stddev: 1.5,
+                low_survival_rate_stddev: 1.5,
+                low_survival_absolute_floor: 0.85,
+                raw_normalized_divergence_threshold: 0.20,
+            },
+            trackdev_token: String::new(),
+            github_token: String::new(),
+            sprints: HashMap::new(),
+            teams: Vec::new(),
+            curriculum_slides_dir: None,
+            curriculum_extra_imports: Vec::new(),
+            curriculum_template_repos: HashMap::new(),
+            repo_analysis: RepoAnalysisConfig::default(),
+            build_profiles: Vec::new(),
+            build: BuildConfig::default(),
+            regularity: RegularityConfig::default(),
+            detector_thresholds: DetectorThresholdsConfig::default(),
+        }
+    }
+
     pub fn load(config_dir: &Path) -> Result<Self> {
         let toml_path = config_dir.join("course.toml");
         if !toml_path.exists() {

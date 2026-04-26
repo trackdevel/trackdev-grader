@@ -4,7 +4,14 @@ use rusqlite::{params, Connection, Row};
 
 use crate::error::Result;
 
-const SCHEMA_SQL: &str = include_str!("schema.sql");
+pub const SCHEMA_SQL: &str = include_str!("schema.sql");
+
+/// Apply the canonical schema to an open connection. Used by the integration
+/// test harnesses in dependent crates so they can build an in-memory DB without
+/// going through `Database::open` (which insists on a filesystem path).
+pub fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(SCHEMA_SQL)
+}
 
 pub struct Database {
     pub db_path: PathBuf,
