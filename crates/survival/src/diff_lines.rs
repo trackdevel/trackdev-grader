@@ -344,6 +344,13 @@ fn find_base_sha(
         }
     }
 
+    warn!(
+        first_sha = %&first_sha[..first_sha.len().min(12)],
+        last_sha = %&last_sha[..last_sha.len().min(12)],
+        default_branch = %default_branch,
+        "find_base_sha: merge-base lookup failed, falling back to first_sha^1; \
+         LAT/LAR/LS may be overstated for rebased PRs",
+    );
     let out = Command::new("git")
         .args(["rev-parse", &format!("{first_sha}^1")])
         .current_dir(repo_path)
@@ -792,6 +799,9 @@ pub fn compute_pr_line_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // TODO(P0-7): assert the warn fires on fallback. Requires `tracing_test`
+    // or a custom subscriber. Not added in this chunk to avoid a new dep.
 
     #[test]
     fn parses_unified_diff() {
