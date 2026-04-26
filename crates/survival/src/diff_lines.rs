@@ -414,6 +414,7 @@ pub fn compute_metrics_for_pr(
     default_branch: &str,
     repo_full_name: &str,
     head_line_index: Option<&HashSet<String>>,
+    cosmetic_pct_of_lat: f64,
 ) -> Option<PrLineMetrics> {
     if commit_shas.is_empty() {
         return None;
@@ -529,7 +530,7 @@ pub fn compute_metrics_for_pr(
     let ld = (ldr - cosmetic_count).max(0);
 
     let mut cosmetic_report = String::new();
-    if lat > 0 && (cosmetic_count as f64) / (lat as f64) > 0.05 {
+    if lat > 0 && (cosmetic_count as f64) / (lat as f64) > cosmetic_pct_of_lat {
         let pct = (cosmetic_count as f64) / (lat as f64) * 100.0;
         cosmetic_report = format!("{cosmetic_count} cosmetic changes ({pct:.0}% of LAT).");
         if !cosmetic_examples.is_empty() {
@@ -570,6 +571,7 @@ pub fn compute_pr_line_metrics(
     repo_map: &HashMap<String, PathBuf>,
     max_workers: usize,
     include_all_merged: bool,
+    cosmetic_pct_of_lat: f64,
 ) -> rusqlite::Result<i64> {
     // Gather PRs (merged, linked to non-USER_STORY tasks in this sprint).
     let mut prs: Vec<(String, String)> = Vec::new(); // (pr_id, repo_full_name)
@@ -752,6 +754,7 @@ pub fn compute_pr_line_metrics(
                     &branch,
                     repo_full_name,
                     Some(&head_idx),
+                    cosmetic_pct_of_lat,
                 );
                 let last_sha = shas.last().cloned();
                 (pr_id.clone(), metrics, last_sha)

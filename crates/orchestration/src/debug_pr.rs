@@ -21,6 +21,7 @@ pub fn debug_pr_lines(
     data_dir: &Path,
     sprint_ids: &[i64],
     project_names: &[(i64, String)],
+    cosmetic_pct_of_lat: f64,
 ) -> Result<()> {
     let repo_map = sprint_grader_survival::survival::discover_repos(data_dir, db)?;
 
@@ -148,6 +149,7 @@ pub fn debug_pr_lines(
                 &default_branch,
                 &repo_full,
                 None,
+                cosmetic_pct_of_lat,
             ) {
                 None => println!("    RESULT: None (git commands failed)"),
                 Some(m) => {

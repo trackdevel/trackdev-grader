@@ -590,6 +590,7 @@ pub fn compute_survival(
     sprint: u32,
     data_dir: &Path,
     sprint_ids: Option<Vec<i64>>,
+    cosmetic_pct_of_lat: f64,
 ) -> rusqlite::Result<()> {
     let commit_pr_map = build_commit_to_pr_map(&db.conn)?;
     let email_student_map = build_email_to_student_map(&db.conn)?;
@@ -654,7 +655,7 @@ pub fn compute_survival(
 
     info!("Computing per-PR line metrics (LAT/LAR/LS)...");
     for sid in &sprint_ids {
-        compute_pr_line_metrics(&db.conn, *sid, &repo_map, 10, false)?;
+        compute_pr_line_metrics(&db.conn, *sid, &repo_map, 10, false, cosmetic_pct_of_lat)?;
     }
 
     info!("Survival computation complete");

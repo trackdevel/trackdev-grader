@@ -26,6 +26,7 @@ pub struct Config {
     pub build_profiles: Vec<BuildProfile>,
     pub build: BuildConfig,
     pub regularity: RegularityConfig,
+    pub detector_thresholds: DetectorThresholdsConfig,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -142,6 +143,46 @@ impl Default for RegularityConfig {
     }
 }
 
+/// Detector tuning knobs migrated out of `flags.rs::DETECTOR_DEFAULTS` and the
+/// few remaining bare literals in `flags.rs` and `trajectory.rs`. Default
+/// values are byte-identical with the prior literals (T-P1.3).
+#[derive(Debug, Clone, Copy)]
+pub struct DetectorThresholdsConfig {
+    pub gini_warn: f64,
+    pub gini_crit: f64,
+    pub composite_warn: f64,
+    pub composite_crit: f64,
+    pub late_regularity: f64,
+    pub team_inequality_outlier_deviation: f64,
+    pub trajectory_cv_low: f64,
+    pub trajectory_cv_high: f64,
+    pub trajectory_slope_p_value: f64,
+    pub regularity_declining_delta: f64,
+    pub cosmetic_rewrite_pct_of_lat: f64,
+    pub bulk_rename_adds_dels_ratio: f64,
+    pub bulk_rename_line_floor: i64,
+}
+
+impl Default for DetectorThresholdsConfig {
+    fn default() -> Self {
+        Self {
+            gini_warn: 0.35,
+            gini_crit: 0.50,
+            composite_warn: 0.20,
+            composite_crit: 0.10,
+            late_regularity: 0.20,
+            team_inequality_outlier_deviation: 0.35,
+            trajectory_cv_low: 0.20,
+            trajectory_cv_high: 0.40,
+            trajectory_slope_p_value: 0.15,
+            regularity_declining_delta: -0.30,
+            cosmetic_rewrite_pct_of_lat: 0.05,
+            bulk_rename_adds_dels_ratio: 0.8,
+            bulk_rename_line_floor: 50,
+        }
+    }
+}
+
 // --- Raw TOML deserialization structs (internal) ---
 
 #[derive(Debug, Deserialize)]
@@ -160,6 +201,8 @@ struct RawConfig {
     build: RawBuild,
     #[serde(default)]
     regularity: Option<RawRegularity>,
+    #[serde(default)]
+    detector_thresholds: RawDetectorThresholds,
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,6 +304,23 @@ struct RawBuildProfile {
 
 fn default_working_dir() -> String {
     ".".to_string()
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawDetectorThresholds {
+    gini_warn: Option<f64>,
+    gini_crit: Option<f64>,
+    composite_warn: Option<f64>,
+    composite_crit: Option<f64>,
+    late_regularity: Option<f64>,
+    team_inequality_outlier_deviation: Option<f64>,
+    trajectory_cv_low: Option<f64>,
+    trajectory_cv_high: Option<f64>,
+    trajectory_slope_p_value: Option<f64>,
+    regularity_declining_delta: Option<f64>,
+    cosmetic_rewrite_pct_of_lat: Option<f64>,
+    bulk_rename_adds_dels_ratio: Option<f64>,
+    bulk_rename_line_floor: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,6 +503,62 @@ impl Config {
             None => regularity_defaults,
         };
 
+        let detector_defaults = DetectorThresholdsConfig::default();
+        let detector_thresholds = DetectorThresholdsConfig {
+            gini_warn: raw
+                .detector_thresholds
+                .gini_warn
+                .unwrap_or(detector_defaults.gini_warn),
+            gini_crit: raw
+                .detector_thresholds
+                .gini_crit
+                .unwrap_or(detector_defaults.gini_crit),
+            composite_warn: raw
+                .detector_thresholds
+                .composite_warn
+                .unwrap_or(detector_defaults.composite_warn),
+            composite_crit: raw
+                .detector_thresholds
+                .composite_crit
+                .unwrap_or(detector_defaults.composite_crit),
+            late_regularity: raw
+                .detector_thresholds
+                .late_regularity
+                .unwrap_or(detector_defaults.late_regularity),
+            team_inequality_outlier_deviation: raw
+                .detector_thresholds
+                .team_inequality_outlier_deviation
+                .unwrap_or(detector_defaults.team_inequality_outlier_deviation),
+            trajectory_cv_low: raw
+                .detector_thresholds
+                .trajectory_cv_low
+                .unwrap_or(detector_defaults.trajectory_cv_low),
+            trajectory_cv_high: raw
+                .detector_thresholds
+                .trajectory_cv_high
+                .unwrap_or(detector_defaults.trajectory_cv_high),
+            trajectory_slope_p_value: raw
+                .detector_thresholds
+                .trajectory_slope_p_value
+                .unwrap_or(detector_defaults.trajectory_slope_p_value),
+            regularity_declining_delta: raw
+                .detector_thresholds
+                .regularity_declining_delta
+                .unwrap_or(detector_defaults.regularity_declining_delta),
+            cosmetic_rewrite_pct_of_lat: raw
+                .detector_thresholds
+                .cosmetic_rewrite_pct_of_lat
+                .unwrap_or(detector_defaults.cosmetic_rewrite_pct_of_lat),
+            bulk_rename_adds_dels_ratio: raw
+                .detector_thresholds
+                .bulk_rename_adds_dels_ratio
+                .unwrap_or(detector_defaults.bulk_rename_adds_dels_ratio),
+            bulk_rename_line_floor: raw
+                .detector_thresholds
+                .bulk_rename_line_floor
+                .unwrap_or(detector_defaults.bulk_rename_line_floor),
+        };
+
         Ok(Config {
             course_name: raw.course.name,
             num_sprints: raw.course.num_sprints,
@@ -462,6 +578,88 @@ impl Config {
             build_profiles,
             build,
             regularity,
+            detector_thresholds,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL_TOML: &str = r#"
+[course]
+name = "test-course"
+num_sprints = 4
+pm_base_url = "https://example.test"
+github_org = "example"
+course_id = 1
+
+[thresholds]
+carrying_team_pct = 0.4
+cramming_hours = 48
+cramming_commit_pct = 0.7
+single_commit_dump_lines = 200
+micro_pr_max_lines = 10
+low_doc_score = 2
+contribution_imbalance_stddev = 1.5
+"#;
+
+    fn write_config(dir: &Path, body: &str) {
+        std::fs::write(dir.join("course.toml"), body).unwrap();
+    }
+
+    #[test]
+    fn detector_thresholds_default_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_config(tmp.path(), MINIMAL_TOML);
+        let cfg = Config::load(tmp.path()).expect("load minimal config");
+        let dt = cfg.detector_thresholds;
+        let defaults = DetectorThresholdsConfig::default();
+        assert_eq!(dt.gini_warn, defaults.gini_warn);
+        assert_eq!(dt.gini_crit, defaults.gini_crit);
+        assert_eq!(dt.composite_warn, defaults.composite_warn);
+        assert_eq!(dt.composite_crit, defaults.composite_crit);
+        assert_eq!(dt.late_regularity, defaults.late_regularity);
+        assert_eq!(
+            dt.team_inequality_outlier_deviation,
+            defaults.team_inequality_outlier_deviation
+        );
+        assert_eq!(dt.trajectory_cv_low, defaults.trajectory_cv_low);
+        assert_eq!(dt.trajectory_cv_high, defaults.trajectory_cv_high);
+        assert_eq!(
+            dt.trajectory_slope_p_value,
+            defaults.trajectory_slope_p_value
+        );
+        assert_eq!(
+            dt.regularity_declining_delta,
+            defaults.regularity_declining_delta
+        );
+        assert_eq!(
+            dt.cosmetic_rewrite_pct_of_lat,
+            defaults.cosmetic_rewrite_pct_of_lat
+        );
+        assert_eq!(
+            dt.bulk_rename_adds_dels_ratio,
+            defaults.bulk_rename_adds_dels_ratio
+        );
+        assert_eq!(dt.bulk_rename_line_floor, defaults.bulk_rename_line_floor);
+    }
+
+    #[test]
+    fn detector_thresholds_override_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_TOML}\n[detector_thresholds]\ngini_warn = 0.42\ncomposite_crit = 0.05\nbulk_rename_line_floor = 100\nregularity_declining_delta = -0.10\n"
+        );
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("load overridden config");
+        assert_eq!(cfg.detector_thresholds.gini_warn, 0.42);
+        assert_eq!(cfg.detector_thresholds.composite_crit, 0.05);
+        assert_eq!(cfg.detector_thresholds.bulk_rename_line_floor, 100);
+        assert_eq!(cfg.detector_thresholds.regularity_declining_delta, -0.10);
+        // Untouched keys keep defaults.
+        let defaults = DetectorThresholdsConfig::default();
+        assert_eq!(cfg.detector_thresholds.gini_crit, defaults.gini_crit);
     }
 }

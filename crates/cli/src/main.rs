@@ -340,6 +340,7 @@ fn main() -> Result<()> {
                         ord,
                         &data_dir,
                         Some(vec![*sid]),
+                        config.detector_thresholds.cosmetic_rewrite_pct_of_lat,
                     )
                     .with_context(|| format!("survive failed for sprint_id {sid}"))?;
                 }
@@ -392,7 +393,7 @@ fn main() -> Result<()> {
                 sprint_grader_analyze::compute_all_contributions(&db.conn, sid, None)
                     .with_context(|| format!("contribution failed for sprint_id {sid}"))?;
             }
-            sprint_grader_analyze::compute_all_trajectories(&db.conn)
+            sprint_grader_analyze::compute_all_trajectories(&db.conn, &config.detector_thresholds)
                 .context("trajectory failed")?;
         }
         Command::Evaluate { projects } => {
@@ -700,6 +701,7 @@ fn main() -> Result<()> {
                 &data_dir,
                 &flat_sprint_ids,
                 &project_pairs,
+                config.detector_thresholds.cosmetic_rewrite_pct_of_lat,
             )
             .context("debug-pr-lines failed")?;
         }

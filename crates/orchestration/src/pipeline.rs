@@ -458,9 +458,13 @@ pub fn rerun_post_collection_for_sprint_ids(
     // its inner `sprint_id_for_project(ord)` lookup hits the same sprint.
     for sid in sprint_ids {
         let ord = sprint_grader_survival::survival::ordinal_for_sprint_id(&db, *sid).unwrap_or(1);
-        if let Err(e) =
-            sprint_grader_survival::survival::compute_survival(&db, ord, data_dir, Some(vec![*sid]))
-        {
+        if let Err(e) = sprint_grader_survival::survival::compute_survival(
+            &db,
+            ord,
+            data_dir,
+            Some(vec![*sid]),
+            config.detector_thresholds.cosmetic_rewrite_pct_of_lat,
+        ) {
             warn!(sprint_id = sid, error = %e, "survival failed");
         }
     }
@@ -483,7 +487,8 @@ pub fn rerun_post_collection_for_sprint_ids(
 
     let db = Database::open(db_path).context("reopening grading DB")?;
     db.create_tables().context("schema migration")?;
-    sprint_grader_analyze::compute_all_trajectories(&db.conn).context("trajectory failed")?;
+    sprint_grader_analyze::compute_all_trajectories(&db.conn, &config.detector_thresholds)
+        .context("trajectory failed")?;
     Ok(())
 }
 
@@ -568,9 +573,13 @@ pub fn run_pipeline(
     let data_dir = opts.entregues_dir.parent().unwrap_or(&opts.entregues_dir);
     for sid in &flat_sprint_ids {
         let ord = sprint_grader_survival::survival::ordinal_for_sprint_id(&db, *sid).unwrap_or(1);
-        if let Err(e) =
-            sprint_grader_survival::survival::compute_survival(&db, ord, data_dir, Some(vec![*sid]))
-        {
+        if let Err(e) = sprint_grader_survival::survival::compute_survival(
+            &db,
+            ord,
+            data_dir,
+            Some(vec![*sid]),
+            config.detector_thresholds.cosmetic_rewrite_pct_of_lat,
+        ) {
             if variant.ai_detection() {
                 warn!(sprint_id = sid, error = %e, "survival failed (tolerant in go/go-quick)");
             } else {
@@ -647,7 +656,8 @@ pub fn run_pipeline(
         total = total_stages,
         "trajectory aggregation"
     );
-    sprint_grader_analyze::compute_all_trajectories(&db.conn).context("trajectory failed")?;
+    sprint_grader_analyze::compute_all_trajectories(&db.conn, &config.detector_thresholds)
+        .context("trajectory failed")?;
 
     // Stage 6: reports
     if opts.skip_reports {

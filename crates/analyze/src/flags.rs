@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use sprint_grader_core::config::{Config, ThresholdConfig};
+use sprint_grader_core::config::{Config, DetectorThresholdsConfig, ThresholdConfig};
 use sprint_grader_core::stats::{median_upper, percentile_pos, round_half_even, stddev_pop};
 
 #[allow(clippy::type_complexity)]
@@ -119,31 +119,10 @@ pub struct Flag {
     pub details: Value,
 }
 
-/// Per-detector tuning knobs. Collected in one struct so thresholds aren't
-/// scattered as bare literals across 1500 lines of detectors. Values mirror
-/// the Python reference at `src/analyze/flags.py`; tune by editing the const
-/// below (or wire to TOML when threshold tuning becomes a live workflow).
-#[derive(Debug, Clone, Copy)]
-pub struct DetectorThresholds {
-    /// `team_inequality`: gini above this marks a WARNING.
-    pub gini_warn: f64,
-    /// `team_inequality`: gini above this marks a CRITICAL.
-    pub gini_crit: f64,
-    /// `low_composite_score`: composite below this marks WARNING.
-    pub composite_warn: f64,
-    /// `low_composite_score`: composite below this marks CRITICAL.
-    pub composite_crit: f64,
-    /// `all_prs_late`: avg regularity below this trips the flag.
-    pub late_regularity: f64,
-}
-
-pub const DETECTOR_DEFAULTS: DetectorThresholds = DetectorThresholds {
-    gini_warn: 0.35,
-    gini_crit: 0.50,
-    composite_warn: 0.20,
-    composite_crit: 0.10,
-    late_regularity: 0.20,
-};
+// Detector tuning knobs were previously local consts here. They moved to
+// `sprint_grader_core::config::DetectorThresholdsConfig` (T-P1.3) and are now
+// loaded from `course.toml [detector_thresholds]`. Detectors take
+// `&DetectorThresholdsConfig` directly.
 
 fn round3(x: f64) -> f64 {
     round_half_even(x, 3)
@@ -352,11 +331,11 @@ fn round_to(x: f64, digits: u32) -> f64 {
     round_half_even(x, digits)
 }
 
-fn team_inequality_is_material_outlier(value: f64, average: f64) -> bool {
+fn team_inequality_is_material_outlier(value: f64, average: f64, deviation: f64) -> bool {
     if average.abs() < f64::EPSILON {
         return value.abs() > f64::EPSILON;
     }
-    ((value - average).abs() / average) >= 0.35
+    ((value - average).abs() / average) >= deviation
 }
 
 fn point_code_mismatch(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
@@ -1101,7 +1080,11 @@ fn cross_team_similarity(conn: &Connection, sprint_id: i64) -> rusqlite::Result<
     Ok(flags)
 }
 
-fn bulk_rename_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+fn bulk_rename_pr(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT pr.id, pr.pr_number, pr.repo_full_name, pr.author_id,
                 pr.additions, pr.deletions
@@ -1134,7 +1117,7 @@ fn bulk_rename_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fla
         } else {
             0.0
         };
-        if ratio > 0.8 && adds + dels > 50 {
+        if ratio > dt.bulk_rename_adds_dels_ratio && adds + dels > dt.bulk_rename_line_floor {
             let surv: Option<(i64, i64, i64, i64)> = conn
                 .query_row(
                     "SELECT statements_surviving_raw, statements_added_raw,
@@ -1594,9 +1577,14 @@ fn team_inequality_evidence_for_member(
     }))
 }
 
-fn team_inequality(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
-    let gini_warn = DETECTOR_DEFAULTS.gini_warn;
-    let gini_crit = DETECTOR_DEFAULTS.gini_crit;
+fn team_inequality(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
+    let gini_warn = dt.gini_warn;
+    let gini_crit = dt.gini_crit;
+    let outlier_deviation = dt.team_inequality_outlier_deviation;
     let mut stmt = conn.prepare(
         "SELECT project_id, metric_name, gini, hoover, cv
          FROM team_sprint_inequality WHERE sprint_id = ?",
@@ -1677,7 +1665,7 @@ fn team_inequality(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
                     _ => None,
                 })
                 .unwrap_or(0.0);
-            if !team_inequality_is_material_outlier(value, average) {
+            if !team_inequality_is_material_outlier(value, average, outlier_deviation) {
                 continue;
             }
             let details = json!({
@@ -1702,9 +1690,13 @@ fn team_inequality(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
     Ok(flags)
 }
 
-fn low_composite_score(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
-    let warn = DETECTOR_DEFAULTS.composite_warn;
-    let crit = DETECTOR_DEFAULTS.composite_crit;
+fn low_composite_score(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
+    let warn = dt.composite_warn;
+    let crit = dt.composite_crit;
     let mut stmt = conn.prepare(
         "SELECT student_id, composite_score, code_signal, review_signal,
                 task_signal, process_signal
@@ -1997,9 +1989,12 @@ fn last_minute_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fla
     Ok(flags)
 }
 
-fn all_prs_late(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
-    // Python gets `late_threshold` via getattr fallback to 0.20.
-    let late_threshold = DETECTOR_DEFAULTS.late_regularity;
+fn all_prs_late(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
+    let late_threshold = dt.late_regularity;
     let mut stmt = conn.prepare(
         "SELECT student_id, avg_regularity, pr_count, prs_in_last_24h, prs_in_last_3h
          FROM student_sprint_regularity WHERE sprint_id = ? AND pr_count >= 2",
@@ -2037,9 +2032,14 @@ fn all_prs_late(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>
     Ok(flags)
 }
 
-fn regularity_declining(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+fn regularity_declining(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
     // Below 3 PRs in either sprint, avg_regularity is noise: a single
-    // late merge dominates. Skip the comparison entirely.
+    // late merge dominates. Skip the comparison entirely. Kept as a Rust
+    // constant per T-P1.3 scope (not a tunable threshold).
     const MIN_PR_COUNT: i64 = 3;
 
     let mut stmt = conn.prepare(
@@ -2083,7 +2083,7 @@ fn regularity_declining(conn: &Connection, sprint_id: i64) -> rusqlite::Result<V
                 continue;
             }
             let delta = a - p;
-            if delta < -0.30 {
+            if delta < dt.regularity_declining_delta {
                 flags.push(Flag {
                     student_id: sid,
                     flag_type: "REGULARITY_DECLINING",
@@ -2129,6 +2129,7 @@ pub fn detect_flags_for_sprint_id(
 ) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM flags WHERE sprint_id = ?", [sprint_id])?;
     let t = &config.thresholds;
+    let dt = &config.detector_thresholds;
 
     // Each detector is allowed to fail independently — matches Python's
     // try/except around the dispatcher loop.
@@ -2184,10 +2185,13 @@ pub fn detect_flags_for_sprint_id(
         "CROSS_TEAM_SIMILARITY",
         cross_team_similarity(conn, sprint_id)
     );
-    total += run!("BULK_RENAME_PR", bulk_rename_pr(conn, sprint_id));
+    total += run!("BULK_RENAME_PR", bulk_rename_pr(conn, sprint_id, dt));
     total += run!("LOW_DOC_SCORE", low_doc_score(conn, sprint_id, t));
-    total += run!("TEAM_INEQUALITY", team_inequality(conn, sprint_id));
-    total += run!("LOW_COMPOSITE_SCORE", low_composite_score(conn, sprint_id));
+    total += run!("TEAM_INEQUALITY", team_inequality(conn, sprint_id, dt));
+    total += run!(
+        "LOW_COMPOSITE_SCORE",
+        low_composite_score(conn, sprint_id, dt)
+    );
     total += run!("GHOST_CONTRIBUTOR", ghost_contributor(conn, sprint_id));
     total += run!("HIDDEN_CONTRIBUTOR", hidden_contributor(conn, sprint_id));
     total += run!("PR_DOES_NOT_COMPILE", pr_does_not_compile(conn, sprint_id));
@@ -2197,10 +2201,10 @@ pub fn detect_flags_for_sprint_id(
         high_compile_failure_rate(conn, sprint_id)
     );
     total += run!("LAST_MINUTE_PR", last_minute_pr(conn, sprint_id));
-    total += run!("ALL_PRS_LATE", all_prs_late(conn, sprint_id));
+    total += run!("ALL_PRS_LATE", all_prs_late(conn, sprint_id, dt));
     total += run!(
         "REGULARITY_DECLINING",
-        regularity_declining(conn, sprint_id)
+        regularity_declining(conn, sprint_id, dt)
     );
 
     // Config-dependent detector.
@@ -2221,6 +2225,10 @@ pub fn detect_flags_for_sprint_id(
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    fn mk_dt() -> DetectorThresholdsConfig {
+        DetectorThresholdsConfig::default()
+    }
 
     fn mk_thresh() -> ThresholdConfig {
         ThresholdConfig {
@@ -2323,7 +2331,7 @@ mod tests {
             (9, "b", 0.70, 2),
             (10, "b", 0.20, 5),
         ]);
-        let flags = regularity_declining(&conn, 10).unwrap();
+        let flags = regularity_declining(&conn, 10, &mk_dt()).unwrap();
         assert!(
             flags.is_empty(),
             "low pr_count in either sprint must suppress the flag — got {flags:?}"
@@ -2334,7 +2342,7 @@ mod tests {
     fn regularity_declining_fires_when_count_sufficient() {
         // Both sprints have pr_count = 5; delta = 0.30 - 0.70 = -0.40.
         let conn = mk_regularity_conn(&[(9, "a", 0.70, 4), (10, "a", 0.30, 5)]);
-        let flags = regularity_declining(&conn, 10).unwrap();
+        let flags = regularity_declining(&conn, 10, &mk_dt()).unwrap();
         assert_eq!(flags.len(), 1, "expected exactly one flag, got {flags:?}");
         assert_eq!(flags[0].student_id, "a");
         assert_eq!(flags[0].flag_type, "REGULARITY_DECLINING");
@@ -2458,6 +2466,55 @@ mod tests {
         assert!(
             flags.is_empty(),
             "below threshold must not flag — got {flags:?}"
+        );
+    }
+
+    // T-P1.3 wiring tests: prove `DetectorThresholdsConfig` overrides reach
+    // each migrated literal. Each test uses a fixture sized so the default
+    // threshold produces no flag and a custom override produces one (or
+    // vice versa).
+
+    #[test]
+    fn regularity_declining_delta_threshold_is_wired() {
+        // delta = 0.50 - 0.70 = -0.20. Default threshold (-0.30) → no flag.
+        // Lower the bar to -0.10 and the flag fires.
+        let conn = mk_regularity_conn(&[(9, "a", 0.70, 4), (10, "a", 0.50, 5)]);
+        let default_flags = regularity_declining(&conn, 10, &mk_dt()).unwrap();
+        assert!(default_flags.is_empty(), "default delta must not fire");
+
+        let mut dt = mk_dt();
+        dt.regularity_declining_delta = -0.10;
+        let lenient = regularity_declining(&conn, 10, &dt).unwrap();
+        assert_eq!(lenient.len(), 1, "loosened threshold must fire");
+    }
+
+    #[test]
+    fn team_inequality_outlier_deviation_threshold_is_wired() {
+        // Helper used by team_inequality to filter spurious outliers. With
+        // value=100, average=80, ratio = 0.25. Default 0.35 → not an outlier.
+        // Override to 0.20 → counts as an outlier.
+        assert!(!team_inequality_is_material_outlier(100.0, 80.0, 0.35));
+        assert!(team_inequality_is_material_outlier(100.0, 80.0, 0.20));
+    }
+
+    #[test]
+    fn trajectory_thresholds_are_wired() {
+        use crate::trajectory::classify_trajectory;
+        // Steady fixture: cv ~ 0.05 → "steady" under default; raise
+        // trajectory_cv_low past 0.05 should still be steady; lower it
+        // below 0.05 should push the same scores past the steady cutoff.
+        let scores = [10.0, 11.0, 10.5, 11.5];
+        let dt_default = mk_dt();
+        let r_default = classify_trajectory(&scores, &dt_default);
+        assert_eq!(r_default.class, "steady");
+
+        let mut dt_strict = mk_dt();
+        dt_strict.trajectory_cv_low = 0.001;
+        dt_strict.trajectory_cv_high = 0.01;
+        let r_strict = classify_trajectory(&scores, &dt_strict);
+        assert_ne!(
+            r_strict.class, "steady",
+            "tightened cv bands must reclassify the same scores"
         );
     }
 }

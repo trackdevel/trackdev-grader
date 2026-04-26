@@ -90,3 +90,29 @@ cosmetic_share_threshold = 0.5
 temporal_early_hours = 96
 temporal_moderate_hours = 72
 temporal_late_hours = 48
+
+# Detector thresholds (T-P1.3) — knobs previously hardcoded in flags.rs and
+# trajectory.rs. All keys are optional; omitting a key falls back to the
+# value baked into the binary.
+[detector_thresholds]
+# team_inequality: gini cutoffs for WARNING / CRITICAL
+gini_warn = 0.35
+gini_crit = 0.50
+# low_composite_score: composite cutoffs for WARNING / CRITICAL
+composite_warn = 0.20
+composite_crit = 0.10
+# all_prs_late: avg regularity below this trips the flag
+late_regularity = 0.20
+# team_inequality_is_material_outlier: |value - average| / |average|
+team_inequality_outlier_deviation = 0.35
+# trajectory classification (cv bands + slope p-value gate)
+trajectory_cv_low = 0.20
+trajectory_cv_high = 0.40
+trajectory_slope_p_value = 0.15
+# regularity_declining: delta = avg_curr - avg_prev
+regularity_declining_delta = -0.30
+# survival cosmetic-rewrite reporting threshold (cosmetic / LAT)
+cosmetic_rewrite_pct_of_lat = 0.05
+# bulk_rename_pr: ratio = min(adds,dels) / max(adds,dels), with a line floor
+bulk_rename_adds_dels_ratio = 0.8
+bulk_rename_line_floor = 50
