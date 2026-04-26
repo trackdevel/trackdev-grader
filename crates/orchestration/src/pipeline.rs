@@ -254,7 +254,13 @@ fn run_project_stage_block(
         }
     }
 
-    // metrics + heuristics + flags + inequality + contribution
+    // Stage order matters: four flag detectors read derived tables.
+    //   team_inequality      reads team_sprint_inequality      (← inequality)
+    //   low_composite_score  reads student_sprint_contribution (← contribution)
+    //   ghost_contributor    reads student_sprint_contribution
+    //   hidden_contributor   reads student_sprint_contribution
+    // On a fresh DB, running `flags` before its writers silently emits zero
+    // flags. Keep inequality + contribution before flags.
     let cramming_hours = config.thresholds.cramming_hours;
     stage("metrics", &mut || {
         sprint_grader_analyze::metrics::compute_metrics_for_sprint_id(
@@ -266,8 +272,9 @@ fn run_project_stage_block(
     stage("heuristics", &mut || {
         sprint_grader_evaluate::run_heuristics_for_sprint_id(&conn, sprint_id).map(|_| ())
     });
-    stage("flags", &mut || {
-        sprint_grader_analyze::flags::detect_flags_for_sprint_id(&conn, sprint_id, config)
+    // llm_eval_pr_docs (T-P0.2)
+    stage("llm_eval_task_descriptions", &mut || {
+        sprint_grader_evaluate::score_task_descriptions_for_sprint_id(&conn, sprint_id, config)
             .map(|_| ())
     });
     stage("inequality", &mut || {
@@ -276,10 +283,8 @@ fn run_project_stage_block(
     stage("contribution", &mut || {
         sprint_grader_analyze::compute_all_contributions(&conn, sprint_id, None)
     });
-
-    // llm_eval (heuristic path always runs; network path is best-effort)
-    stage("llm_eval_task_descriptions", &mut || {
-        sprint_grader_evaluate::score_task_descriptions_for_sprint_id(&conn, sprint_id, config)
+    stage("flags", &mut || {
+        sprint_grader_analyze::flags::detect_flags_for_sprint_id(&conn, sprint_id, config)
             .map(|_| ())
     });
 
