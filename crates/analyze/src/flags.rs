@@ -2014,34 +2014,50 @@ fn all_prs_late(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>
 }
 
 fn regularity_declining(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+    // Below 3 PRs in either sprint, avg_regularity is noise: a single
+    // late merge dominates. Skip the comparison entirely.
+    const MIN_PR_COUNT: i64 = 3;
+
     let mut stmt = conn.prepare(
-        "SELECT student_id, avg_regularity FROM student_sprint_regularity WHERE sprint_id = ?",
+        "SELECT student_id, avg_regularity, pr_count
+         FROM student_sprint_regularity WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(String, Option<f64>)> = stmt
+    let rows: Vec<(String, Option<f64>, Option<i64>)> = stmt
         .query_map([sprint_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<f64>>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<f64>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
     let mut flags = Vec::new();
-    for (sid, avg) in rows {
+    for (sid, avg, cur_pr_count) in rows {
         let a = match avg {
             Some(x) => x,
             None => continue,
         };
-        let prev: Option<f64> = conn
+        let cur_pr_count = cur_pr_count.unwrap_or(0);
+        if cur_pr_count < MIN_PR_COUNT {
+            continue;
+        }
+        let prev: Option<(Option<f64>, Option<i64>)> = conn
             .query_row(
-                "SELECT sr.avg_regularity FROM student_sprint_regularity sr
+                "SELECT sr.avg_regularity, sr.pr_count FROM student_sprint_regularity sr
                  JOIN sprints sp ON sp.id = sr.sprint_id
                  JOIN sprints sp_curr ON sp_curr.id = ?
                  WHERE sr.student_id = ? AND sp.start_date < sp_curr.start_date
                  ORDER BY sp.start_date DESC LIMIT 1",
                 params![sprint_id, &sid],
-                |r| r.get::<_, Option<f64>>(0),
+                |r| Ok((r.get::<_, Option<f64>>(0)?, r.get::<_, Option<i64>>(1)?)),
             )
-            .ok()
-            .flatten();
-        if let Some(p) = prev {
+            .ok();
+        if let Some((Some(p), prev_pr_count)) = prev {
+            let prev_pr_count = prev_pr_count.unwrap_or(0);
+            if prev_pr_count < MIN_PR_COUNT {
+                continue;
+            }
             let delta = a - p;
             if delta < -0.30 {
                 flags.push(Flag {
@@ -2052,6 +2068,8 @@ fn regularity_declining(conn: &Connection, sprint_id: i64) -> rusqlite::Result<V
                         "current": round3(a),
                         "previous": round3(p),
                         "delta": round3(delta),
+                        "pr_count": cur_pr_count,
+                        "previous_pr_count": prev_pr_count,
                     }),
                 });
             }
@@ -2242,5 +2260,58 @@ mod tests {
             Some(0.85),
             "details must record the floor used"
         );
+    }
+
+    fn mk_regularity_conn(rows: &[(i64, &str, f64, i64)]) -> Connection {
+        // rows: (sprint_id, student_id, avg_regularity, pr_count).
+        // Sprint 10 = current, sprint 9 = previous (start_date earlier).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sprints (id INTEGER PRIMARY KEY, start_date TEXT);
+             CREATE TABLE student_sprint_regularity (
+                student_id TEXT, sprint_id INTEGER,
+                avg_regularity REAL, pr_count INTEGER,
+                PRIMARY KEY (student_id, sprint_id));
+             INSERT INTO sprints(id, start_date) VALUES (9, '2026-01-01');
+             INSERT INTO sprints(id, start_date) VALUES (10, '2026-02-01');",
+        )
+        .unwrap();
+        for (sid, student, avg, count) in rows {
+            conn.execute(
+                "INSERT INTO student_sprint_regularity(student_id, sprint_id, avg_regularity, pr_count)
+                 VALUES (?, ?, ?, ?)",
+                params![student, sid, avg, count],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn regularity_declining_silent_when_pr_count_low() {
+        // delta = 0.20 - 0.70 = -0.50 (well past -0.30) but pr_count is only 2.
+        let conn = mk_regularity_conn(&[
+            (9, "a", 0.70, 5),
+            (10, "a", 0.20, 2),
+            (9, "b", 0.70, 2),
+            (10, "b", 0.20, 5),
+        ]);
+        let flags = regularity_declining(&conn, 10).unwrap();
+        assert!(
+            flags.is_empty(),
+            "low pr_count in either sprint must suppress the flag — got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn regularity_declining_fires_when_count_sufficient() {
+        // Both sprints have pr_count = 5; delta = 0.30 - 0.70 = -0.40.
+        let conn = mk_regularity_conn(&[(9, "a", 0.70, 4), (10, "a", 0.30, 5)]);
+        let flags = regularity_declining(&conn, 10).unwrap();
+        assert_eq!(flags.len(), 1, "expected exactly one flag, got {flags:?}");
+        assert_eq!(flags[0].student_id, "a");
+        assert_eq!(flags[0].flag_type, "REGULARITY_DECLINING");
+        assert_eq!(flags[0].details["pr_count"].as_i64(), Some(5));
+        assert_eq!(flags[0].details["previous_pr_count"].as_i64(), Some(4));
     }
 }
