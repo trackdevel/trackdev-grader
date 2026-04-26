@@ -207,6 +207,7 @@ sprints) and `--data-dir` (lets you point at a different DB / repo cache).
 ```
 config/
 ├── course.toml                # main course + threshold + build config
+├── architecture.toml          # T-P2.2 layered/onion-model rules (optional; absent → scan skipped)
 ├── rubric.md                  # PR documentation rubric (sent to Claude)
 ├── boilerplate_patterns.txt   # SHA-256 fingerprints excluded from cross-team detection
 └── user_mapping.csv           # optional pm_username → github_username mapping
@@ -258,6 +259,9 @@ Tables fall into a few groups:
 - **Curriculum** — `curriculum_concepts`, `curriculum_concepts_snapshot`
   (T-P2.5 per-sprint freeze), `curriculum_violations`.
 - **Ownership** — `team_sprint_ownership` (T-P2.3 truck factor + ranked owners).
+- **Architecture** — `architecture_violations` (T-P2.2; one row per
+  `(file, broken rule, offending import)` from the `architecture.toml`
+  scan).
 - **Audit** — `pipeline_run` (T-P2.6: one row per `run_pipeline` invocation;
   records the seed, jitter %, and the realised threshold map when
   `[grading] hidden_thresholds = true`).
@@ -310,6 +314,16 @@ types changed behaviour during the P0/P1 wave and warrant calling out:
 - **`REGULARITY_DECLINING`** requires `pr_count >= 3` in **both** the
   current and previous sprint (T-P0.8). Below that threshold a single late
   merge dominates and the comparison is noise.
+- **`ARCHITECTURE_DRIFT`** (WARNING, project-attributed as
+  `PROJECT_<id>`) fires when this sprint's count of `architecture_violations`
+  rows is strictly higher than the prior sprint's (T-P2.2). It's
+  enabled by dropping a `config/architecture.toml` rule file and
+  describes layered/onion/hexagonal model violations:
+  `[[layers]]` blocks declare each named layer's package globs and its
+  `may_depend_on` allow-list, and `[[forbidden]]` blocks blacklist
+  imports for matching files (e.g. keep Spring web annotations out of
+  the domain layer). When `architecture.toml` is absent the scan is
+  skipped silently.
 
 ## Subcommand reference
 

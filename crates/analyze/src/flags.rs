@@ -2120,6 +2120,69 @@ fn regularity_declining(
     Ok(flags)
 }
 
+/// ARCHITECTURE_DRIFT (T-P2.2). For each project covered by this sprint,
+/// compare the count of `architecture_violations` rows against the most
+/// recent prior sprint. Fire WARNING when the current count is strictly
+/// higher — i.e., the team regressed against the layered model.
+///
+/// The flag is project-scoped; we attribute it to a synthetic
+/// `PROJECT_<id>` student, matching `cross_team_similarity`'s convention
+/// so the renderer treats it as a team-level note rather than punishing
+/// any single member.
+fn architecture_drift(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+    let project_id: Option<i64> = conn
+        .query_row(
+            "SELECT project_id FROM sprints WHERE id = ?",
+            [sprint_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let project_id = match project_id {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    let current: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM architecture_violations av
+             JOIN sprints s ON s.id = av.sprint_id
+             WHERE s.project_id = ? AND av.sprint_id = ?",
+            params![project_id, sprint_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let prev: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT s.id, COUNT(av.sprint_id)
+             FROM sprints s
+             LEFT JOIN architecture_violations av ON av.sprint_id = s.id
+             JOIN sprints curr ON curr.id = ?
+             WHERE s.project_id = curr.project_id
+                   AND s.start_date < curr.start_date
+             GROUP BY s.id
+             ORDER BY s.start_date DESC LIMIT 1",
+            [sprint_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .ok();
+    let mut flags = Vec::new();
+    if let Some((prev_sprint_id, prev_count)) = prev {
+        if current > prev_count {
+            flags.push(Flag {
+                student_id: format!("PROJECT_{project_id}"),
+                flag_type: "ARCHITECTURE_DRIFT",
+                severity: "WARNING",
+                details: json!({
+                    "current": current,
+                    "previous": prev_count,
+                    "previous_sprint_id": prev_sprint_id,
+                    "delta": current - prev_count,
+                }),
+            });
+        }
+    }
+    Ok(flags)
+}
+
 // ---- Dispatcher ----
 
 fn persist_flags(conn: &Connection, sprint_id: i64, flags: &[Flag]) -> rusqlite::Result<()> {
@@ -2224,6 +2287,7 @@ pub fn detect_flags_for_sprint_id(
         "REGULARITY_DECLINING",
         regularity_declining(conn, sprint_id, dt)
     );
+    total += run!("ARCHITECTURE_DRIFT", architecture_drift(conn, sprint_id));
 
     // Config-dependent detector.
     total += run!(

@@ -1423,6 +1423,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprint-grader-architecture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde",
+ "sprint-grader-core",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
 name = "sprint-grader-cli"
 version = "0.1.0"
 dependencies = [
@@ -1540,6 +1555,7 @@ dependencies = [
  "sha2",
  "sprint-grader-ai-detect",
  "sprint-grader-analyze",
+ "sprint-grader-architecture",
  "sprint-grader-collect",
  "sprint-grader-compile",
  "sprint-grader-core",

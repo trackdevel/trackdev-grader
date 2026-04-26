@@ -936,6 +936,46 @@ fn write_section_a(
         }
     }
 
+    // T-P2.2: architecture conformance roll-up. Reads
+    // `architecture_violations` totals + per-rule top-3 so the team sees
+    // both the headline count and which rules are biting.
+    let arch_total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM architecture_violations av
+             JOIN sprints s ON s.id = av.sprint_id
+             WHERE s.project_id = ? AND av.sprint_id = ?",
+            rusqlite::params![project_id, sprint_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if arch_total > 0 {
+        let _ = writeln!(buf, "{} Architecture conformance\n", h3);
+        let _ = writeln!(
+            buf,
+            "**Total violations:** {} (severity per `architecture.toml`).\n",
+            arch_total
+        );
+        let mut stmt = conn.prepare(
+            "SELECT rule_name, COUNT(*) as n FROM architecture_violations av
+             JOIN sprints s ON s.id = av.sprint_id
+             WHERE s.project_id = ? AND av.sprint_id = ?
+             GROUP BY rule_name ORDER BY n DESC, rule_name LIMIT 3",
+        )?;
+        let rows: Vec<(String, i64)> = stmt
+            .query_map(rusqlite::params![project_id, sprint_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        if !rows.is_empty() {
+            let _ = writeln!(buf, "Top rules:");
+            for (rule, n) in rows {
+                let _ = writeln!(buf, "- `{}` — {}", html_escape(&rule), n);
+            }
+            buf.push('\n');
+        }
+    }
+
     // Flag severity roll-up for the team
     let critical = count_severity(conn, sprint_id, project_id, "CRITICAL");
     let warning = count_severity(conn, sprint_id, project_id, "WARNING");
@@ -1760,6 +1800,10 @@ mod tests {
              CREATE TABLE team_sprint_ownership (project_id INTEGER, sprint_id INTEGER,
                 truck_factor INTEGER, owners_csv TEXT,
                 PRIMARY KEY (project_id, sprint_id));
+             CREATE TABLE architecture_violations (repo_full_name TEXT, sprint_id INTEGER,
+                file_path TEXT, rule_name TEXT, violation_kind TEXT,
+                offending_import TEXT, severity TEXT,
+                PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import));
              CREATE TABLE task_similarity_groups (group_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sprint_id INTEGER, project_id INTEGER, representative_task_id INTEGER,
                 group_label TEXT, stack TEXT, layer TEXT, action TEXT,
@@ -1878,6 +1922,30 @@ mod tests {
         // Treemap SVG embeds file paths as <title> tooltips.
         assert!(body.contains("src/A.java"));
         assert!(body.contains("src/B.java"));
+    }
+
+    #[test]
+    fn architecture_section_renders_when_violations_exist() {
+        let conn = mk_conn();
+        conn.execute_batch(
+            "INSERT INTO architecture_violations
+                (repo_full_name, sprint_id, file_path, rule_name,
+                 violation_kind, offending_import, severity)
+             VALUES
+                ('udg/spring-foo', 10, 'A.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING'),
+                ('udg/spring-foo', 10, 'B.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING'),
+                ('udg/spring-foo', 10, 'C.java', 'domain-no-spring-web',
+                 'forbidden_import', 'org.springframework.web.RestController', 'WARNING');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("### Architecture conformance"));
+        assert!(body.contains("**Total violations:** 3"));
+        assert!(body.contains("presentation-&gt;!infrastructure"));
     }
 
     #[test]

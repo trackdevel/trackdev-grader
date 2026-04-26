@@ -730,6 +730,23 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
     created_at      TEXT NOT NULL
 );
 
+-- Architecture conformance violations (T-P2.2). One row per
+-- (file, rule, offending import) so a single layer-leak in a controller
+-- importing a repository doesn't get aggregated away. `violation_kind`
+-- is one of `layer_dependency` (a layered rule was broken) or
+-- `forbidden_import` (a category-level prohibition fired). `rule_name`
+-- is the rule label from `architecture.toml` for cross-referencing.
+CREATE TABLE IF NOT EXISTS architecture_violations (
+    repo_full_name   TEXT NOT NULL,
+    sprint_id        INTEGER NOT NULL,
+    file_path        TEXT NOT NULL,
+    rule_name        TEXT NOT NULL,
+    violation_kind   TEXT NOT NULL,
+    offending_import TEXT NOT NULL,
+    severity         TEXT NOT NULL,
+    PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import)
+);
+
 -- Per-team ownership snapshot (T-P2.3). `truck_factor` is the smallest k
 -- such that the top-k authors jointly own >=95% of statements attributed in
 -- the project's fingerprints for this sprint. `owners_csv` lists those k

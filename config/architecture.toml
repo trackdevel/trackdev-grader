@@ -1,0 +1,62 @@
+# Architecture conformance rules (T-P2.2).
+#
+# `severity` (default "WARNING") is applied to every emitted violation.
+# Rules are evaluated against every Java file with a `package`
+# declaration. Files with no `package` (default-package) are skipped.
+#
+# Patterns use `**` (any number of package segments) and `*` (one
+# segment). They match against package names: `com.example.domain.user`
+# splits to four segments. Slashes in patterns are segment separators
+# regardless of source — `**/domain/**` matches `domain.user` and
+# `com.x.domain`.
+#
+# Two rule kinds:
+# - `[[layers]]` defines a named layer + its allow-list of layers it may
+#   import from. An import targeting a layer outside the allow-list
+#   produces a `layer_dependency` violation.
+# - `[[forbidden]]` defines packages whose files must not import from a
+#   blacklist (typically: keep framework imports out of the domain
+#   layer). Produces a `forbidden_import` violation.
+
+severity = "WARNING"
+
+# --- Hexagonal-ish layered model for the Spring backend -----------------
+
+[[layers]]
+name = "domain"
+packages = ["**/domain/**", "**/model/**"]
+may_depend_on = []
+
+[[layers]]
+name = "application"
+packages = ["**/application/**", "**/service/**", "**/usecase/**"]
+may_depend_on = ["domain"]
+
+[[layers]]
+name = "infrastructure"
+packages = ["**/infrastructure/**", "**/repository/**", "**/persistence/**"]
+may_depend_on = ["domain", "application"]
+
+[[layers]]
+name = "presentation"
+packages = ["**/controller/**", "**/web/**", "**/api/**", "**/rest/**"]
+may_depend_on = ["application", "domain"]
+
+# --- Forbidden imports --------------------------------------------------
+
+[[forbidden]]
+name = "domain-no-spring-web"
+from = "**/domain/**"
+must_not_match = [
+    "org/springframework/web/**",
+    "org/springframework/data/**",
+    "javax/servlet/**",
+]
+
+[[forbidden]]
+name = "domain-no-jpa"
+from = "**/domain/**"
+must_not_match = [
+    "javax/persistence/**",
+    "jakarta/persistence/**",
+]

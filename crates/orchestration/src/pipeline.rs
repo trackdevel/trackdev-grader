@@ -673,6 +673,39 @@ pub fn run_pipeline(
         }
     }
 
+    // T-P2.2: architecture conformance scan. Runs on every variant
+    // (not gated by ai_detection) — it's a deterministic scan of the
+    // already-cloned repos, not an LLM call. Skips silently when
+    // `architecture.toml` is absent or the project dir doesn't exist.
+    let arch_rules_path = opts.config_dir.join("architecture.toml");
+    if arch_rules_path.is_file() {
+        match sprint_grader_architecture::ArchitectureRules::load(&arch_rules_path) {
+            Ok(arch_rules) => {
+                for g in &groups {
+                    let project_root = opts.entregues_dir.join(&g.name);
+                    for sid in &g.sprint_ids {
+                        if let Err(e) = sprint_grader_architecture::scan_project_to_db(
+                            &db.conn,
+                            &project_root,
+                            *sid,
+                            &arch_rules,
+                        ) {
+                            warn!(project = %g.name, sprint_id = sid, error = %e, "architecture scan failed");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, path = %arch_rules_path.display(), "architecture rules load failed")
+            }
+        }
+    } else {
+        info!(
+            path = %arch_rules_path.display(),
+            "architecture.toml absent — skipping architecture scan"
+        );
+    }
+
     // Stage 4: AI detection (go / go-quick) — per (project, sprint).
     if variant.ai_detection() {
         info!(stage = 4, total = total_stages, "AI detection");
