@@ -71,6 +71,16 @@ static GENERIC_TITLE: Lazy<Regex> = Lazy::new(|| {
 static TASK_ID_ONLY: Lazy<FancyRegex> =
     Lazy::new(|| FancyRegex::new(r"^(\s*[A-Za-z]+-\d+\s*[,;]?\s*)+$").expect("task id regex"));
 
+// Markdown-linked counterpart of TASK_ID_ONLY: bodies whose entire content
+// is one or more `[task-id](url)` links (e.g. `[p4d-194](https://...)`).
+// Content-free but bypasses TASK_ID_ONLY because of the bracket/paren syntax.
+// Anchor text allows alphanumeric prefixes (e.g. `p4d`) that real Trackdev
+// project keys use, not just plain letters.
+static TASK_MD_LINK_ONLY: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(\s*\[[A-Za-z][A-Za-z0-9]*-\d+\]\([^)]+\)\s*[,;]?\s*)+$")
+        .expect("task md-link regex")
+});
+
 fn heuristic_title_score(title: Option<&str>) -> i64 {
     let title = match title {
         Some(t) => t.trim(),
@@ -97,7 +107,7 @@ fn heuristic_description_score(body: Option<&str>) -> i64 {
     if body.len() < 20 {
         return 0;
     }
-    if TASK_ID_ONLY.is_match(body).unwrap_or(false) {
+    if TASK_ID_ONLY.is_match(body).unwrap_or(false) || TASK_MD_LINK_ONLY.is_match(body) {
         return 0;
     }
     if body.len() < 50 {
@@ -725,6 +735,27 @@ mod tests {
             heuristic_description_score(Some("PDS-123 pds-44")),
             0,
             "task-id only must score 0"
+        );
+        // Markdown-linked task-id only must also score 0 (T-P0.5).
+        assert_eq!(
+            heuristic_description_score(Some(
+                "[p4d-194](https://trackdev.org/dashboard/tasks/5075)"
+            )),
+            0,
+            "single md-link to task must score 0"
+        );
+        assert_eq!(
+            heuristic_description_score(Some(
+                "[p4d-194](https://example.com), [p4d-195](https://example.com)"
+            )),
+            0,
+            "comma-separated md-links must score 0"
+        );
+        assert!(
+            heuristic_description_score(Some(
+                "[p4d-194](https://example.com) Adds the user endpoint."
+            )) > 0,
+            "md-link followed by real prose must score > 0"
         );
         // 20..50 chars, no structure → 1
         assert_eq!(
