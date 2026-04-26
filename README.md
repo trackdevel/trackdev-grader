@@ -96,13 +96,29 @@ The orchestration crate exposes three top-level pipelines:
 - **`go`** — end-of-sprint evaluation. Purges existing rows for the targeted
   projects, re-collects, runs the full pipeline including AI detection, and
   is tolerant to survival errors so you can still get a partial report.
-- **`go-quick`** — same as `go` but skips the (expensive) Claude code-review
-  pass. Designed for iterative work mid-sprint.
+- **`go-quick`** — like `go`, but the LLM PR-doc evaluation always falls back
+  to the heuristic scorer (no Claude calls) regardless of `ANTHROPIC_API_KEY`.
+  Designed for iterative work mid-sprint.
+
+PR documentation evaluation by variant:
+
+| Pipeline    | Heuristic doc eval | LLM doc eval                       |
+|-------------|--------------------|------------------------------------|
+| `run-all`   | ✓                  | ✓ if `ANTHROPIC_API_KEY` is set    |
+| `go`        | ✓                  | ✓ if `ANTHROPIC_API_KEY` is set    |
+| `go-quick`  | ✓                  | ✗ — heuristic only, even with key  |
+
+`go-quick` previously skipped PR doc eval entirely; as of T-P0.2 it now
+populates `student_sprint_metrics.avg_doc_score` from the heuristic scorer.
 
 All three use a `rayon` thread pool to fan sprints out across worker
 connections (SQLite WAL mode allows concurrent readers + serialised writers).
 Stages 5–7 (quality / process / repo_analysis / ai_detect) are each pure
 functions of the DB, so re-running them is cheap.
+
+`go` and `go-quick` accept `--dry-run` (preview the cascade purge step and
+exit before the pipeline runs) and `--require-clean-tree` (refuse to start
+if `git status --porcelain` is non-empty).
 
 ## Quick start
 
@@ -140,7 +156,8 @@ Edit [`config/course.toml`](config/course.toml) — the most important keys:
 |---|---|---|
 | `[course]` | `name`, `num_sprints`, `pm_base_url`, `github_org`, `course_id` | Identifies which TrackDev course + GitHub org to pull from. |
 | `[course]` | `claude_scripts_path` | Path to the Claude session library used by LLM evaluation. |
-| `[thresholds]` | `cramming_hours`, `micro_pr_max_lines`, `low_doc_score`, `contribution_imbalance_stddev`, … | Tunables for the flag detector. |
+| `[thresholds]` | `cramming_hours`, `micro_pr_max_lines`, `low_doc_score`, `contribution_imbalance_stddev`, `low_survival_rate_stddev`, `low_survival_absolute_floor`, `raw_normalized_divergence_threshold`, … | Tunables for the flag detector. `low_survival_absolute_floor` (default `0.85`) is the absolute LS rate below which `LOW_SURVIVAL_RATE` may fire even when the relative-stddev guard would otherwise suppress it. |
+| `[detector_thresholds]` | `gini_warn`, `gini_crit`, `composite_warn`, `composite_crit`, `late_regularity`, `team_inequality_outlier_deviation`, `trajectory_cv_low`, `trajectory_cv_high`, `trajectory_slope_p_value`, `regularity_declining_delta`, `cosmetic_rewrite_pct_of_lat`, `bulk_rename_adds_dels_ratio`, `bulk_rename_line_floor` | Detector-level knobs migrated out of Rust source (T-P1.3). All keys are optional — omit any and the binary falls back to the canonical default in `DetectorThresholdsConfig::default()` (defaults: `0.35 / 0.50 / 0.20 / 0.10 / 0.20 / 0.35 / 0.20 / 0.40 / 0.15 / -0.30 / 0.05 / 0.8 / 50`). |
 | `[[build.profiles]]` | `repo_pattern`, `command`, `timeout_seconds` | Per-repo-type build command run by `compile`. The pattern is a regex against the repo directory name. |
 | `[build]` | `max_parallel_builds`, `stderr_max_chars`, `skip_already_tested` | Compile-stage concurrency + caching behaviour. |
 | `[curriculum]` | `slides_dir`, `extra_allowed_imports` | Where to find the LaTeX slides; imports always considered "taught". |
@@ -239,6 +256,54 @@ Tables fall into a few groups:
 - **Curriculum** — `curriculum_concepts`, `curriculum_violations`.
 - **Flags** — `flags` (the consolidated per-student / per-PR anomaly list).
 
+`pull_requests.attribution_errors` carries an accumulating JSON array of
+`{kind, detail, observed_at}` entries describing data-quality issues found
+while populating that PR (T-P1.5). Recognised kinds:
+
+- `base_sha_fallback` — survival's `find_base_sha` fell back to `first_sha^1`.
+  LAT/LAR/LS may be overstated for rebased PRs.
+- `no_base_candidate` — survival could find no base at all; metrics for this
+  PR are zero.
+- `null_author_login` — at least one commit returned by `/pulls/{n}/commits`
+  had `author.login == null`, OR the resolution loop couldn't map the GitHub
+  login to a student.
+- `github_http_error` — a PR or commits fetch failed; details include the
+  HTTP error.
+- `stale_github_fetch` — reserved (analysis-time check; not yet emitted).
+
+These are **observability signals, not grading penalties**: composite scores
+ignore them. The Markdown report renders a `⚠ (kind1, kind2)` glyph next to
+the PR number cell when the column is non-empty. The column is capped at 20
+entries per PR and survives a normal collect refresh (cleared only by an
+explicit purge).
+
+## Flag types
+
+The `flags` table is consumed by the report; full enumeration lives in
+[`crates/analyze/src/flags.rs`](crates/analyze/src/flags.rs). A few flag
+types changed behaviour during the P0/P1 wave and warrant calling out:
+
+- **`COSMETIC_REWRITE_VICTIM`** (INFO) and **`COSMETIC_REWRITE_ACTOR`**
+  (WARNING) replaced the single `COSMETIC_REWRITE` flag (T-P1.2). The
+  *actor* (rewriter) accumulates the WARNING toward their totals; the
+  *victim* (original author) is informed via INFO without a penalty. Both
+  details JSON cross-reference via `counterpart_user_id`. Legacy
+  `COSMETIC_REWRITE` rows from pre-T-P1.2 DBs still render via a
+  fallback in `report::flag_details`.
+- **`CRAMMING`** is now keyed on the **commit author** (per
+  `student_sprint_temporal.cramming_ratio`) rather than the task assignee
+  (T-P1.1). Re-runs against pre-T-P1.1 baselines will show CRAMMING flags
+  *moving* from task-owner rows to actual late-night committers — that is
+  a correction, not a regression.
+- **`LOW_SURVIVAL_RATE`** requires both a relative drop (≥
+  `low_survival_rate_stddev` below team mean) **and** an absolute drop
+  (`survival_rate_normalized < low_survival_absolute_floor`, default 0.85)
+  before firing (T-P0.3). Previously the relative gate alone could flag
+  uniformly-high teams.
+- **`REGULARITY_DECLINING`** requires `pr_count >= 3` in **both** the
+  current and previous sprint (T-P0.8). Below that threshold a single late
+  merge dominates and the comparison is noise.
+
 ## Subcommand reference
 
 Stage commands (each runs one analysis stage against sprints with
@@ -265,10 +330,10 @@ Orchestration / utility:
 | Command | Purpose |
 |---|---|
 | `run-all` | Additive full pipeline; no AI detection. |
-| `go` | End-of-sprint: purge → re-collect → full pipeline + AI detection. |
-| `go-quick` | Same as `go`, skipping the LLM code-review pass. |
+| `go [--dry-run] [--require-clean-tree]` | End-of-sprint: purge → re-collect → full pipeline + AI detection. `--dry-run` previews the cascade purge step (per-table row counts) and exits before any pipeline stage runs. `--require-clean-tree` refuses to start if `git status --porcelain` reports a dirty working tree. |
+| `go-quick [--dry-run] [--require-clean-tree]` | Same as `go`, but PR doc evaluation always runs heuristic-only (no Claude calls). Same `--dry-run` / `--require-clean-tree` semantics as `go`. |
 | `sync-reports [--push]` | Regenerate `REPORT.md` for every sprint up to today; optionally commit + push to each team's `main`. |
-| `purge-cache --line-metrics --survival --compilation --doc-eval` | Selectively drop derived rows so the next run recomputes them. |
+| `purge-cache --line-metrics --survival --compilation --doc-eval [--dry-run] [--require-clean-tree]` | Selectively drop derived rows so the next run recomputes them. `--dry-run` rewrites each `DELETE` as a `SELECT COUNT(*)` over the same predicate and prints projected row counts table-by-table without modifying the DB. `--require-clean-tree` is the same guard as on `go`. |
 | `debug-pr-lines` | Dump LAT/LAR/LS computation for individual PRs (diagnostics). |
 | `diff-db DB_A DB_B [--tables …] [--derived-only] [--ignore-cols T:c1,c2] [--dump-diffs]` | Table-by-table checksum diff between two `grading.db` files; exits non-zero on mismatch. Used to verify pipeline changes don't drift. |
 
