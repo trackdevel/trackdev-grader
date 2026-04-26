@@ -85,6 +85,19 @@ CREATE TABLE IF NOT EXISTS pr_commits (
     deletions INTEGER
 );
 
+-- Pre-squash author capture (T-P1.4). When `/pulls/{n}/commits` returns the
+-- per-commit history of a merged PR, we shadow it here so AUTHOR_MISMATCH
+-- still works after a future force-push deletes the head ref. This table is
+-- supplementary to pr_commits, never a replacement.
+CREATE TABLE IF NOT EXISTS pr_pre_squash_authors (
+    pr_id        TEXT NOT NULL,
+    sha          TEXT NOT NULL,
+    author_login TEXT,
+    author_email TEXT,
+    captured_at  TEXT,
+    PRIMARY KEY (pr_id, sha)
+);
+
 CREATE TABLE IF NOT EXISTS pr_reviews (
     pr_id TEXT,
     reviewer_login TEXT,

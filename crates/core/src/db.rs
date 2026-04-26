@@ -341,6 +341,26 @@ impl Database {
         Ok(())
     }
 
+    /// Capture an original commit author for a merged PR (T-P1.4). Used by
+    /// `author_mismatch` as the authoritative source — `pr_commits` is the
+    /// fallback if no rows exist for a PR. Idempotent on (pr_id, sha).
+    pub fn upsert_pr_pre_squash_author(
+        &self,
+        pr_id: &str,
+        sha: &str,
+        author_login: Option<&str>,
+        author_email: Option<&str>,
+        captured_at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO pr_pre_squash_authors
+             (pr_id, sha, author_login, author_email, captured_at)
+             VALUES (?, ?, ?, ?, ?)",
+            params![pr_id, sha, author_login, author_email, captured_at],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_pr_review(
         &self,
         pr_id: &str,

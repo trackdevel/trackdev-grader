@@ -649,6 +649,22 @@ fn collect_github_details_for_project(
                         None,
                         None,
                     )?;
+                    // T-P1.4: shadow per-commit author into pr_pre_squash_authors
+                    // for merged PRs so AUTHOR_MISMATCH survives a later
+                    // force-push that would otherwise erase the original
+                    // history. Detection of "is this PR squash-merged" via
+                    // local-clone reachability is an optimisation deferred to
+                    // a follow-up; the always-shadow strategy is purely
+                    // additive (PK on (pr_id, sha) keeps writes idempotent).
+                    if pr.merged && !sha.is_empty() {
+                        db.upsert_pr_pre_squash_author(
+                            &pr.id,
+                            sha,
+                            author_login,
+                            author_email,
+                            &now_iso,
+                        )?;
+                    }
                 }
                 if let Some(tag) = new_etag.as_deref() {
                     if !tag.is_empty() {

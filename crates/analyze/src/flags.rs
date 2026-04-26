@@ -625,11 +625,29 @@ fn author_mismatch(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
             None => continue,
         };
 
-        let mut stmt = conn.prepare("SELECT author_login FROM pr_commits WHERE pr_id = ?")?;
-        let commits: Vec<Option<String>> = stmt
-            .query_map([&pr_id], |r| r.get::<_, Option<String>>(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        drop(stmt);
+        // T-P1.4: prefer pr_pre_squash_authors (captured at collect time
+        // before any future force-push erases per-commit history). If the
+        // pre-squash table has rows for this PR, treat them as authoritative;
+        // otherwise fall back to pr_commits.
+        let pre_squash: Vec<Option<String>> = {
+            let mut stmt =
+                conn.prepare("SELECT author_login FROM pr_pre_squash_authors WHERE pr_id = ?")?;
+            let rows = stmt
+                .query_map([&pr_id], |r| r.get::<_, Option<String>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            rows
+        };
+        let commits: Vec<Option<String>> = if pre_squash.is_empty() {
+            let mut stmt = conn.prepare("SELECT author_login FROM pr_commits WHERE pr_id = ?")?;
+            let rows = stmt
+                .query_map([&pr_id], |r| r.get::<_, Option<String>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            rows
+        } else {
+            pre_squash
+        };
         let mismatched: std::collections::BTreeSet<String> = commits
             .into_iter()
             .flatten()
@@ -2495,6 +2513,88 @@ mod tests {
         // Override to 0.20 → counts as an outlier.
         assert!(!team_inequality_is_material_outlier(100.0, 80.0, 0.35));
         assert!(team_inequality_is_material_outlier(100.0, 80.0, 0.20));
+    }
+
+    fn mk_author_mismatch_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sprints (id INTEGER PRIMARY KEY);
+             CREATE TABLE students (id TEXT PRIMARY KEY, github_login TEXT);
+             CREATE TABLE tasks (id INTEGER PRIMARY KEY, sprint_id INTEGER, type TEXT);
+             CREATE TABLE pull_requests (id TEXT PRIMARY KEY, pr_number INTEGER,
+                repo_full_name TEXT, author_id TEXT, github_author_login TEXT);
+             CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT);
+             CREATE TABLE pr_commits (pr_id TEXT, sha TEXT, author_login TEXT);
+             CREATE TABLE pr_pre_squash_authors (
+                pr_id TEXT NOT NULL, sha TEXT NOT NULL,
+                author_login TEXT, author_email TEXT, captured_at TEXT,
+                PRIMARY KEY (pr_id, sha));
+             INSERT INTO sprints(id) VALUES (10);
+             INSERT INTO students(id, github_login) VALUES ('alice', 'alice-gh');
+             INSERT INTO students(id, github_login) VALUES ('bob', 'bob-gh');
+             INSERT INTO tasks(id, sprint_id, type) VALUES (1, 10, 'TASK');
+             INSERT INTO pull_requests(id, pr_number, repo_full_name, author_id, github_author_login)
+                VALUES ('pr-1', 42, 'org/repo', 'alice', 'alice-gh');
+             INSERT INTO task_pull_requests(task_id, pr_id) VALUES (1, 'pr-1');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn author_mismatch_prefers_pr_pre_squash_authors() {
+        // After a squash, pr_commits collapses to the squasher (alice).
+        // pr_pre_squash_authors retains the original commit authors (bob).
+        // Detector must read from pr_pre_squash_authors and flag the mismatch.
+        let conn = mk_author_mismatch_conn();
+        conn.execute(
+            "INSERT INTO pr_commits(pr_id, sha, author_login)
+             VALUES ('pr-1', 'squash-sha', 'alice-gh')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO pr_pre_squash_authors(pr_id, sha, author_login, captured_at)
+             VALUES ('pr-1', 'orig-sha-1', 'bob-gh', '2026-04-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let flags = author_mismatch(&conn, 10).unwrap();
+        assert_eq!(flags.len(), 1, "expected mismatch flag, got {flags:?}");
+        assert_eq!(flags[0].flag_type, "AUTHOR_MISMATCH");
+        // Detail should name the original committer (bob), not the squasher.
+        let commit_authors = flags[0].details["commit_authors"]
+            .as_array()
+            .expect("commit_authors array");
+        assert!(
+            commit_authors.iter().any(|v| v.as_str() == Some("bob-gh")),
+            "must include original committer; got {commit_authors:?}"
+        );
+        assert!(
+            !commit_authors
+                .iter()
+                .any(|v| v.as_str() == Some("alice-gh")),
+            "must not include the PR author (squasher) from pr_commits fallback"
+        );
+    }
+
+    #[test]
+    fn author_mismatch_falls_back_to_pr_commits_when_pre_squash_empty() {
+        // No pr_pre_squash_authors rows → fall back to pr_commits, which
+        // contains the same author as the PR — no flag.
+        let conn = mk_author_mismatch_conn();
+        conn.execute(
+            "INSERT INTO pr_commits(pr_id, sha, author_login)
+             VALUES ('pr-1', 'sha-1', 'alice-gh')",
+            [],
+        )
+        .unwrap();
+        let flags = author_mismatch(&conn, 10).unwrap();
+        assert!(
+            flags.is_empty(),
+            "matching authors must not flag — got {flags:?}"
+        );
     }
 
     #[test]
