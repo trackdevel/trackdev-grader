@@ -31,6 +31,27 @@ pub struct Config {
     pub build: BuildConfig,
     pub regularity: RegularityConfig,
     pub detector_thresholds: DetectorThresholdsConfig,
+    pub grading: GradingConfig,
+}
+
+/// Anti-gaming config (T-P2.6). When `hidden_thresholds = true`, every
+/// fractional detector knob is uniformly jittered by `± jitter_pct` at
+/// pipeline start, seeded by `(today, course_id)` so the same `--today`
+/// reproduces. Default `hidden_thresholds = false` keeps the original
+/// fixed-threshold behaviour.
+#[derive(Debug, Clone, Copy)]
+pub struct GradingConfig {
+    pub hidden_thresholds: bool,
+    pub jitter_pct: f64,
+}
+
+impl Default for GradingConfig {
+    fn default() -> Self {
+        Self {
+            hidden_thresholds: false,
+            jitter_pct: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -207,6 +228,16 @@ struct RawConfig {
     regularity: Option<RawRegularity>,
     #[serde(default)]
     detector_thresholds: RawDetectorThresholds,
+    #[serde(default)]
+    grading: RawGrading,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawGrading {
+    #[serde(default)]
+    hidden_thresholds: bool,
+    #[serde(default)]
+    jitter_pct: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -378,6 +409,7 @@ impl Config {
             build: BuildConfig::default(),
             regularity: RegularityConfig::default(),
             detector_thresholds: DetectorThresholdsConfig::default(),
+            grading: GradingConfig::default(),
         }
     }
 
@@ -626,6 +658,10 @@ impl Config {
             build,
             regularity,
             detector_thresholds,
+            grading: GradingConfig {
+                hidden_thresholds: raw.grading.hidden_thresholds,
+                jitter_pct: raw.grading.jitter_pct.unwrap_or(0.0),
+            },
         })
     }
 }

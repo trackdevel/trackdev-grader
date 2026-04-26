@@ -514,6 +514,18 @@ pub fn run_pipeline(
     let db = Database::open(db_path).context("opening grading DB")?;
     db.create_tables().context("schema migration")?;
 
+    // T-P2.6: jitter the detector thresholds (seeded by today + course_id)
+    // when `[grading] hidden_thresholds = true`. The audit row always
+    // lands so re-runs can be cross-referenced even with jitter disabled.
+    let mut config = config.clone();
+    let course_id = config.course_id;
+    let jitter_record =
+        sprint_grader_core::jitter::apply_threshold_jitter(&mut config, &opts.today, course_id);
+    if let Err(e) = sprint_grader_core::jitter::record_pipeline_run(&db.conn, &jitter_record) {
+        warn!(error = %e, "could not write pipeline_run row (non-fatal)");
+    }
+    let config = &config;
+
     // Stage 0: purge existing (go / go-quick only)
     if variant.purge_existing() {
         if let Some(names) = &opts.project_filter {

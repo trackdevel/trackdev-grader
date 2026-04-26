@@ -714,6 +714,22 @@ CREATE INDEX IF NOT EXISTS idx_task_pull_requests_pr_id
 CREATE INDEX IF NOT EXISTS idx_pr_line_metrics_merge_sha
     ON pr_line_metrics(pr_id, merge_sha);
 
+-- One row per `run_pipeline` invocation (T-P2.6). When `[grading]
+-- hidden_thresholds = true` the threshold values used by detectors are
+-- jittered ±jitter_pct from their published defaults, seeded by
+-- (today, course_id) so the same `--today` reproduces. `thresholds_json`
+-- is the realised value map for forensic comparison; reports show the
+-- published threshold + a `±N%` notation, never the realised value.
+CREATE TABLE IF NOT EXISTS pipeline_run (
+    run_id          TEXT PRIMARY KEY,
+    today           TEXT NOT NULL,
+    course_id       INTEGER NOT NULL,
+    jitter_pct      REAL,
+    seed            INTEGER NOT NULL,
+    thresholds_json TEXT,
+    created_at      TEXT NOT NULL
+);
+
 -- Per-team ownership snapshot (T-P2.3). `truck_factor` is the smallest k
 -- such that the top-k authors jointly own >=95% of statements attributed in
 -- the project's fingerprints for this sprint. `owners_csv` lists those k
