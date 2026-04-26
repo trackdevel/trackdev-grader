@@ -163,6 +163,8 @@ Edit [`config/course.toml`](config/course.toml) — the most important keys:
 | `[curriculum]` | `slides_dir`, `extra_allowed_imports` | Where to find the LaTeX slides; imports always considered "taught". |
 | `[regularity]` | `midpoint_hours`, `steepness`, band thresholds | Shape of the sigmoid that scores how early before the deadline a PR landed. |
 | `[repo_analysis]` | `group_min_size`, `mad_k_threshold`, `temporal_*_hours` | MAD-based outlier detection + temporal-tier cutoffs. |
+| `[curriculum]` | `freeze_after_sprint_end` (bool, default `false`) | When true, the orchestrator snapshots the curriculum-as-taught for any sprint whose `end_date` has passed (T-P2.5). Past sprints are then graded against the frozen `curriculum_concepts_snapshot`; the active sprint reads the live `curriculum_concepts` until you freeze. The CLI `sprint-grader freeze-curriculum --sprint <N>` is the explicit alternative. |
+| `[grading]` | `hidden_thresholds` (bool, default `false`), `jitter_pct` (float, default `0.0`) | Anti-gaming: when `hidden_thresholds = true`, every fractional detector knob is uniformly jittered by `± jitter_pct` once per pipeline run, seeded by `(today, course_id)`. Same `--today` reproduces; different `--today` may differ within the band. Realised values land in the `pipeline_run` audit table; reports show only the published threshold and the `±jitter_pct` band, never the realised value. Roll out only after the course's grading policy is publicly amended (T-P2.6). |
 
 ### Run
 
@@ -253,7 +255,12 @@ Tables fall into a few groups:
   `file_ai_probability`, `student_style_profile`, `student_style_baseline`,
   `student_text_profile`, `text_consistency_scores`,
   `student_sprint_ai_usage`.
-- **Curriculum** — `curriculum_concepts`, `curriculum_violations`.
+- **Curriculum** — `curriculum_concepts`, `curriculum_concepts_snapshot`
+  (T-P2.5 per-sprint freeze), `curriculum_violations`.
+- **Ownership** — `team_sprint_ownership` (T-P2.3 truck factor + ranked owners).
+- **Audit** — `pipeline_run` (T-P2.6: one row per `run_pipeline` invocation;
+  records the seed, jitter %, and the realised threshold map when
+  `[grading] hidden_thresholds = true`).
 - **Flags** — `flags` (the consolidated per-student / per-PR anomaly list).
 
 `pull_requests.attribution_errors` carries an accumulating JSON array of

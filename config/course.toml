@@ -62,6 +62,13 @@ extra_allowed_imports = [
 ]
 # android_template_repo = "/path/to/android-template"
 # spring_template_repo = "/path/to/spring-template"
+# When true, the orchestrator snapshots curriculum_concepts into
+# curriculum_concepts_snapshot for any sprint whose end_date has passed,
+# so re-running past sprints uses the curriculum-as-taught at that time
+# instead of silently re-grading them under newly-edited slides (T-P2.5).
+# Default false. `sprint-grader freeze-curriculum --sprint <N>` is the
+# explicit per-sprint alternative.
+# freeze_after_sprint_end = true
 
 # Regularity scoring (sigmoid-based decay toward deadline)
 [regularity]
@@ -116,3 +123,18 @@ cosmetic_rewrite_pct_of_lat = 0.05
 # bulk_rename_pr: ratio = min(adds,dels) / max(adds,dels), with a line floor
 bulk_rename_adds_dels_ratio = 0.8
 bulk_rename_line_floor = 50
+
+# Anti-gaming: per-run threshold jitter (T-P2.6).
+#
+# When hidden_thresholds = true, every fractional detector knob above is
+# uniformly jittered by ±jitter_pct once at pipeline start, seeded by
+# (today, course_id). Two runs on the same `--today` reproduce; runs on
+# different `--today` may differ within the band. The realised values
+# land in `pipeline_run` for audit; reports show only the published
+# threshold and the band, never the realised value.
+#
+# Default off. Roll out only after the course's grading policy is
+# publicly amended to permit a published-band-only disclosure.
+[grading]
+hidden_thresholds = false
+jitter_pct = 0.05
