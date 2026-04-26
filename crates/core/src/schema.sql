@@ -760,6 +760,22 @@ CREATE TABLE IF NOT EXISTS team_sprint_ownership (
     PRIMARY KEY (project_id, sprint_id)
 );
 
+-- Per-student estimation-bias posterior (T-P2.1). Fitted by the
+-- `estimation` crate via a Rasch-style additive model
+-- log(estimation_points) = β_u + δ_i + ε with N(0,1) priors. β > 0 means
+-- this student's estimates run high (over-estimate); β < 0 means under.
+-- The 95% credible interval is Gaussian (posterior mean ± 1.96·σ_post).
+CREATE TABLE IF NOT EXISTS student_estimation_bias (
+    student_id   TEXT NOT NULL,
+    project_id   INTEGER NOT NULL,
+    beta_mean    REAL,
+    beta_lower95 REAL,
+    beta_upper95 REAL,
+    n_tasks      INTEGER,
+    fitted_at    TEXT,
+    PRIMARY KEY (student_id, project_id)
+);
+
 CREATE TABLE IF NOT EXISTS student_sprint_ai_usage (
     student_id              TEXT NOT NULL,
     sprint_id               INTEGER NOT NULL,

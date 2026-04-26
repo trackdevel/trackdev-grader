@@ -450,10 +450,24 @@ struct StudentSummaryRow {
     surv_norm: f64,
     density: f64,
     flag_count: i64,
+    /// T-P2.1: per-student estimation bias (β_u). Only populated by
+    /// `cumulative_student_summary`; per-sprint rows leave it `None`
+    /// because bias is fitted across all sprints (the posterior wants
+    /// the full per-student history).
+    estimation_bias: Option<EstimationBiasCell>,
 }
 
-fn student_summary_headers() -> &'static [&'static str] {
-    &[
+#[derive(Debug, Clone, Copy)]
+struct EstimationBiasCell {
+    beta_mean: f64,
+    /// Half-width of the 95 % credible interval. Used to decide the
+    /// directional symbol: when the CrI excludes 0 by more than the
+    /// detector's 0.5-logit margin we render ▲/▼; otherwise ≈.
+    half_width: f64,
+}
+
+fn student_summary_headers(include_bias: bool) -> Vec<&'static str> {
+    let mut h = vec![
         "Student",
         "GitHub",
         "Points",
@@ -466,32 +480,69 @@ fn student_summary_headers() -> &'static [&'static str] {
         "Density",
         "Doc score",
         "Flags",
-    ]
+    ];
+    if include_bias {
+        h.push("β_u");
+    }
+    h
+}
+
+/// Render the β_u cell. Symbol semantics mirror the ESTIMATION_BIAS
+/// detector: ▲ over-estimator (CrI strictly above +0.5 logits), ▼
+/// under-estimator (CrI strictly below −0.5), ≈ calibrated otherwise.
+fn fmt_bias_cell(bias: Option<EstimationBiasCell>) -> String {
+    let Some(b) = bias else {
+        return String::new();
+    };
+    const MARGIN: f64 = 0.5;
+    let lower = b.beta_mean - b.half_width;
+    let upper = b.beta_mean + b.half_width;
+    let symbol = if lower > MARGIN {
+        "▲"
+    } else if upper < -MARGIN {
+        "▼"
+    } else {
+        "≈"
+    };
+    format!("{symbol} {:+.2}", b.beta_mean)
 }
 
 fn write_student_summary_table(buf: &mut String, students: &[StudentSummaryRow]) {
-    push_table_header(buf, student_summary_headers());
+    write_student_summary_table_inner(buf, students, false);
+}
+
+fn write_cumulative_student_summary_table(buf: &mut String, students: &[StudentSummaryRow]) {
+    write_student_summary_table_inner(buf, students, true);
+}
+
+fn write_student_summary_table_inner(
+    buf: &mut String,
+    students: &[StudentSummaryRow],
+    include_bias: bool,
+) {
+    push_table_header(buf, &student_summary_headers(include_bias));
     for s in students {
-        push_table_row(
-            buf,
-            &[
-                s.full_name.clone(),
-                s.github_login
-                    .as_deref()
-                    .map(github_cell)
-                    .unwrap_or_default(),
-                fmt_f1(s.pts),
-                fmt_pct(s.share),
-                fmt_f1(s.lines),
-                fmt_f1(s.ls),
-                fmt_f1(s.ld),
-                fmt_f2(s.ls_per_pt),
-                fmt_pct(s.surv_norm),
-                fmt_f2(s.density),
-                s.avg_doc.map(fmt_f1).unwrap_or_default(),
-                fmt_int(s.flag_count),
-            ],
-        );
+        let mut cells = vec![
+            s.full_name.clone(),
+            s.github_login
+                .as_deref()
+                .map(github_cell)
+                .unwrap_or_default(),
+            fmt_f1(s.pts),
+            fmt_pct(s.share),
+            fmt_f1(s.lines),
+            fmt_f1(s.ls),
+            fmt_f1(s.ld),
+            fmt_f2(s.ls_per_pt),
+            fmt_pct(s.surv_norm),
+            fmt_f2(s.density),
+            s.avg_doc.map(fmt_f1).unwrap_or_default(),
+            fmt_int(s.flag_count),
+        ];
+        if include_bias {
+            cells.push(fmt_bias_cell(s.estimation_bias));
+        }
+        push_table_row(buf, &cells);
     }
     buf.push('\n');
 }
@@ -555,6 +606,7 @@ fn current_student_summary(
                     ls: stats.ls,
                     ld: stats.ld,
                     ls_per_pt: stats.ls_per_pt,
+                    estimation_bias: None,
                 })
             },
         )?
@@ -685,6 +737,31 @@ fn cumulative_student_summary(
             0.0
         };
 
+        // T-P2.1: pull the per-student bias posterior for this project.
+        // Falls back to None when the row is missing (project skipped or
+        // student never had any estimated tasks). The half-width is
+        // `(upper95 - lower95) / 2`, which equals 1.96 · σ_post for the
+        // Gaussian posterior we fit.
+        let bias: Option<EstimationBiasCell> = conn
+            .query_row(
+                "SELECT beta_mean, beta_lower95, beta_upper95
+                 FROM student_estimation_bias
+                 WHERE student_id = ? AND project_id = ?",
+                rusqlite::params![id, project_id],
+                |r| {
+                    Ok((
+                        r.get::<_, f64>(0)?,
+                        r.get::<_, f64>(1)?,
+                        r.get::<_, f64>(2)?,
+                    ))
+                },
+            )
+            .ok()
+            .map(|(mean, lo, hi)| EstimationBiasCell {
+                beta_mean: mean,
+                half_width: (hi - lo) / 2.0,
+            });
+
         rows.push(StudentSummaryRow {
             id,
             full_name,
@@ -699,6 +776,7 @@ fn cumulative_student_summary(
             surv_norm,
             density,
             flag_count,
+            estimation_bias: bias,
         });
     }
 
@@ -841,7 +919,7 @@ fn write_section_a(
         if !sprint_ids.is_empty() {
             let cumulative_students = cumulative_student_summary(conn, sprint_ids, project_id)?;
             let _ = writeln!(buf, "{} Cumulative through this sprint\n", h3);
-            write_student_summary_table(buf, &cumulative_students);
+            write_cumulative_student_summary_table(buf, &cumulative_students);
         }
     }
 

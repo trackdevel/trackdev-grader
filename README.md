@@ -262,6 +262,9 @@ Tables fall into a few groups:
 - **Architecture** — `architecture_violations` (T-P2.2; one row per
   `(file, broken rule, offending import)` from the `architecture.toml`
   scan).
+- **Estimation** — `student_estimation_bias` (T-P2.1; per-student β_u
+  posterior fitted by the `estimation` crate from log-points and
+  per-task difficulty δ_i, with N(0,1) priors and a mean-β=0 gauge).
 - **Audit** — `pipeline_run` (T-P2.6: one row per `run_pipeline` invocation;
   records the seed, jitter %, and the realised threshold map when
   `[grading] hidden_thresholds = true`).
@@ -324,6 +327,15 @@ types changed behaviour during the P0/P1 wave and warrant calling out:
   imports for matching files (e.g. keep Spring web annotations out of
   the domain layer). When `architecture.toml` is absent the scan is
   skipped silently.
+- **`ESTIMATION_BIAS`** (WARNING, per-student) fires when the 95 %
+  credible interval of a student's β_u excludes 0 by more than 0.5
+  logits **and** they have at least 5 estimated tasks (T-P2.1). β_u is
+  fitted by the `estimation` crate against `log(SP) = β_u + δ_i + ε`
+  with N(0,1) priors and a mean-β=0 gauge; positive β_u means the
+  student systematically over-estimates (▲ in reports), negative means
+  under-estimates (▼). The cumulative student summary in Section A
+  prints the realised β_u with the directional symbol; `≈` denotes a
+  calibrated student whose CrI does not clear the margin.
 
 ## Subcommand reference
 

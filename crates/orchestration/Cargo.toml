@@ -28,6 +28,7 @@ sprint-grader-repo-analysis = { path = "../repo_analysis" }
 sprint-grader-report = { path = "../report" }
 sprint-grader-curriculum = { path = "../curriculum" }
 sprint-grader-architecture = { path = "../architecture" }
+sprint-grader-estimation = { path = "../estimation" }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -574,6 +574,17 @@ pub fn run_pipeline(
         clone_repos_from_db(&db, &opts.entregues_dir)?;
     }
 
+    // T-P2.1: per-student estimation-bias fitter. Pools every estimated
+    // task across every sprint of each project (Bayesian posterior wants
+    // all the data). Runs *before* the per-sprint flag detection inside
+    // the parallel block so `student_estimation_bias` is populated when
+    // the ESTIMATION_BIAS detector queries it on the same run. The fit
+    // depends only on `tasks` + `sprints`, both populated by `collect`.
+    match sprint_grader_estimation::fit_and_persist_for_all_projects(&db.conn) {
+        Ok(n) => info!(students_written = n, "estimation bias fitting done"),
+        Err(e) => warn!(error = %e, "estimation bias fitting failed"),
+    }
+
     // Resolve sprint groupings after collection.
     let groups = resolve_all_sprint_tuples(&db, &opts.today, opts.project_filter.as_deref())?;
     if groups.is_empty() {

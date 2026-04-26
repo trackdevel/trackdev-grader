@@ -2183,6 +2183,73 @@ fn architecture_drift(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec
     Ok(flags)
 }
 
+/// ESTIMATION_BIAS (T-P2.1). Per-student calibration flag based on the
+/// `student_estimation_bias` posterior fitted by the `estimation` crate.
+/// Fires WARNING when the 95 % credible interval for `β_u` excludes 0
+/// by more than 0.5 logits AND the student has at least 5 estimated
+/// tasks (the plan's small-sample mitigation; the prior keeps the
+/// posterior defined below 5, but we don't fire on it).
+///
+/// Note: the bias table is keyed by `(student_id, project_id)`, so for
+/// each sprint we resolve its project_id once and query all qualifying
+/// students for that project. The same student fires once per sprint
+/// they were active in — matching how the trajectory and inequality
+/// flags scope their per-sprint commentary.
+fn estimation_bias(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+    const LOGIT_MARGIN: f64 = 0.5;
+    const MIN_TASKS: i64 = 5;
+    let project_id: Option<i64> = conn
+        .query_row(
+            "SELECT project_id FROM sprints WHERE id = ?",
+            [sprint_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let project_id = match project_id {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    let mut stmt = conn.prepare(
+        "SELECT seb.student_id, seb.beta_mean, seb.beta_lower95, seb.beta_upper95, seb.n_tasks
+         FROM student_estimation_bias seb
+         WHERE seb.project_id = ? AND seb.n_tasks >= ?",
+    )?;
+    let rows = stmt
+        .query_map(params![project_id, MIN_TASKS], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut flags = Vec::new();
+    for (student_id, beta_mean, lower95, upper95, n_tasks) in rows {
+        let direction = if lower95 > LOGIT_MARGIN {
+            "over"
+        } else if upper95 < -LOGIT_MARGIN {
+            "under"
+        } else {
+            continue;
+        };
+        flags.push(Flag {
+            student_id,
+            flag_type: "ESTIMATION_BIAS",
+            severity: "WARNING",
+            details: json!({
+                "beta_mean": beta_mean,
+                "beta_lower95": lower95,
+                "beta_upper95": upper95,
+                "n_tasks": n_tasks,
+                "direction": direction,
+            }),
+        });
+    }
+    Ok(flags)
+}
+
 // ---- Dispatcher ----
 
 fn persist_flags(conn: &Connection, sprint_id: i64, flags: &[Flag]) -> rusqlite::Result<()> {
@@ -2288,6 +2355,7 @@ pub fn detect_flags_for_sprint_id(
         regularity_declining(conn, sprint_id, dt)
     );
     total += run!("ARCHITECTURE_DRIFT", architecture_drift(conn, sprint_id));
+    total += run!("ESTIMATION_BIAS", estimation_bias(conn, sprint_id));
 
     // Config-dependent detector.
     total += run!(
