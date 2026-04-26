@@ -158,6 +158,7 @@ fn run_parallel_project_block(
     entregues_dir: &Path,
     sprint_ids: &[i64],
     max_workers: usize,
+    use_llm_pr_docs: bool,
 ) -> Result<Vec<ProjectResult>> {
     let workers = max_workers.max(1).min(sprint_ids.len().max(1));
     info!(
@@ -179,7 +180,9 @@ fn run_parallel_project_block(
         sprint_ids
             .par_iter()
             .copied()
-            .map(|sid| run_project_stage_block(db_path, config, entregues_dir, sid))
+            .map(|sid| {
+                run_project_stage_block(db_path, config, entregues_dir, sid, use_llm_pr_docs)
+            })
             .collect()
     });
 
@@ -198,6 +201,7 @@ fn run_project_stage_block(
     config: &Config,
     entregues_dir: &Path,
     sprint_id: i64,
+    use_llm_pr_docs: bool,
 ) -> ProjectResult {
     let start = Instant::now();
     let mut errors: Vec<(String, String)> = Vec::new();
@@ -272,7 +276,15 @@ fn run_project_stage_block(
     stage("heuristics", &mut || {
         sprint_grader_evaluate::run_heuristics_for_sprint_id(&conn, sprint_id).map(|_| ())
     });
-    // llm_eval_pr_docs (T-P0.2)
+    stage("llm_eval_pr_docs", &mut || {
+        sprint_grader_evaluate::run_pr_doc_evaluation_for_sprint_id(
+            &conn,
+            sprint_id,
+            config,
+            use_llm_pr_docs,
+        )
+        .map(|_| ())
+    });
     stage("llm_eval_task_descriptions", &mut || {
         sprint_grader_evaluate::score_task_descriptions_for_sprint_id(&conn, sprint_id, config)
             .map(|_| ())
@@ -452,7 +464,8 @@ pub fn rerun_post_collection_for_sprint_ids(
     drop(db);
 
     let workers = max_workers.unwrap_or(sprint_ids.len());
-    let results = run_parallel_project_block(db_path, config, entregues_dir, sprint_ids, workers)?;
+    let results =
+        run_parallel_project_block(db_path, config, entregues_dir, sprint_ids, workers, true)?;
     for r in &results {
         if !r.stage_errors.is_empty() {
             let failed: Vec<&str> = r.stage_errors.iter().map(|(k, _)| k.as_str()).collect();
@@ -581,6 +594,7 @@ pub fn run_pipeline(
         &opts.entregues_dir,
         &flat_sprint_ids,
         max_workers,
+        !matches!(variant, PipelineVariant::GoQuick),
     )?;
     for r in &results {
         if r.stage_errors.is_empty() {
