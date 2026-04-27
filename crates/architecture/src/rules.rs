@@ -32,6 +32,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::ast_rules::{AstRule, RawAstRule};
 use crate::glob::PackagePattern;
 
 #[derive(Debug, Clone)]
@@ -56,6 +57,9 @@ pub struct Forbidden {
 pub struct ArchitectureRules {
     pub layers: Vec<Layer>,
     pub forbidden: Vec<Forbidden>,
+    /// AST-driven rules (T-P3.1). Loaded from `[[ast_rule]]` blocks; empty
+    /// when the rules file predates the AST extension.
+    pub ast_rules: Vec<AstRule>,
     pub severity: String,
 }
 
@@ -65,6 +69,8 @@ struct RawRules {
     layers: Vec<RawLayer>,
     #[serde(default)]
     forbidden: Vec<RawForbidden>,
+    #[serde(default, rename = "ast_rule")]
+    ast_rule: Vec<RawAstRule>,
     /// Severity used for every emitted violation. Default `WARNING`.
     #[serde(default = "default_severity")]
     severity: String,
@@ -116,9 +122,14 @@ impl ArchitectureRules {
                 label: f.name.unwrap_or_else(|| format!("forbidden-{i}")),
             })
             .collect();
+        let mut ast_rules = Vec::with_capacity(raw.ast_rule.len());
+        for raw_ast in raw.ast_rule {
+            ast_rules.push(AstRule::from_raw(raw_ast)?);
+        }
         Ok(Self {
             layers,
             forbidden,
+            ast_rules,
             severity: raw.severity,
         })
     }
