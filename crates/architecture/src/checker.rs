@@ -18,19 +18,30 @@ pub struct Violation {
     pub rule_name: String,
     pub kind: ViolationKind,
     pub offending_import: String,
+    /// 1-based line range covering the offending construct. The legacy
+    /// package-glob path fills these with the import-statement's line; the
+    /// AST path fills them with the offending field/method/parameter span;
+    /// the LLM path (T-P3.3) fills them from the model response.
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViolationKind {
     LayerDependency,
     ForbiddenImport,
+    /// AST-rule kind label (e.g. `ast_forbidden_field_type`). Stored as a
+    /// `String` so the variant doesn't have to enumerate every kind known to
+    /// `ast_rules.rs` — keeps additive rule-kind growth a one-file change.
+    AstRule(String),
 }
 
 impl ViolationKind {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             ViolationKind::LayerDependency => "layer_dependency",
             ViolationKind::ForbiddenImport => "forbidden_import",
+            ViolationKind::AstRule(label) => label.as_str(),
         }
     }
 }
@@ -64,8 +75,10 @@ pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Viola
     let mut out = Vec::new();
     let own_layer = rules.layer_of(&facts.package);
 
-    for raw_import in &facts.imports {
+    for imp in &facts.imports {
+        let raw_import = &imp.text;
         let imp_pkg = import_to_package(raw_import);
+        let line = imp.line;
         if let Some(own) = own_layer {
             if let Some(target_layer) = rules.layer_of(&imp_pkg) {
                 if target_layer != own {
@@ -81,6 +94,8 @@ pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Viola
                             rule_name: format!("{own}->!{target_layer}"),
                             kind: ViolationKind::LayerDependency,
                             offending_import: raw_import.clone(),
+                            start_line: line,
+                            end_line: line,
                         });
                     }
                 }
@@ -96,6 +111,8 @@ pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Viola
                     rule_name: f.label.clone(),
                     kind: ViolationKind::ForbiddenImport,
                     offending_import: raw_import.clone(),
+                    start_line: line,
+                    end_line: line,
                 });
             }
         }
@@ -163,7 +180,10 @@ must_not_match = ["org/springframework/web/**"]
         let f = JavaFileFacts {
             rel_path: "src/main/java/UserController.java".into(),
             package: "com.x.controller".into(),
-            imports: vec!["com.x.repository.UserRepository".into()],
+            imports: vec![crate::scanner::ImportLine {
+                text: "com.x.repository.UserRepository".into(),
+                line: Some(2),
+            }],
         };
         let vs = check_file(&r, &f);
         assert_eq!(vs.len(), 1);
@@ -178,7 +198,10 @@ must_not_match = ["org/springframework/web/**"]
         let f = JavaFileFacts {
             rel_path: "Svc.java".into(),
             package: "com.x.application.svc".into(),
-            imports: vec!["com.x.domain.user.User".into()],
+            imports: vec![crate::scanner::ImportLine {
+                text: "com.x.domain.user.User".into(),
+                line: Some(2),
+            }],
         };
         assert!(check_file(&r, &f).is_empty());
     }
@@ -189,7 +212,10 @@ must_not_match = ["org/springframework/web/**"]
         let f = JavaFileFacts {
             rel_path: "Domain.java".into(),
             package: "com.x.domain.user".into(),
-            imports: vec!["org.springframework.web.bind.annotation.RestController".into()],
+            imports: vec![crate::scanner::ImportLine {
+                text: "org.springframework.web.bind.annotation.RestController".into(),
+                line: Some(2),
+            }],
         };
         let vs = check_file(&r, &f);
         assert!(vs
@@ -203,7 +229,10 @@ must_not_match = ["org/springframework/web/**"]
         let f = JavaFileFacts {
             rel_path: "Domain.java".into(),
             package: "com.x.domain.user".into(),
-            imports: vec!["java.util.List".into()],
+            imports: vec![crate::scanner::ImportLine {
+                text: "java.util.List".into(),
+                line: Some(2),
+            }],
         };
         assert!(check_file(&r, &f).is_empty());
     }
