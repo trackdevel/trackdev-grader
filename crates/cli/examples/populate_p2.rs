@@ -49,12 +49,8 @@ fn main() -> anyhow::Result<()> {
         let rules = sprint_grader_architecture::ArchitectureRules::load(rules_path)?;
         let project_root = PathBuf::from("data/entregues").join(&project_name);
         for sid in &sprint_ids {
-            match sprint_grader_architecture::scan_project_to_db(
-                &conn,
-                &project_root,
-                *sid,
-                &rules,
-            ) {
+            match sprint_grader_architecture::scan_project_to_db(&conn, &project_root, *sid, &rules)
+            {
                 Ok(n) => println!("architecture sprint {sid}: {n} violations"),
                 Err(e) => eprintln!("architecture sprint {sid}: {e}"),
             }
