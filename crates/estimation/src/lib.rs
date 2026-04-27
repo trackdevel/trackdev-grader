@@ -9,4 +9,6 @@ pub mod em;
 pub mod persist;
 
 pub use em::{fit, FitResult, Observation, StudentBias};
-pub use persist::{fit_and_persist_for_all_projects, fit_and_persist_for_project};
+pub use persist::{
+    fit_and_persist_for_all_projects, fit_and_persist_for_project, fit_and_persist_for_projects,
+};
