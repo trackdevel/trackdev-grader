@@ -1714,6 +1714,7 @@ dependencies = [
  "chrono",
  "fancy-regex",
  "once_cell",
+ "rayon",
  "regex",
  "reqwest",
  "rusqlite",
