@@ -117,7 +117,14 @@ pub fn attribute_violations_for_repo(
                         (violation_rowid, student_id, lines_authored,
                          total_lines, weight, sprint_id)
                      VALUES (?, ?, ?, ?, ?, ?)",
-                    params![rowid, student_id, lines as i64, total as i64, weight, sprint_id],
+                    params![
+                        rowid,
+                        student_id,
+                        lines as i64,
+                        total as i64,
+                        weight,
+                        sprint_id
+                    ],
                 )?;
                 written += 1;
             }
@@ -210,6 +217,7 @@ mod tests {
         .unwrap();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_violation(
         conn: &Connection,
         repo_full_name: &str,
@@ -249,7 +257,14 @@ mod tests {
         let body = (1..=10)
             .map(|i| format!("// line {i}\n"))
             .collect::<String>();
-        commit_file(&repo, "Foo.java", &body, "alice@example.com", "Alice", "all alice");
+        commit_file(
+            &repo,
+            "Foo.java",
+            &body,
+            "alice@example.com",
+            "Alice",
+            "all alice",
+        );
 
         let vid = insert_violation(&conn, "udg/x", 1, "Foo.java", "rule", "anchor", 3, 7);
         let n = attribute_violations_for_repo(&conn, &repo, "udg/x", 1).unwrap();
@@ -282,7 +297,14 @@ mod tests {
         for i in 1..=30 {
             body.push_str(&format!("// alice line {i}\n"));
         }
-        commit_file(&repo, "Foo.java", &body, "alice@example.com", "Alice", "alice writes");
+        commit_file(
+            &repo,
+            "Foo.java",
+            &body,
+            "alice@example.com",
+            "Alice",
+            "alice writes",
+        );
 
         // Bob fixes a typo on line 15 only. Use a non-trivial textual edit
         // so `git blame` reattributes the line (not just whitespace, which
@@ -290,7 +312,14 @@ mod tests {
         let mut lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
         lines[14] = "// alice line 15 (fixed by bob)".to_string();
         let after = lines.join("\n") + "\n";
-        commit_file(&repo, "Foo.java", &after, "bob@example.com", "Bob", "bob typo fix");
+        commit_file(
+            &repo,
+            "Foo.java",
+            &after,
+            "bob@example.com",
+            "Bob",
+            "bob typo fix",
+        );
 
         // Violation spans lines 1..30 (the whole offending method).
         let vid = insert_violation(&conn, "udg/x", 1, "Foo.java", "rule", "anchor", 1, 30);
