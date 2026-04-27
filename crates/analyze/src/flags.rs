@@ -268,8 +268,11 @@ fn contribution_imbalance(
     let mut flags = Vec::new();
     if std > 0.0 {
         for (sid, share) in shares {
-            let z = (share - expected).abs() / std;
-            if z > thresh.contribution_imbalance_stddev {
+            let abs_dev = (share - expected).abs();
+            let z = abs_dev / std;
+            if z > thresh.contribution_imbalance_stddev
+                && abs_dev >= thresh.contribution_imbalance_min_abs_deviation
+            {
                 flags.push(Flag {
                     student_id: sid,
                     flag_type: "CONTRIBUTION_IMBALANCE",
@@ -278,6 +281,8 @@ fn contribution_imbalance(
                         "share": round3(share),
                         "expected": round3(expected),
                         "z_score": round2(z),
+                        "abs_deviation": round3(abs_dev),
+                        "min_abs_deviation": round3(thresh.contribution_imbalance_min_abs_deviation),
                     }),
                 });
             }
@@ -2183,6 +2188,102 @@ fn architecture_drift(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec
     Ok(flags)
 }
 
+/// ARCHITECTURE_HOTSPOT (T-P3.1). Per-student companion to
+/// `ARCHITECTURE_DRIFT`. Sums each student's blame-weighted contribution
+/// across this sprint's `architecture_violations` and fires when that sum
+/// is ≥ the configured threshold. The team-level drift flag tells you
+/// "the team regressed against the layered model"; the hotspot flag tells
+/// you *who* owns the offending lines.
+///
+/// Severity is the maximum severity of the contributing violations (rows
+/// in `architecture_violations` carry their own severity from
+/// `architecture.toml`); ties resolve to WARNING. INFO when only INFO
+/// rules contributed.
+fn architecture_hotspot(
+    conn: &Connection,
+    sprint_id: i64,
+    min_weighted: f64,
+) -> rusqlite::Result<Vec<Flag>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.student_id, av.severity, a.weight, av.rule_name, av.rule_kind, av.file_path
+         FROM architecture_violation_attribution a
+         JOIN architecture_violations av ON av.rowid = a.violation_rowid
+         WHERE a.sprint_id = ?",
+    )?;
+    let rows = stmt
+        .query_map([sprint_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct Acc {
+        weighted: f64,
+        worst_severity: String,
+        offenders: Vec<Value>,
+    }
+    let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
+    for (student_id, severity, weight, rule_name, rule_kind, file_path) in rows {
+        let acc = by_student.entry(student_id).or_default();
+        acc.weighted += weight;
+        if severity_rank(&severity) > severity_rank(&acc.worst_severity) {
+            acc.worst_severity = severity.clone();
+        }
+        acc.offenders.push(json!({
+            "rule_name": rule_name,
+            "rule_kind": rule_kind,
+            "file_path": file_path,
+            "severity": severity,
+            "weight": weight,
+        }));
+    }
+    let mut flags = Vec::new();
+    for (student_id, acc) in by_student {
+        if acc.weighted >= min_weighted {
+            // Trim the per-student offender list to keep the JSON compact.
+            let mut offenders = acc.offenders;
+            offenders.truncate(10);
+            let severity = if acc.worst_severity.is_empty() {
+                "WARNING"
+            } else if acc.worst_severity == "CRITICAL" {
+                "CRITICAL"
+            } else if acc.worst_severity == "INFO" {
+                "INFO"
+            } else {
+                "WARNING"
+            };
+            flags.push(Flag {
+                student_id,
+                flag_type: "ARCHITECTURE_HOTSPOT",
+                severity,
+                details: json!({
+                    "weighted": round3(acc.weighted),
+                    "min_weighted": min_weighted,
+                    "offenders": offenders,
+                }),
+            });
+        }
+    }
+    Ok(flags)
+}
+
+fn severity_rank(sev: &str) -> u8 {
+    match sev {
+        "CRITICAL" => 3,
+        "WARNING" => 2,
+        "INFO" => 1,
+        _ => 0,
+    }
+}
+
 /// ESTIMATION_BIAS (T-P2.1). Per-student calibration flag based on the
 /// `student_estimation_bias` posterior fitted by the `estimation` crate.
 /// Fires WARNING when the 95 % credible interval for `β_u` excludes 0
@@ -2441,6 +2542,14 @@ pub fn detect_flags_for_sprint_id(
         regularity_declining(conn, sprint_id, dt)
     );
     total += run!("ARCHITECTURE_DRIFT", architecture_drift(conn, sprint_id));
+    total += run!(
+        "ARCHITECTURE_HOTSPOT",
+        architecture_hotspot(
+            conn,
+            sprint_id,
+            config.detector_thresholds.architecture_hotspot_min_weighted
+        )
+    );
     total += run!("ESTIMATION_BIAS", estimation_bias(conn, sprint_id));
     total += run!(
         "LOW_MUTATION_SCORE",
@@ -2484,6 +2593,7 @@ mod tests {
             micro_pr_max_lines: 10,
             low_doc_score: 2,
             contribution_imbalance_stddev: 1.5,
+            contribution_imbalance_min_abs_deviation: 0.05,
             low_survival_rate_stddev: 1.5,
             low_survival_absolute_floor: 0.85,
             raw_normalized_divergence_threshold: 0.20,
