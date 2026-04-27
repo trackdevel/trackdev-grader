@@ -61,6 +61,12 @@ impl Database {
             ("task_group_members", "ls_per_point_deviation", "REAL"),
             ("pr_submission_tiers", "pr_kind", "TEXT"),
             ("pull_requests", "last_github_fetch_updated_at", "TEXT"),
+            // T-P3.1: enrich architecture_violations with line ranges + classifier.
+            ("architecture_violations", "start_line", "INTEGER"),
+            ("architecture_violations", "end_line", "INTEGER"),
+            ("architecture_violations", "rule_kind", "TEXT"),
+            ("architecture_violations", "rule_version", "TEXT"),
+            ("architecture_violations", "explanation", "TEXT"),
         ];
         for (table, column, coltype) in migrations {
             let existing: Vec<String> = self.column_names(table)?;
