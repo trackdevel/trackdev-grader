@@ -331,7 +331,44 @@ types changed behaviour during the P0/P1 wave and warrant calling out:
   `may_depend_on` allow-list, and `[[forbidden]]` blocks blacklist
   imports for matching files (e.g. keep Spring web annotations out of
   the domain layer). When `architecture.toml` is absent the scan is
-  skipped silently.
+  skipped silently. T-P3.1 added `[[ast_rule]]` blocks that look
+  inside class bodies via tree-sitter-java — five kinds:
+  `forbidden_field_type`, `forbidden_constructor_param`,
+  `forbidden_method_call`, `forbidden_return_type`,
+  `max_method_statements`. AST violations carry `(start_line, end_line)`
+  so blame attribution can weight per-student responsibility (see
+  `ARCHITECTURE_HOTSPOT`).
+- **`ARCHITECTURE_HOTSPOT`** (per-student, severity tracks the worst
+  contributing rule) sums each student's blame-attribution weight
+  across this sprint's `architecture_violations` rows and fires when
+  the total reaches `[detector_thresholds]
+  architecture_hotspot_min_weighted` (default 2.0, T-P3.1). Weight is
+  `lines_authored / total_lines_in_violation_range` from `git blame -w
+  --ignore-revs-file`, so a one-line typo fix on a 30-line offending
+  method gets ~3 % weight rather than 50 %. The team-level
+  `ARCHITECTURE_DRIFT` keeps the regression headline; this flag points
+  at the people who actually wrote the offending code.
+- **Architecture rubric (`config/architecture.md`)** — prose
+  description of the architectural intent the LLM judge will check
+  per-file (T-P3.2). YAML frontmatter (`version: <N>`) plus per-stack
+  H1 sections (`# Spring Boot rubric`, `# Android rubric`). Inspect
+  the resolved rubric for a stack with
+  `sprint-grader architecture-rubric --stack spring`. Editing the
+  prose changes the body hash; bumping `version` invalidates the
+  T-P3.3 LLM cache deliberately.
+- **LLM architecture judge (`[architecture] llm_review = true`)** —
+  T-P3.3. When enabled and `ANTHROPIC_API_KEY` is set, the pipeline
+  asks the configured model (default `claude-haiku-4-5-20251001`) to
+  grade each Java file against the rubric. Cached per `(file_sha,
+  rubric_version+body_hash, model_id)` in `architecture_llm_cache`, so
+  re-runs only re-pay for files whose content actually changed.
+  Violations land in `architecture_violations` with `rule_kind =
+  "llm"`, line ranges from the model's response, and an `explanation`
+  column populated from the model's reasoning. Blame attribution
+  (T-P3.1) and the `ARCHITECTURE_HOTSPOT` flag apply uniformly. Skip
+  patterns (`llm_skip_globs`) keep generated code out of the call —
+  default deny-list covers `build/`, `generated/`, `R.java`, and
+  anonymous-inner-class files matching `*$$*.java`.
 - **`ESTIMATION_BIAS`** (WARNING, per-student) fires when the 95 %
   credible interval of a student's β_u excludes 0 by more than 0.5
   logits **and** they have at least 5 estimated tasks (T-P2.1). β_u is
