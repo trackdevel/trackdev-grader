@@ -152,7 +152,10 @@ impl Fixture {
             }
         }
         if !self.skip_default_prs {
-            let body = self.pr_body_override.clone().unwrap_or_else(default_pr_body);
+            let body = self
+                .pr_body_override
+                .clone()
+                .unwrap_or_else(default_pr_body);
             for (i, student) in ids::STUDENTS.iter().enumerate() {
                 let pr_id = format!("pr-default-{i}");
                 seed_pr(
