@@ -37,6 +37,32 @@ fn fires_when_share_is_far_from_mean() {
 }
 
 #[test]
+fn silent_when_abs_deviation_below_min_even_if_z_high() {
+    // Six students nearly equal: five at 0.159 and one at 0.205. The absolute
+    // gap is 3.8pp from fair share (1/6 ≈ 0.167), yet stddev is so tight that
+    // z >> 1.5. The min-abs-deviation gate must suppress the flag.
+    let conn = common::make_db();
+    common::seed_default_project(&conn);
+    for sid in ["a", "b", "c", "d", "e", "f"] {
+        common::seed_student(&conn, sid);
+    }
+    insert_metric(&conn, "a", 0.159);
+    insert_metric(&conn, "b", 0.159);
+    insert_metric(&conn, "c", 0.159);
+    insert_metric(&conn, "d", 0.159);
+    insert_metric(&conn, "e", 0.159);
+    insert_metric(&conn, "f", 0.205);
+
+    detect_flags_for_sprint_id(&conn, common::SPRINT_ID, &Config::test_default()).unwrap();
+
+    assert_eq!(
+        common::count_flags(&conn, common::SPRINT_ID, "CONTRIBUTION_IMBALANCE"),
+        0,
+        "tight team with <5pp gap from equal share must not trip the flag",
+    );
+}
+
+#[test]
 fn silent_when_shares_are_uniform() {
     let conn = common::make_db();
     common::seed_default_project(&conn);
