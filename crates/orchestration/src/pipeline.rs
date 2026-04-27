@@ -719,6 +719,99 @@ pub fn run_pipeline(
         );
     }
 
+    // T-P3.3: LLM-judged architecture review. Gated by config flag and
+    // by `ANTHROPIC_API_KEY` presence — both must be true for any API
+    // calls to fire. Mirrors the `evaluate` crate's silent-fallback
+    // contract; missing key → skip silently, never hard-fail.
+    if config.architecture.llm_review {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            info!(
+                "[architecture] llm_review = true but ANTHROPIC_API_KEY is empty — skipping LLM review"
+            );
+        } else {
+            let rubric_path = opts.config_dir.join(&config.architecture.rubric_path);
+            match sprint_grader_architecture::rubric::load(&rubric_path) {
+                Ok(rubric) => match sprint_grader_architecture_llm::LlmJudge::new(
+                    &api_key,
+                    config.architecture.model_id.clone(),
+                    config.architecture.max_tokens,
+                ) {
+                    Ok(judge) => {
+                        for g in &groups {
+                            let project_root = opts.entregues_dir.join(&g.name);
+                            for sid in &g.sprint_ids {
+                                let entries = match std::fs::read_dir(&project_root) {
+                                    Ok(e) => e,
+                                    Err(_) => continue,
+                                };
+                                for entry in entries.flatten() {
+                                    if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                                        continue;
+                                    }
+                                    let repo_path = entry.path();
+                                    let repo_full_name =
+                                        entry.file_name().to_string_lossy().into_owned();
+                                    let stack = if repo_full_name.starts_with("android-") {
+                                        "android"
+                                    } else {
+                                        "spring"
+                                    };
+                                    if let Err(e) =
+                                        sprint_grader_architecture_llm::run_llm_review_for_repo(
+                                            &db.conn,
+                                            &repo_path,
+                                            &repo_full_name,
+                                            *sid,
+                                            &rubric,
+                                            stack,
+                                            &judge,
+                                            &config.architecture.llm_skip_globs,
+                                        )
+                                    {
+                                        warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "LLM architecture review failed");
+                                    }
+                                }
+                            }
+                        }
+                        // Architecture stage wrote new violation rows; re-run
+                        // attribution per (repo, sprint) so the LLM rows pick
+                        // up blame weights too.
+                        for g in &groups {
+                            let project_root = opts.entregues_dir.join(&g.name);
+                            let entries = match std::fs::read_dir(&project_root) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+                            for entry in entries.flatten() {
+                                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                                    continue;
+                                }
+                                let repo_path = entry.path();
+                                let repo_full_name =
+                                    entry.file_name().to_string_lossy().into_owned();
+                                for sid in &g.sprint_ids {
+                                    if let Err(e) =
+                                        sprint_grader_architecture::attribute_violations_for_repo(
+                                            &db.conn,
+                                            &repo_path,
+                                            &repo_full_name,
+                                            *sid,
+                                        )
+                                    {
+                                        warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "post-LLM attribution failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "could not construct Anthropic client; skipping LLM review"),
+                },
+                Err(e) => warn!(error = %e, path = %rubric_path.display(), "rubric load failed; skipping LLM review"),
+            }
+        }
+    }
+
     // Stage 4: AI detection (go / go-quick) — per (project, sprint).
     if variant.ai_detection() {
         info!(stage = 4, total = total_stages, "AI detection");
