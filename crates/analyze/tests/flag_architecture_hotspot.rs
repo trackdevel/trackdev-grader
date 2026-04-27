@@ -59,13 +59,9 @@ fn fires_when_weighted_sum_at_or_above_threshold() {
         common::count_flags_for(&conn, common::SPRINT_ID, "ARCHITECTURE_HOTSPOT", "alice"),
         1
     );
-    let details = common::flag_details_for(
-        &conn,
-        common::SPRINT_ID,
-        "ARCHITECTURE_HOTSPOT",
-        "alice",
-    )
-    .unwrap();
+    let details =
+        common::flag_details_for(&conn, common::SPRINT_ID, "ARCHITECTURE_HOTSPOT", "alice")
+            .unwrap();
     assert_eq!(details["weighted"].as_f64(), Some(2.0));
     assert_eq!(details["min_weighted"].as_f64(), Some(2.0));
     assert_eq!(details["offenders"].as_array().unwrap().len(), 2);
@@ -126,13 +122,8 @@ fn worst_severity_propagates_to_flag() {
     insert_attribution(&conn, v2, "alice", 0.6, common::SPRINT_ID);
 
     detect_flags_for_sprint_id(&conn, common::SPRINT_ID, &Config::test_default()).unwrap();
-    let sev = common::flag_severity_for(
-        &conn,
-        common::SPRINT_ID,
-        "ARCHITECTURE_HOTSPOT",
-        "alice",
-    )
-    .unwrap();
+    let sev = common::flag_severity_for(&conn, common::SPRINT_ID, "ARCHITECTURE_HOTSPOT", "alice")
+        .unwrap();
     assert_eq!(sev, "CRITICAL");
 }
 
