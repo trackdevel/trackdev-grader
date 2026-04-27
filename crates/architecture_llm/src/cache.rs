@@ -61,7 +61,9 @@ mod tests {
         apply_schema(&conn).unwrap();
         insert(&conn, "sha-a", "1:bh", "model-x", "{\"violations\":[]}").unwrap();
         assert!(lookup(&conn, "sha-a", "2:bh", "model-x").unwrap().is_none());
-        assert!(lookup(&conn, "sha-a", "1:other", "model-x").unwrap().is_none());
+        assert!(lookup(&conn, "sha-a", "1:other", "model-x")
+            .unwrap()
+            .is_none());
         assert!(lookup(&conn, "sha-a", "1:bh", "model-y").unwrap().is_none());
     }
 
@@ -72,7 +74,9 @@ mod tests {
         insert(&conn, "sha-a", "1:bh", "model-x", "{\"v\":1}").unwrap();
         insert(&conn, "sha-a", "1:bh", "model-x", "{\"v\":2}").unwrap();
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM architecture_llm_cache", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM architecture_llm_cache", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(n, 1, "INSERT OR REPLACE keeps a single row");
         let got = lookup(&conn, "sha-a", "1:bh", "model-x").unwrap();
