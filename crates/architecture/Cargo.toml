@@ -16,7 +16,13 @@ toml.workspace = true
 tracing.workspace = true
 rusqlite.workspace = true
 walkdir = "2"
+regex = "1.10"
+once_cell = "1"
+sha2 = "0.10"
+tree-sitter = "0.25"
+tree-sitter-java = "0.23"
 sprint-grader-core = { path = "../core" }
+sprint-grader-survival = { path = "../survival" }
 
 [dev-dependencies]
 tempfile.workspace = true
