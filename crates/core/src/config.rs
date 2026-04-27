@@ -34,6 +34,44 @@ pub struct Config {
     pub grading: GradingConfig,
     pub mutation: MutationConfig,
     pub architecture: ArchitectureConfig,
+    pub evaluate: EvaluateConfig,
+}
+
+/// PR-doc / task-description LLM evaluation config. Mirrors the
+/// architecture LLM dispatcher: `judge = "claude-cli"` (default) shells
+/// out to the local Claude Code CLI per call (no API key required;
+/// uses the user's Claude.ai subscription); `judge = "anthropic-api"`
+/// uses the direct Anthropic SDK and requires `ANTHROPIC_API_KEY`.
+/// Missing prerequisites for the selected backend fall back to the
+/// deterministic heuristic so a missing CLI binary doesn't hard-fail.
+#[derive(Debug, Clone)]
+pub struct EvaluateConfig {
+    /// Backend selector. Either `"claude-cli"` (default) or
+    /// `"anthropic-api"`.
+    pub judge: String,
+    /// Reported model id — used for cache/telemetry only.
+    pub model_id: String,
+    /// Number of concurrent CLI / API invocations. Each `claude-cli`
+    /// worker spawns a process, so be conservative on the user's
+    /// subscription rate limits. Default 4.
+    pub judge_workers: usize,
+    /// Per-call subprocess timeout (seconds). Default 180.
+    pub judge_timeout_seconds: u64,
+    /// Path to the Claude Code CLI binary. Default `"claude"`
+    /// (resolved against `$PATH`).
+    pub claude_cli_path: String,
+}
+
+impl Default for EvaluateConfig {
+    fn default() -> Self {
+        Self {
+            judge: "claude-cli".to_string(),
+            model_id: "claude-haiku-4-5-20251001".to_string(),
+            judge_workers: 4,
+            judge_timeout_seconds: 180,
+            claude_cli_path: "claude".to_string(),
+        }
+    }
 }
 
 /// Architecture-conformance LLM config (T-P3.3). The structural and AST
@@ -342,6 +380,22 @@ struct RawConfig {
     mutation: RawMutation,
     #[serde(default)]
     architecture: RawArchitecture,
+    #[serde(default)]
+    evaluate: RawEvaluate,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawEvaluate {
+    #[serde(default)]
+    judge: Option<String>,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    judge_workers: Option<usize>,
+    #[serde(default)]
+    judge_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    claude_cli_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -577,6 +631,7 @@ impl Config {
             grading: GradingConfig::default(),
             mutation: MutationConfig::default(),
             architecture: ArchitectureConfig::default(),
+            evaluate: EvaluateConfig::default(),
         }
     }
 
@@ -881,6 +936,26 @@ impl Config {
                         .architecture
                         .claude_cli_path
                         .unwrap_or(arch_defaults.claude_cli_path),
+                }
+            },
+            evaluate: {
+                let eval_defaults = EvaluateConfig::default();
+                EvaluateConfig {
+                    judge: raw.evaluate.judge.unwrap_or(eval_defaults.judge),
+                    model_id: raw.evaluate.model_id.unwrap_or(eval_defaults.model_id),
+                    judge_workers: raw
+                        .evaluate
+                        .judge_workers
+                        .unwrap_or(eval_defaults.judge_workers)
+                        .max(1),
+                    judge_timeout_seconds: raw
+                        .evaluate
+                        .judge_timeout_seconds
+                        .unwrap_or(eval_defaults.judge_timeout_seconds),
+                    claude_cli_path: raw
+                        .evaluate
+                        .claude_cli_path
+                        .unwrap_or(eval_defaults.claude_cli_path),
                 }
             },
         })
