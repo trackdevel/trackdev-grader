@@ -38,13 +38,21 @@ pub struct Config {
 
 /// Architecture-conformance LLM config (T-P3.3). The structural and AST
 /// scans (T-P2.2 / T-P3.1) always run when `architecture.toml` exists;
-/// the LLM judge is opt-in. Missing `ANTHROPIC_API_KEY` falls back to a
-/// silent skip — running without keys is a supported mode.
+/// the LLM judge is opt-in. The judge backend is selectable: `claude-cli`
+/// (the local Claude Code CLI; the default — no API key needed, uses
+/// the user's subscription) or `anthropic-api` (direct API; requires
+/// `ANTHROPIC_API_KEY`). Missing prerequisites fall back to a silent
+/// skip — running without an LLM is a supported mode.
 #[derive(Debug, Clone)]
 pub struct ArchitectureConfig {
-    /// When true and an Anthropic key is available, the pipeline runs
-    /// the per-file LLM rubric judge (T-P3.3). Default false.
+    /// When true AND the selected judge's prerequisites are met, the
+    /// pipeline runs the per-file LLM rubric judge (T-P3.3). Default
+    /// false.
     pub llm_review: bool,
+    /// Which judge backend to use. `"claude-cli"` (default) shells out
+    /// to the `claude` binary; `"anthropic-api"` uses the direct
+    /// Anthropic SDK and requires `ANTHROPIC_API_KEY`.
+    pub judge: String,
     pub model_id: String,
     pub max_tokens: u32,
     /// Path to the markdown rubric, relative to `config/`. Default
@@ -53,12 +61,24 @@ pub struct ArchitectureConfig {
     /// Files matching any of these globs are skipped before the LLM
     /// call (generated code, build outputs, R.java, etc).
     pub llm_skip_globs: Vec<String>,
+    /// Number of concurrent judge invocations. For `claude-cli` each
+    /// worker spawns a process, so be conservative on the user's
+    /// subscription rate limits. Default 1.
+    pub judge_workers: usize,
+    /// Per-file judge timeout (seconds). Caps both API calls and CLI
+    /// invocations. Default 180.
+    pub judge_timeout_seconds: u64,
+    /// Path to the Claude Code CLI binary. Default `"claude"` (resolved
+    /// against `$PATH`); override if the CLI is in a non-standard
+    /// location.
+    pub claude_cli_path: String,
 }
 
 impl Default for ArchitectureConfig {
     fn default() -> Self {
         Self {
             llm_review: false,
+            judge: "claude-cli".to_string(),
             model_id: "claude-haiku-4-5-20251001".to_string(),
             max_tokens: 1024,
             rubric_path: "architecture.md".to_string(),
@@ -68,6 +88,9 @@ impl Default for ArchitectureConfig {
                 "**/R.java".to_string(),
                 "**/*$$*.java".to_string(),
             ],
+            judge_workers: 1,
+            judge_timeout_seconds: 180,
+            claude_cli_path: "claude".to_string(),
         }
     }
 }
@@ -326,6 +349,8 @@ struct RawArchitecture {
     #[serde(default)]
     llm_review: bool,
     #[serde(default)]
+    judge: Option<String>,
+    #[serde(default)]
     model_id: Option<String>,
     #[serde(default)]
     max_tokens: Option<u32>,
@@ -333,6 +358,12 @@ struct RawArchitecture {
     rubric_path: Option<String>,
     #[serde(default)]
     llm_skip_globs: Option<Vec<String>>,
+    #[serde(default)]
+    judge_workers: Option<usize>,
+    #[serde(default)]
+    judge_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    claude_cli_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -823,10 +854,8 @@ impl Config {
                 let arch_defaults = ArchitectureConfig::default();
                 ArchitectureConfig {
                     llm_review: raw.architecture.llm_review,
-                    model_id: raw
-                        .architecture
-                        .model_id
-                        .unwrap_or(arch_defaults.model_id),
+                    judge: raw.architecture.judge.unwrap_or(arch_defaults.judge),
+                    model_id: raw.architecture.model_id.unwrap_or(arch_defaults.model_id),
                     max_tokens: raw
                         .architecture
                         .max_tokens
@@ -839,6 +868,19 @@ impl Config {
                         .architecture
                         .llm_skip_globs
                         .unwrap_or(arch_defaults.llm_skip_globs),
+                    judge_workers: raw
+                        .architecture
+                        .judge_workers
+                        .unwrap_or(arch_defaults.judge_workers)
+                        .max(1),
+                    judge_timeout_seconds: raw
+                        .architecture
+                        .judge_timeout_seconds
+                        .unwrap_or(arch_defaults.judge_timeout_seconds),
+                    claude_cli_path: raw
+                        .architecture
+                        .claude_cli_path
+                        .unwrap_or(arch_defaults.claude_cli_path),
                 }
             },
         })
