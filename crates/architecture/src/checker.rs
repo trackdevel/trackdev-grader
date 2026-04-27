@@ -12,6 +12,58 @@
 use crate::rules::ArchitectureRules;
 use crate::scanner::JavaFileFacts;
 
+/// Package roots we never classify as belonging to a student layer.
+///
+/// Without this guard, a permissive layer pattern like `**/persistence/**`
+/// matches `jakarta.persistence` (the JPA API surface — not the student's
+/// own `infrastructure` package), producing false-positive
+/// `layer_dependency` violations for a domain entity that legitimately
+/// imports `jakarta.persistence.Entity`. `[[forbidden]]` rules are
+/// authoritative for "framework imports forbidden in this package", so
+/// excluding these prefixes from the *layer* classifier doesn't hide any
+/// real policy — it just stops the layer system from misreading framework
+/// imports as another internal layer.
+const EXTERNAL_PACKAGE_PREFIXES: &[&str] = &[
+    "java.",
+    "javax.",
+    "jakarta.",
+    "kotlin.",
+    "kotlinx.",
+    "scala.",
+    "groovy.",
+    "android.",
+    "androidx.",
+    "com.android.",
+    "com.google.",
+    "com.fasterxml.",
+    "com.squareup.",
+    "org.springframework.",
+    "org.hibernate.",
+    "org.apache.",
+    "org.junit.",
+    "org.mockito.",
+    "org.slf4j.",
+    "org.aspectj.",
+    "org.jetbrains.",
+    "io.micrometer.",
+    "io.swagger.",
+    "lombok.",
+    "retrofit2.",
+    "okhttp3.",
+    "dagger.",
+    "hilt.",
+    "ch.qos.",
+    "reactor.",
+    "rx.",
+    "io.reactivex.",
+];
+
+fn is_external_package(pkg: &str) -> bool {
+    EXTERNAL_PACKAGE_PREFIXES
+        .iter()
+        .any(|prefix| pkg.starts_with(prefix))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     pub file_path: String,
@@ -80,7 +132,13 @@ pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Viola
         let imp_pkg = import_to_package(raw_import);
         let line = imp.line;
         if let Some(own) = own_layer {
-            if let Some(target_layer) = rules.layer_of(&imp_pkg) {
+            // Framework / JDK imports never belong to a *student* layer, even
+            // when their package happens to match a layer glob (e.g.
+            // `jakarta.persistence` matching `**/persistence/**`). Skip them
+            // here; `[[forbidden]]` rules below remain authoritative.
+            if is_external_package(&imp_pkg) {
+                // fall through to forbidden-rule evaluation
+            } else if let Some(target_layer) = rules.layer_of(&imp_pkg) {
                 if target_layer != own {
                     let allowed = rules
                         .layers
@@ -235,5 +293,102 @@ must_not_match = ["org/springframework/web/**"]
             }],
         };
         assert!(check_file(&r, &f).is_empty());
+    }
+
+    #[test]
+    fn jakarta_persistence_does_not_classify_as_infrastructure_layer() {
+        // Regression: the production config matches `**/persistence/**` for
+        // the `infrastructure` layer. Without the external-prefix guard,
+        // `jakarta.persistence.Entity` (a framework import that *every* JPA
+        // entity needs) was misread as crossing into the infrastructure
+        // layer and produced a bogus `domain->!infrastructure` violation.
+        const RULES: &str = r#"
+[[layers]]
+name = "domain"
+packages = ["**/domain/**", "**/model/**"]
+may_depend_on = []
+
+[[layers]]
+name = "infrastructure"
+packages = ["**/infrastructure/**", "**/repository/**", "**/persistence/**"]
+may_depend_on = ["domain"]
+"#;
+        let r = ArchitectureRules::from_toml_str(RULES).unwrap();
+        let f = JavaFileFacts {
+            rel_path: "src/main/java/com/x/model/Comment.java".into(),
+            package: "com.x.model".into(),
+            imports: vec![
+                crate::scanner::ImportLine {
+                    text: "jakarta.persistence.Entity".into(),
+                    line: Some(3),
+                },
+                crate::scanner::ImportLine {
+                    text: "jakarta.persistence.*".into(),
+                    line: Some(4),
+                },
+                crate::scanner::ImportLine {
+                    text: "javax.persistence.Id".into(),
+                    line: Some(5),
+                },
+                crate::scanner::ImportLine {
+                    text: "org.springframework.data.jpa.repository.Repository".into(),
+                    line: Some(6),
+                },
+            ],
+        };
+        let vs = check_file(&r, &f);
+        assert!(
+            vs.iter()
+                .all(|v| !matches!(v.kind, ViolationKind::LayerDependency)),
+            "framework imports must not trigger layer_dependency violations: {vs:?}"
+        );
+    }
+
+    #[test]
+    fn external_prefix_guard_does_not_mask_internal_layer_violation() {
+        // The guard must be a no-op for genuine cross-layer dependencies
+        // between student packages.
+        let r = rules();
+        let f = JavaFileFacts {
+            rel_path: "Bad.java".into(),
+            package: "com.x.controller".into(),
+            imports: vec![crate::scanner::ImportLine {
+                text: "com.x.repository.UserRepository".into(),
+                line: Some(2),
+            }],
+        };
+        let vs = check_file(&r, &f);
+        assert_eq!(vs.len(), 1);
+        assert!(matches!(vs[0].kind, ViolationKind::LayerDependency));
+    }
+
+    #[test]
+    fn external_prefix_guard_does_not_mask_explicit_forbidden_rule() {
+        // `[[forbidden]] domain-no-jpa` MUST still fire on jakarta.persistence —
+        // forbidden rules are authoritative for explicit policy.
+        const RULES_WITH_JPA_BAN: &str = r#"
+[[layers]]
+name = "domain"
+packages = ["**/domain/**"]
+may_depend_on = []
+
+[[forbidden]]
+name = "domain-no-jpa"
+from = "**/domain/**"
+must_not_match = ["jakarta/persistence/**", "javax/persistence/**"]
+"#;
+        let r = ArchitectureRules::from_toml_str(RULES_WITH_JPA_BAN).unwrap();
+        let f = JavaFileFacts {
+            rel_path: "Domain.java".into(),
+            package: "com.x.domain.user".into(),
+            imports: vec![crate::scanner::ImportLine {
+                text: "jakarta.persistence.Entity".into(),
+                line: Some(2),
+            }],
+        };
+        let vs = check_file(&r, &f);
+        assert_eq!(vs.len(), 1);
+        assert!(matches!(vs[0].kind, ViolationKind::ForbiddenImport));
+        assert_eq!(vs[0].rule_name, "domain-no-jpa");
     }
 }
