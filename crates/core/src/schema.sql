@@ -744,7 +744,58 @@ CREATE TABLE IF NOT EXISTS architecture_violations (
     violation_kind   TEXT NOT NULL,
     offending_import TEXT NOT NULL,
     severity         TEXT NOT NULL,
+    -- T-P3.1 additions: line range so attribution can blame the offending
+    -- code, not the whole file. NULL on rows produced before T-P3.1.
+    start_line       INTEGER,
+    end_line         INTEGER,
+    -- "package_glob" / "forbidden_import" / "ast_*" / "llm". NULL on legacy rows.
+    rule_kind        TEXT,
+    -- Reserved for T-P3.3: hash of the rubric/rule body that produced this row,
+    -- so a rubric edit invalidates cached LLM judgements. NULL on AST/glob rows.
+    rule_version     TEXT,
+    -- Free-form explanation; primarily populated for LLM-judged rows.
+    explanation      TEXT,
     PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import)
+);
+
+-- Per-student attribution of `architecture_violations` rows (T-P3.1).
+-- Computed by running `git blame -w --ignore-revs-file` over the violation's
+-- (file, start_line..end_line) and tallying lines per student. `weight` is
+-- `lines_authored / total_lines` in [0, 1] so the per-student WARNING
+-- magnitude scales with how much of the offending code each student actually
+-- wrote — a 1-line typo fix on a 30-line bad method gets ~3 % weight.
+-- The join key is the parent row's implicit `rowid`; pre-existing
+-- attribution for a given (repo, sprint) is deleted when the architecture
+-- scan re-runs, mirroring the violation-table idempotency idiom.
+CREATE TABLE IF NOT EXISTS architecture_violation_attribution (
+    violation_rowid INTEGER NOT NULL,
+    student_id      TEXT NOT NULL,
+    lines_authored  INTEGER NOT NULL,
+    total_lines     INTEGER NOT NULL,
+    weight          REAL NOT NULL,
+    sprint_id       INTEGER NOT NULL,
+    PRIMARY KEY (violation_rowid, student_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_arch_attr_sprint
+    ON architecture_violation_attribution(sprint_id);
+
+-- LLM-judged architecture cache (T-P3.3). Keyed by `(file_sha,
+-- rubric_version, model_id)` so the cache invalidates when the file
+-- content changes, when the rubric edits change the version field or
+-- the body hash, or when the model id changes. The cache stores the
+-- model's raw `response_json` (already schema-validated at insert
+-- time) so re-runs reproduce byte-identical `architecture_violations`
+-- rows from the cached response without needing to re-call the API.
+-- `evaluated_at` is ISO-8601 UTC; useful for forensic comparison and
+-- the optional `architecture-rubric --show-cache-stats` subcommand.
+CREATE TABLE IF NOT EXISTS architecture_llm_cache (
+    file_sha       TEXT NOT NULL,
+    rubric_version TEXT NOT NULL,
+    model_id       TEXT NOT NULL,
+    response_json  TEXT NOT NULL,
+    evaluated_at   TEXT NOT NULL,
+    PRIMARY KEY (file_sha, rubric_version, model_id)
 );
 
 -- Per-team ownership snapshot (T-P2.3). `truck_factor` is the smallest k
