@@ -21,12 +21,22 @@ const SKIP_DIRS: &[&str] = &[
     "out",
 ];
 
+/// One captured `import` declaration with the 1-based line number where it
+/// appeared. Line numbers feed `architecture_violations.start_line` so the
+/// attribution stage can blame the offending import line specifically — not
+/// the whole file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportLine {
+    pub text: String,
+    pub line: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaFileFacts {
     /// Path relative to the repo root, in the original separator form.
     pub rel_path: String,
     pub package: String,
-    pub imports: Vec<String>,
+    pub imports: Vec<ImportLine>,
 }
 
 /// Walk a repo and return one row per `.java` file. Files in build,
@@ -71,12 +81,14 @@ pub fn scan_repo(repo_path: &Path) -> Vec<JavaFileFacts> {
 
 /// Extract `(package, imports)` from a Java source string. `None` when
 /// no `package` declaration is present (default-package files have no
-/// home in the layered model).
-pub fn parse_java(text: &str) -> Option<(String, Vec<String>)> {
+/// home in the layered model). Each import carries its 1-based source line
+/// so the attribution stage can blame the offending import directly.
+pub fn parse_java(text: &str) -> Option<(String, Vec<ImportLine>)> {
     let mut package: Option<String> = None;
-    let mut imports: Vec<String> = Vec::new();
+    let mut imports: Vec<ImportLine> = Vec::new();
     let mut in_block_comment = false;
-    for raw in text.lines() {
+    for (idx, raw) in text.lines().enumerate() {
+        let line_no = (idx as u32) + 1;
         let line = strip_comments(raw, &mut in_block_comment);
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -106,7 +118,10 @@ pub fn parse_java(text: &str) -> Option<(String, Vec<String>)> {
             // `import static foo.Bar.baz;` → keep `foo.Bar.baz`
             let cleaned = cleaned.strip_prefix("static ").unwrap_or(cleaned).trim();
             if !cleaned.is_empty() {
-                imports.push(cleaned.to_string());
+                imports.push(ImportLine {
+                    text: cleaned.to_string(),
+                    line: Some(line_no),
+                });
             }
         }
     }
@@ -145,6 +160,10 @@ fn strip_comments(line: &str, in_block: &mut bool) -> String {
 mod tests {
     use super::*;
 
+    fn import_texts(imports: &[ImportLine]) -> Vec<&str> {
+        imports.iter().map(|i| i.text.as_str()).collect()
+    }
+
     #[test]
     fn extracts_package_and_imports() {
         let src = "package com.example.app;\n\
@@ -153,7 +172,9 @@ mod tests {
                    public class Foo {}\n";
         let (pkg, imports) = parse_java(src).unwrap();
         assert_eq!(pkg, "com.example.app");
-        assert_eq!(imports, vec!["java.util.List", "org.junit.Assert.*"]);
+        assert_eq!(import_texts(&imports), vec!["java.util.List", "org.junit.Assert.*"]);
+        assert_eq!(imports[0].line, Some(2));
+        assert_eq!(imports[1].line, Some(3));
     }
 
     #[test]
@@ -164,7 +185,8 @@ mod tests {
                    public class A {}";
         let (pkg, imports) = parse_java(src).unwrap();
         assert_eq!(pkg, "com.x");
-        assert_eq!(imports, vec!["java.util.List"]);
+        assert_eq!(import_texts(&imports), vec!["java.util.List"]);
+        assert_eq!(imports[0].line, Some(3));
     }
 
     #[test]
@@ -183,6 +205,6 @@ mod tests {
                    }";
         let (pkg, imports) = parse_java(src).unwrap();
         assert_eq!(pkg, "com.x");
-        assert_eq!(imports, vec!["java.util.List"]);
+        assert_eq!(import_texts(&imports), vec!["java.util.List"]);
     }
 }
