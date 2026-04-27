@@ -300,6 +300,14 @@ enum Command {
         #[arg(long)]
         require_clean_tree: bool,
     },
+    /// Print the resolved architecture rubric for one stack
+    /// (`spring` or `android`) so it can be inspected without running
+    /// any LLM. Reads `config/architecture.md`. T-P3.2.
+    ArchitectureRubric {
+        /// Stack alias: `spring` / `backend`, or `android` / `mobile`.
+        #[arg(long)]
+        stack: String,
+    },
     /// Diff two `grading.db` files table-by-table (dual-run verification).
     DiffDb {
         /// First DB (e.g. Python-produced reference)
@@ -898,6 +906,29 @@ fn main() -> Result<()> {
                     info!(table = %table, count, "purged");
                 }
             }
+        }
+        Command::ArchitectureRubric { stack } => {
+            let path = config_dir.join("architecture.md");
+            if !path.is_file() {
+                anyhow::bail!(
+                    "architecture rubric not found at {} — write the rubric first or pass a different --project-root",
+                    path.display()
+                );
+            }
+            let rubric = sprint_grader_architecture::rubric::load(&path)
+                .with_context(|| format!("failed to parse {}", path.display()))?;
+            let body = rubric.for_stack(&stack).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "architecture.md has no section for stack '{}' (expected 'spring' / 'android' or an alias like 'backend' / 'mobile')",
+                    stack
+                )
+            })?;
+            println!("{body}");
+            println!();
+            println!(
+                "version={} body_hash={}",
+                rubric.version, rubric.body_hash
+            );
         }
         Command::DiffDb {
             db_a,
