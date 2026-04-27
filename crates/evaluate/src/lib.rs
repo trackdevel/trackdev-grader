@@ -8,10 +8,12 @@
 //!   `ANTHROPIC_API_KEY` is set; falls back to deterministic heuristic scoring
 //!   otherwise (mirror of `src/evaluate/llm_eval.py`).
 
+pub mod claude_cli_client;
 pub mod heuristics;
 pub mod llm_client;
 pub mod llm_eval;
 
+pub use claude_cli_client::{ClaudeCliClient, ClaudeCliError};
 pub use heuristics::run_heuristics_for_sprint_id;
 pub use llm_client::{AnthropicClient, AnthropicError, ModelId};
 pub use llm_eval::{
