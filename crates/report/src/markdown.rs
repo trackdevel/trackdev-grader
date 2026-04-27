@@ -1059,11 +1059,9 @@ fn write_section_a(
         let mut crit = 0i64;
         let mut warn = 0i64;
         let mut info_n = 0i64;
-        for row in sev_stmt
-            .query_map(rusqlite::params![project_id, sprint_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?
-        {
+        for row in sev_stmt.query_map(rusqlite::params![project_id, sprint_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })? {
             let (sev, n) = row?;
             match sev.to_ascii_uppercase().as_str() {
                 "CRITICAL" => crit = n,
@@ -1080,22 +1078,67 @@ Severity bands per `architecture.toml`. Per-student attribution \
 (by dominant author of the offending file) follows in Section B.\n",
             arch_total, crit, warn, info_n
         );
+        // For every rule, fetch the (file, repo_full_name) pairs that
+        // violate it. The renderer then groups by humanised rule
+        // description and emits a nested list with one bullet per file,
+        // each as a clickable GitHub link. Falls back to a plain
+        // `Filename` if the repo_full_name is not org-qualified (legacy
+        // rows from earlier scans).
         let mut stmt = conn.prepare(
-            "SELECT rule_name, COUNT(*) as n FROM architecture_violations av
+            "SELECT av.rule_name, av.file_path, av.repo_full_name
+             FROM architecture_violations av
              JOIN sprints s ON s.id = av.sprint_id
              WHERE s.project_id = ? AND av.sprint_id = ?
-             GROUP BY rule_name ORDER BY n DESC, rule_name LIMIT 5",
+             ORDER BY av.rule_name, av.file_path",
         )?;
-        let rows: Vec<(String, i64)> = stmt
+        let raw_rows: Vec<(String, String, Option<String>)> = stmt
             .query_map(rusqlite::params![project_id, sprint_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
             })?
             .collect::<rusqlite::Result<_>>()?;
         drop(stmt);
-        if !rows.is_empty() {
-            let _ = writeln!(buf, "Top rules:");
-            for (rule, n) in rows {
-                let _ = writeln!(buf, "- `{}` — {}", html_escape(&rule), n);
+
+        if !raw_rows.is_empty() {
+            // Group by rule_name → unique (file_path, repo_full_name)
+            // pairs, preserving order seen.
+            let mut by_rule: Vec<(String, Vec<(String, String)>)> = Vec::new();
+            for (rule, file, repo) in raw_rows {
+                let repo = repo.unwrap_or_default();
+                let entry = (file, repo);
+                match by_rule.iter_mut().find(|(r, _)| r == &rule) {
+                    Some((_, files)) => {
+                        if !files.contains(&entry) {
+                            files.push(entry);
+                        }
+                    }
+                    None => by_rule.push((rule, vec![entry])),
+                }
+            }
+            // Sort rules by descending file count, tie-break alphabetic.
+            by_rule.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+
+            let _ = writeln!(buf, "**Violations by rule:**\n");
+            for (rule, files) in by_rule {
+                let _ = writeln!(
+                    buf,
+                    "- {} — {} file{}",
+                    humanize_rule_name(&rule),
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" }
+                );
+                for (file, repo) in files {
+                    let basename = file.rsplit('/').next().unwrap_or(&file);
+                    let label = format!("`{}`", md_escape(basename));
+                    let cell = match github_file_url(&repo, &file) {
+                        Some(url) => format!("[{}]({} \"{}\")", label, url, md_escape(&file)),
+                        None => format!("{} (`{}`)", label, md_escape(&file)),
+                    };
+                    let _ = writeln!(buf, "  - {}", cell);
+                }
             }
             buf.push('\n');
         }
@@ -1151,6 +1194,104 @@ fn repo_basename(repo: &str) -> &str {
     repo.rsplit('/').next().unwrap_or(repo)
 }
 
+/// Plain-English explanations for the AST + forbidden-import rule keys
+/// shipped in `config/architecture.toml`. Reports lead with the prose
+/// and append the machine key in backticks for traceability. Custom
+/// rules a course author adds without updating this map fall back to a
+/// best-effort humanizer (`fragment-no-retrofit-field` → "fragment no
+/// retrofit field"), which is readable even without a hand-crafted
+/// description.
+const KNOWN_RULE_DESCRIPTIONS: &[(&str, &str)] = &[
+    // Spring backend (controllers / services / repositories).
+    (
+        "controller-no-repository-field",
+        "Controllers must not hold a Repository as a field — repository access goes through a Service",
+    ),
+    (
+        "controller-no-repository-ctor-param",
+        "Controllers must not inject a Repository via constructor — repository access goes through a Service",
+    ),
+    (
+        "controller-method-not-fat",
+        "Controller methods should be thin (≤20 statements) — business logic belongs in a Service",
+    ),
+    // Android client (Activity / Fragment / ViewModel hygiene).
+    (
+        "activity-no-retrofit-field",
+        "Activities must not hold a Retrofit / ApiService field — data access goes through a Repository",
+    ),
+    (
+        "fragment-no-retrofit-field",
+        "Fragments must not hold a Retrofit / ApiService field — data access goes through a Repository",
+    ),
+    (
+        "viewmodel-no-retrofit-field",
+        "ViewModels must not hold a Retrofit / ApiService field — data access goes through a Repository",
+    ),
+    (
+        "viewmodel-no-retrofit-ctor-param",
+        "ViewModels must not inject a Retrofit / ApiService via constructor — data access goes through a Repository",
+    ),
+    // Forbidden-import rules.
+    (
+        "domain-no-spring-web",
+        "Domain / model classes must not depend on Spring web, Spring data, or javax.servlet",
+    ),
+    (
+        "domain-no-jpa",
+        "Domain / model classes must not depend on JPA (jakarta.persistence / javax.persistence)",
+    ),
+];
+
+/// Best-effort humanizer for unknown rule keys: replaces `-` and `_` with
+/// spaces and capitalizes the first letter, so `fragment-no-retrofit-field`
+/// renders as "Fragment no retrofit field". The original key still appears
+/// in backticks for traceability.
+fn humanize_unknown_rule_key(rule: &str) -> String {
+    let cleaned: String = rule
+        .chars()
+        .map(|c| if c == '-' || c == '_' { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return rule.to_string();
+    }
+    let mut iter = trimmed.chars();
+    match iter.next() {
+        Some(first) => {
+            let mut s = first.to_uppercase().to_string();
+            s.push_str(iter.as_str());
+            s
+        }
+        None => trimmed.to_string(),
+    }
+}
+
+/// Render a rule_name as human-readable prose.
+///
+/// Three cases:
+/// 1. Layered-architecture rules stored as `"{from}->!{to}"` (e.g.
+///    `"domain->!infrastructure"`) → "**from** must not depend on
+///    **to**".
+/// 2. AST and forbidden-import rules whose key appears in
+///    `KNOWN_RULE_DESCRIPTIONS` → the prose description, with the
+///    machine key appended in backticks for traceability.
+/// 3. Anything else → a best-effort humanized form of the key, also
+///    with the key appended in backticks.
+fn humanize_rule_name(rule: &str) -> String {
+    if let Some((from, to)) = rule.split_once("->!") {
+        return format!(
+            "**{}** must not depend on **{}**",
+            md_escape(from),
+            md_escape(to)
+        );
+    }
+    if let Some((_, description)) = KNOWN_RULE_DESCRIPTIONS.iter().find(|(key, _)| *key == rule) {
+        return md_escape(description);
+    }
+    md_escape(&humanize_unknown_rule_key(rule))
+}
+
 fn architecture_violations_per_student(
     conn: &Connection,
     sprint_id: i64,
@@ -1174,8 +1315,7 @@ fn architecture_violations_per_student(
 
     // Limit to student_ids that actually belong to this team — keeps
     // anonymous logins or stale identities from leaking into the report.
-    let mut team_stmt =
-        conn.prepare("SELECT id FROM students WHERE team_project_id = ?")?;
+    let mut team_stmt = conn.prepare("SELECT id FROM students WHERE team_project_id = ?")?;
     let team: HashSet<String> = team_stmt
         .query_map([project_id], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -1532,7 +1672,12 @@ fn write_student_architecture_block(buf: &mut String, violations: &[AttributedAr
     rules.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
 
     for (rule, files) in rules {
-        let _ = writeln!(buf, "- `{}` — {} file(s)", html_escape(&rule), files.len());
+        let _ = writeln!(
+            buf,
+            "- {} — {} file(s)",
+            humanize_rule_name(&rule),
+            files.len()
+        );
         // Show up to 3 examples per rule with the offending import. The file
         // appears as a [basename](github-url) link with the full path in the
         // markdown title attribute (`[label](url "title")`), so the visible
@@ -2059,6 +2204,60 @@ mod tests {
         assert_eq!(attribution_error_glyph(Some("not-json")), "⚠");
     }
 
+    #[test]
+    fn humanize_rule_name_translates_layer_arrow_to_prose() {
+        let s = humanize_rule_name("domain->!infrastructure");
+        assert!(
+            s.contains("**domain**") && s.contains("**infrastructure**"),
+            "should bold both layer names: {s}"
+        );
+        assert!(
+            s.contains("must not depend on"),
+            "should read as a sentence: {s}"
+        );
+        assert!(
+            !s.contains("->!"),
+            "raw arrow form must not leak into output: {s}"
+        );
+    }
+
+    #[test]
+    fn humanize_rule_name_uses_known_description_for_shipped_ast_rules() {
+        let s = humanize_rule_name("fragment-no-retrofit-field");
+        assert!(
+            s.contains("Fragments must not hold"),
+            "shipped AST rule must render its prose description: {s}"
+        );
+        assert!(
+            !s.contains("fragment-no-retrofit-field"),
+            "machine key must NOT leak into student-facing prose: {s}"
+        );
+        assert!(
+            !s.contains('`'),
+            "no backticks (machine-key syntax) in student-facing prose: {s}"
+        );
+    }
+
+    #[test]
+    fn humanize_rule_name_falls_back_for_unknown_rule_key() {
+        // Custom AST rule a course author added without updating the
+        // descriptions map: the renderer humanises the key on a
+        // best-effort basis.
+        let s = humanize_rule_name("custom_team_specific_check");
+        assert!(
+            s.starts_with("Custom team specific check"),
+            "fallback must humanise dashes/underscores and capitalise: {s}"
+        );
+        assert!(
+            !s.contains("custom_team_specific_check"),
+            "raw key must NOT leak into student-facing prose: {s}"
+        );
+        assert!(
+            !s.contains('`'),
+            "no backticks in student-facing prose: {s}"
+        );
+    }
+
     fn mk_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -2214,8 +2413,14 @@ mod tests {
             body.contains("Alice Bob (alice-gh)"),
             "missing humanized name for u1 in: {body}",
         );
-        assert!(body.contains("Bob C (bob-gh)"), "missing humanized name for uuid-bob");
-        assert!(!body.contains("uuid-bob"), "raw student_id leaked into output");
+        assert!(
+            body.contains("Bob C (bob-gh)"),
+            "missing humanized name for uuid-bob"
+        );
+        assert!(
+            !body.contains("uuid-bob"),
+            "raw student_id leaked into output"
+        );
     }
 
     #[test]
@@ -2269,7 +2474,39 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("### Architecture conformance"));
         assert!(body.contains("**Total violations:** 3"));
-        assert!(body.contains("presentation-&gt;!infrastructure"));
+        // Layer rules render as prose, not as the raw arrow form.
+        assert!(
+            body.contains("**presentation** must not depend on **infrastructure**"),
+            "layer rule must humanize: {body}"
+        );
+        assert!(
+            !body.contains("presentation-&gt;!infrastructure")
+                && !body.contains("presentation->!infrastructure"),
+            "raw arrow form must not leak into report",
+        );
+        // Each violating file appears as a clickable basename link
+        // (the `udg/spring-foo` repo is org-qualified, so URLs are built).
+        assert!(
+            body.contains("[`A.java`](https://github.com/udg/spring-foo/blob/HEAD/A.java"),
+            "A.java must render as a github-linked basename: {body}"
+        );
+        assert!(
+            body.contains("[`B.java`](https://github.com/udg/spring-foo/blob/HEAD/B.java"),
+            "B.java must render as a github-linked basename: {body}"
+        );
+        assert!(
+            body.contains("[`C.java`](https://github.com/udg/spring-foo/blob/HEAD/C.java"),
+            "C.java must render as a github-linked basename: {body}"
+        );
+        // Forbidden-import rule: prose description, no machine key.
+        assert!(
+            body.contains("Domain / model classes must not depend on Spring web"),
+            "forbidden rule must humanize: {body}"
+        );
+        assert!(
+            !body.contains("`domain-no-spring-web`"),
+            "machine rule key must not leak into team-facing prose: {body}"
+        );
     }
 
     #[test]
@@ -2335,7 +2572,7 @@ mod tests {
             body
         );
         assert!(
-            body.contains("- `presentation-&gt;!infrastructure` — 1 file(s)"),
+            body.contains("- **presentation** must not depend on **infrastructure** — 1 file(s)"),
             "missing rule-grouped breakdown",
         );
         assert!(
