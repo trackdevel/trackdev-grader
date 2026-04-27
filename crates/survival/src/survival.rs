@@ -607,18 +607,48 @@ pub fn compute_survival(
         return Ok(());
     }
 
+    // Restrict the repo walk to projects represented by the targeted
+    // sprints. Without this, --projects scoping leaks: every survival
+    // invocation otherwise fingerprints every repo on disk regardless of
+    // which sprint the caller asked for. The caller already filtered
+    // sprint_ids — we just propagate the filter into the repo set.
+    let mut targeted_projects: BTreeSet<i64> = BTreeSet::new();
+    for sid in &sprint_ids {
+        if let Ok(Some(pid)) =
+            db.conn
+                .query_row("SELECT project_id FROM sprints WHERE id = ?", [sid], |r| {
+                    r.get::<_, Option<i64>>(0)
+                })
+        {
+            targeted_projects.insert(pid);
+        }
+    }
+
     // Clear old fingerprints for idempotent re-run.
     for sid in &sprint_ids {
         db.conn
             .execute("DELETE FROM fingerprints WHERE sprint_id = ?", [sid])?;
     }
 
+    let scoped_repos: Vec<(String, std::path::PathBuf)> = repo_map
+        .iter()
+        .filter(
+            |(repo_full_name, _)| match project_for_repo(db, repo_full_name) {
+                Some(pid) => targeted_projects.is_empty() || targeted_projects.contains(&pid),
+                None => false,
+            },
+        )
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     info!(
-        repos = repo_map.len(),
+        repos = scoped_repos.len(),
+        total_repos = repo_map.len(),
+        targeted_projects = targeted_projects.len(),
         "Fingerprinting and blaming repos..."
     );
     let mut total_fps: i64 = 0;
-    for (repo_full_name, repo_path) in &repo_map {
+    for (repo_full_name, repo_path) in &scoped_repos {
         let project_id = match project_for_repo(db, repo_full_name) {
             Some(p) => p,
             None => {
@@ -654,8 +684,17 @@ pub fn compute_survival(
     }
 
     info!("Computing per-PR line metrics (LAT/LAR/LS)...");
+    let scoped_repo_map: HashMap<String, std::path::PathBuf> =
+        scoped_repos.iter().cloned().collect();
     for sid in &sprint_ids {
-        compute_pr_line_metrics(&db.conn, *sid, &repo_map, 10, false, cosmetic_pct_of_lat)?;
+        compute_pr_line_metrics(
+            &db.conn,
+            *sid,
+            &scoped_repo_map,
+            10,
+            false,
+            cosmetic_pct_of_lat,
+        )?;
     }
 
     info!("Survival computation complete");
