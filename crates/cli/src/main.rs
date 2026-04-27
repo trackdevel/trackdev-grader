@@ -473,8 +473,19 @@ fn main() -> Result<()> {
                 sprint_grader_analyze::compute_all_contributions(&db.conn, sid, None)
                     .with_context(|| format!("contribution failed for sprint_id {sid}"))?;
             }
-            sprint_grader_analyze::compute_all_trajectories(&db.conn, &config.detector_thresholds)
-                .context("trajectory failed")?;
+            // Scope trajectory recompute to the projects we just touched
+            // (or the whole DB when no filter is provided).
+            let project_ids: Option<Vec<i64>> = if filter.is_some() {
+                Some(groups.iter().map(|g| g.project_id).collect())
+            } else {
+                None
+            };
+            sprint_grader_analyze::compute_all_trajectories_filtered(
+                &db.conn,
+                &config.detector_thresholds,
+                project_ids.as_deref(),
+            )
+            .context("trajectory failed")?;
         }
         Command::Evaluate { projects } => {
             let filter = parse_project_filter(projects.projects);
@@ -925,10 +936,7 @@ fn main() -> Result<()> {
             })?;
             println!("{body}");
             println!();
-            println!(
-                "version={} body_hash={}",
-                rubric.version, rubric.body_hash
-            );
+            println!("version={} body_hash={}", rubric.version, rubric.body_hash);
         }
         Command::DiffDb {
             db_a,
