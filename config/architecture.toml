@@ -20,7 +20,20 @@
 
 severity = "WARNING"
 
-# --- Hexagonal-ish layered model for the Spring backend -----------------
+# --- Layered model for the Spring backend -----------------------------
+#
+# Mirrors the rubric in `config/architecture.md`:
+#   presentation  →  application  →  infrastructure  →  domain
+#
+# Notably:
+# - Services (application) DO call repositories (infrastructure). The
+#   rubric explicitly prescribes this.
+# - Controllers (presentation) MUST NOT reach the repository layer
+#   directly — they go through services. Hence presentation lists only
+#   `application` and `domain` in `may_depend_on`.
+# - Repositories (infrastructure) do NOT call services or controllers.
+#   Hence infrastructure lists only `domain` in `may_depend_on`.
+# - Domain / model is portable; depends on nothing.
 
 [[layers]]
 name = "domain"
@@ -28,14 +41,14 @@ packages = ["**/domain/**", "**/model/**"]
 may_depend_on = []
 
 [[layers]]
-name = "application"
-packages = ["**/application/**", "**/service/**", "**/usecase/**"]
+name = "infrastructure"
+packages = ["**/infrastructure/**", "**/repository/**", "**/persistence/**"]
 may_depend_on = ["domain"]
 
 [[layers]]
-name = "infrastructure"
-packages = ["**/infrastructure/**", "**/repository/**", "**/persistence/**"]
-may_depend_on = ["domain", "application"]
+name = "application"
+packages = ["**/application/**", "**/service/**", "**/usecase/**"]
+may_depend_on = ["domain", "infrastructure"]
 
 [[layers]]
 name = "presentation"
@@ -43,6 +56,11 @@ packages = ["**/controller/**", "**/web/**", "**/api/**", "**/rest/**"]
 may_depend_on = ["application", "domain"]
 
 # --- Forbidden imports --------------------------------------------------
+#
+# Per `architecture.md`: domain/model classes must not depend on Spring
+# web, Spring data, or `javax.servlet.*`. JPA annotations on domain
+# entities ARE acceptable in this course (the rubric does not forbid
+# them), so there is no `domain-no-jpa` block.
 
 [[forbidden]]
 name = "domain-no-spring-web"
@@ -51,14 +69,6 @@ must_not_match = [
     "org/springframework/web/**",
     "org/springframework/data/**",
     "javax/servlet/**",
-]
-
-[[forbidden]]
-name = "domain-no-jpa"
-from = "**/domain/**"
-must_not_match = [
-    "javax/persistence/**",
-    "jakarta/persistence/**",
 ]
 
 # --- AST rules (T-P3.1) -------------------------------------------------

@@ -42,22 +42,31 @@
 //!   violation is dropped at WARN level. Don't try to repair.
 
 pub mod cache;
+pub mod cli_judge;
 pub mod judge;
 
 use std::path::Path;
 
+use rayon::prelude::*;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use sprint_grader_architecture::Rubric;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-pub use judge::{Judge, LlmJudge, LlmViolation, LlmResponse};
+pub use cli_judge::ClaudeCliJudge;
+pub use judge::{Judge, JudgeError, LlmJudge, LlmResponse, LlmViolation};
 
 /// One LLM-driven evaluation run over a cloned repo for a sprint.
 /// Inserts new rows into `architecture_violations` (idempotent: prior
 /// LLM rows for this `(repo, sprint)` are deleted first). Does **not**
 /// purge non-LLM rows — the AST + package-glob path owns those.
+///
+/// `workers` controls intra-repo concurrency for cache-miss judge calls.
+/// Cache lookups + DB writes stay serial on the single `Connection`;
+/// only the slow judge call (Anthropic API or `claude` CLI subprocess)
+/// fans out across the worker pool.
+#[allow(clippy::too_many_arguments)]
 pub fn run_llm_review_for_repo(
     conn: &Connection,
     repo_path: &Path,
@@ -65,8 +74,9 @@ pub fn run_llm_review_for_repo(
     sprint_id: i64,
     rubric: &Rubric,
     stack: &str,
-    judge: &dyn Judge,
+    judge: &(dyn Judge + Send + Sync),
     skip_globs: &[String],
+    workers: usize,
 ) -> rusqlite::Result<usize> {
     let rubric_section = match rubric.for_stack(stack) {
         Some(s) => s,
@@ -97,7 +107,23 @@ pub fn run_llm_review_for_repo(
         params![repo_full_name, sprint_id],
     )?;
 
-    let mut written = 0usize;
+    // Phase 1: walk files, separate cache hits from misses. All DB I/O
+    // happens here, on the single connection.
+    struct JudgeJob {
+        file_sha: String,
+        rel: String,
+        bytes: Vec<u8>,
+        total_lines: u32,
+    }
+    struct ResolvedFile {
+        rel: String,
+        response_json: String,
+        total_lines: u32,
+    }
+
+    let mut to_judge: Vec<JudgeJob> = Vec::new();
+    let mut resolved: Vec<ResolvedFile> = Vec::new();
+
     for entry in WalkDir::new(repo_path).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
@@ -110,10 +136,7 @@ pub fn run_llm_review_for_repo(
             Ok(p) => p.to_string_lossy().into_owned(),
             Err(_) => continue,
         };
-        if skip_globs
-            .iter()
-            .any(|g| simple_glob_match(g, &rel))
-        {
+        if skip_globs.iter().any(|g| simple_glob_match(g, &rel)) {
             debug!(file = %rel, "skipping LLM review (skip glob)");
             continue;
         }
@@ -122,39 +145,78 @@ pub fn run_llm_review_for_repo(
             Err(_) => continue,
         };
         let file_sha = sha256_hex(&bytes);
-        let response_json = match cache::lookup(
-            conn,
-            &file_sha,
-            &rubric_key,
-            judge.model_id(),
-        )? {
-            Some(j) => j,
-            None => {
-                let resp = match judge.judge(&rel, rubric_section, &bytes) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(file = %rel, error = %e, "judge call failed; skipping file");
-                        continue;
-                    }
-                };
-                let raw = match serde_json::to_string(&resp) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(file = %rel, error = %e, "failed to serialise judge response");
-                        continue;
-                    }
-                };
-                cache::insert(
-                    conn,
-                    &file_sha,
-                    &rubric_key,
-                    judge.model_id(),
-                    &raw,
-                )?;
-                raw
-            }
-        };
+        let total_lines = bytes.iter().filter(|b| **b == b'\n').count() as u32 + 1;
+        match cache::lookup(conn, &file_sha, &rubric_key, judge.model_id())? {
+            Some(j) => resolved.push(ResolvedFile {
+                rel,
+                response_json: j,
+                total_lines,
+            }),
+            None => to_judge.push(JudgeJob {
+                file_sha,
+                rel,
+                bytes,
+                total_lines,
+            }),
+        }
+    }
 
+    // Phase 2: parallel judge calls. Workers default to 1 (effectively
+    // serial); higher values fan out across a Rayon pool. The pool is
+    // local to this call so it doesn't contend with the workspace's
+    // global `rayon::par_iter` pool elsewhere in the pipeline.
+    let workers = workers.max(1);
+    let judge_outcomes: Vec<(String, String, u32, Result<String, JudgeError>)> = {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .map_err(|e| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                    e.to_string(),
+                )))
+            })?;
+        pool.install(|| {
+            to_judge
+                .par_iter()
+                .map(|job| {
+                    let raw = judge
+                        .judge(&job.rel, rubric_section, &job.bytes)
+                        .and_then(|r| {
+                            serde_json::to_string(&r).map_err(|e| JudgeError::Parse(e.to_string()))
+                        });
+                    (job.file_sha.clone(), job.rel.clone(), job.total_lines, raw)
+                })
+                .collect()
+        })
+    };
+
+    // Phase 3: cache writes + roll cache hits and successful misses into
+    // a single `resolved` queue. Failed judge calls drop the file (warn
+    // logged once with the error).
+    for (file_sha, rel, total_lines, raw_result) in judge_outcomes {
+        match raw_result {
+            Ok(raw) => {
+                cache::insert(conn, &file_sha, &rubric_key, judge.model_id(), &raw)?;
+                resolved.push(ResolvedFile {
+                    rel,
+                    response_json: raw,
+                    total_lines,
+                });
+            }
+            Err(e) => {
+                warn!(file = %rel, error = %e, "judge call failed; skipping file");
+            }
+        }
+    }
+
+    // Phase 4: parse responses + insert violations.
+    let mut written = 0usize;
+    for ResolvedFile {
+        rel,
+        response_json,
+        total_lines,
+    } in resolved
+    {
         let parsed: LlmResponse = match serde_json::from_str(&response_json) {
             Ok(p) => p,
             Err(e) => {
@@ -162,9 +224,6 @@ pub fn run_llm_review_for_repo(
                 continue;
             }
         };
-
-        let total_lines = bytes.iter().filter(|b| **b == b'\n').count() as u32 + 1;
-
         for v in parsed.violations {
             if v.start_line < 1 || v.end_line < v.start_line || v.end_line > total_lines {
                 warn!(
@@ -177,14 +236,7 @@ pub fn run_llm_review_for_repo(
                 );
                 continue;
             }
-            insert_llm_violation(
-                conn,
-                repo_full_name,
-                sprint_id,
-                &rel,
-                &rubric_key,
-                &v,
-            )?;
+            insert_llm_violation(conn, repo_full_name, sprint_id, &rel, &rubric_key, &v)?;
             written += 1;
         }
     }
@@ -193,6 +245,7 @@ pub fn run_llm_review_for_repo(
         sprint_id,
         violations = written,
         rubric_key = %rubric_key,
+        workers,
         "llm architecture review complete"
     );
     Ok(written)
@@ -339,7 +392,13 @@ mod tests {
 
     #[test]
     fn glob_match_r_java() {
-        assert!(simple_glob_match("**/R.java", "app/src/main/java/com/x/R.java"));
-        assert!(!simple_glob_match("**/R.java", "app/src/main/java/com/x/RR.java"));
+        assert!(simple_glob_match(
+            "**/R.java",
+            "app/src/main/java/com/x/R.java"
+        ));
+        assert!(!simple_glob_match(
+            "**/R.java",
+            "app/src/main/java/com/x/RR.java"
+        ));
     }
 }

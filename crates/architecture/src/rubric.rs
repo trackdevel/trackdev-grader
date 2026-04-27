@@ -81,7 +81,7 @@ pub fn load(path: &Path) -> anyhow::Result<Rubric> {
 
 pub fn parse(text: &str) -> anyhow::Result<Rubric> {
     let (frontmatter, body) = split_frontmatter(text);
-    let version = read_version(&frontmatter).unwrap_or_else(|| "0".to_string());
+    let version = read_version(frontmatter).unwrap_or_else(|| "0".to_string());
 
     let normalized_body = normalize_for_hash(body);
     let body_hash = sha256_hex(&normalized_body);
@@ -246,10 +246,7 @@ version: 2
 
     #[test]
     fn body_hash_stable_across_whitespace_only_edits() {
-        let extra_blanks = SAMPLE.replace(
-            "# Spring Boot rubric",
-            "# Spring Boot rubric   \n\n\n",
-        );
+        let extra_blanks = SAMPLE.replace("# Spring Boot rubric", "# Spring Boot rubric   \n\n\n");
         let a = parse(SAMPLE).unwrap();
         let b = parse(&extra_blanks).unwrap();
         assert_eq!(

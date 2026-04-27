@@ -37,6 +37,8 @@ pub enum JudgeError {
     Anthropic(#[from] AnthropicError),
     #[error("model response is not valid JSON: {0}")]
     Parse(String),
+    #[error("claude CLI failed: {0}")]
+    Cli(String),
 }
 
 pub trait Judge {
@@ -195,7 +197,8 @@ mod tests {
 
     #[test]
     fn parses_with_leading_and_trailing_prose() {
-        let text = "Sure, here's the analysis:\n\n{\"violations\":[]}\n\nLet me know if you need more.";
+        let text =
+            "Sure, here's the analysis:\n\n{\"violations\":[]}\n\nLet me know if you need more.";
         let r = parse_response(text).unwrap();
         assert!(r.violations.is_empty());
     }

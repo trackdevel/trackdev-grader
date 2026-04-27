@@ -172,7 +172,10 @@ mod tests {
                    public class Foo {}\n";
         let (pkg, imports) = parse_java(src).unwrap();
         assert_eq!(pkg, "com.example.app");
-        assert_eq!(import_texts(&imports), vec!["java.util.List", "org.junit.Assert.*"]);
+        assert_eq!(
+            import_texts(&imports),
+            vec!["java.util.List", "org.junit.Assert.*"]
+        );
         assert_eq!(imports[0].line, Some(2));
         assert_eq!(imports[1].line, Some(3));
     }

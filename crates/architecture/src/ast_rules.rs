@@ -122,7 +122,11 @@ impl AstRule {
             annotation: raw.class_match.annotation,
             extends: raw.class_match.extends,
             implements: raw.class_match.implements,
-            package_glob: raw.class_match.package_glob.as_deref().map(PackagePattern::new),
+            package_glob: raw
+                .class_match
+                .package_glob
+                .as_deref()
+                .map(PackagePattern::new),
         };
         let kind = match raw.kind.as_str() {
             "forbidden_field_type" => AstRuleKind::ForbiddenFieldType {
@@ -139,7 +143,10 @@ impl AstRule {
             },
             "max_method_statements" => AstRuleKind::MaxMethodStatements {
                 max: raw.max.ok_or_else(|| {
-                    anyhow::anyhow!("ast_rule '{}' kind=max_method_statements requires `max`", raw.name)
+                    anyhow::anyhow!(
+                        "ast_rule '{}' kind=max_method_statements requires `max`",
+                        raw.name
+                    )
                 })?,
             },
             other => {
@@ -196,14 +203,14 @@ pub fn check_java_file(
     out
 }
 
-fn visit_classes<F: FnMut(Node)>(node: Node, source: &[u8], cb: &mut F) {
+fn visit_classes<F: FnMut(Node)>(node: Node, _source: &[u8], cb: &mut F) {
     let kind = node.kind();
     if kind == "class_declaration" || kind == "interface_declaration" || kind == "enum_declaration"
     {
         cb(node);
     }
     for child in children(node) {
-        visit_classes(child, source, cb);
+        visit_classes(child, _source, cb);
     }
 }
 
@@ -268,7 +275,9 @@ impl<'a> ClassInfo<'a> {
     }
 
     fn class_body(&self) -> Option<Node<'a>> {
-        children(self.node).into_iter().find(|c| c.kind() == "class_body")
+        children(self.node)
+            .into_iter()
+            .find(|c| c.kind() == "class_body")
     }
 }
 
@@ -349,7 +358,9 @@ fn apply_rule(
         }
         AstRuleKind::ForbiddenMethodCall { call_regex } => {
             for member in children(body) {
-                if member.kind() != "method_declaration" && member.kind() != "constructor_declaration" {
+                if member.kind() != "method_declaration"
+                    && member.kind() != "constructor_declaration"
+                {
                     continue;
                 }
                 let mut hits: Vec<(String, Node)> = Vec::new();
@@ -493,8 +504,11 @@ fn type_text_of_field(node: Node, source: &[u8]) -> Option<String> {
         if k == "modifiers" {
             continue;
         }
-        if k.ends_with("_type") || k == "type_identifier" || k == "scoped_type_identifier"
-            || k == "generic_type" || k == "array_type"
+        if k.ends_with("_type")
+            || k == "type_identifier"
+            || k == "scoped_type_identifier"
+            || k == "generic_type"
+            || k == "array_type"
         {
             return simple_type_name(c, source);
         }
@@ -523,8 +537,11 @@ fn type_text_of_param(node: Node, source: &[u8]) -> Option<String> {
         if k == "modifiers" {
             continue;
         }
-        if k.ends_with("_type") || k == "type_identifier" || k == "scoped_type_identifier"
-            || k == "generic_type" || k == "array_type"
+        if k.ends_with("_type")
+            || k == "type_identifier"
+            || k == "scoped_type_identifier"
+            || k == "generic_type"
+            || k == "array_type"
         {
             return simple_type_name(c, source);
         }

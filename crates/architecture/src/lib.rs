@@ -44,18 +44,29 @@ pub fn scan_repo_to_db(
     sprint_id: i64,
     rules: &ArchitectureRules,
 ) -> rusqlite::Result<usize> {
-    // Clear attribution rows that point at the soon-to-be-deleted violations.
+    // Clear attribution + violation rows that match this repo for this
+    // sprint. The architecture stage used to write `repo_full_name` as the
+    // BARE directory name (e.g. `spring-pds26_4c`); it now writes the
+    // org-qualified `<org>/<repo>` form. The two forms don't share a key,
+    // so a plain `WHERE repo_full_name = ?` would leave stale legacy rows
+    // alive on every re-run after the qualifier-fix landed. Delete BOTH
+    // the qualified form (current writes) and the bare basename
+    // (legacy writes) before re-inserting.
+    let bare = repo_full_name.rsplit('/').next().unwrap_or(repo_full_name);
     conn.execute(
         "DELETE FROM architecture_violation_attribution
          WHERE violation_rowid IN (
              SELECT rowid FROM architecture_violations
-             WHERE repo_full_name = ? AND sprint_id = ?
+             WHERE sprint_id = ?
+               AND (repo_full_name = ? OR repo_full_name = ?)
          )",
-        params![repo_full_name, sprint_id],
+        params![sprint_id, repo_full_name, bare],
     )?;
     conn.execute(
-        "DELETE FROM architecture_violations WHERE repo_full_name = ? AND sprint_id = ?",
-        params![repo_full_name, sprint_id],
+        "DELETE FROM architecture_violations
+         WHERE sprint_id = ?
+           AND (repo_full_name = ? OR repo_full_name = ?)",
+        params![sprint_id, repo_full_name, bare],
     )?;
     let files = scan_repo(repo_path);
     let mut written = 0usize;
@@ -167,10 +178,33 @@ pub fn scan_project_to_db(
             continue;
         }
         let repo_path = entry.path();
-        let repo_full_name = entry.file_name().to_string_lossy().into_owned();
+        let bare = entry.file_name().to_string_lossy().into_owned();
+        // Persist the org-qualified `<org>/<repo>` form when we can find one
+        // in `pull_requests.repo_full_name` (collect already wrote it). Fall
+        // back to the bare directory name only if no PR row references it,
+        // so existing reports still build a GitHub URL whenever possible.
+        let repo_full_name = resolve_qualified_repo_name(conn, &bare).unwrap_or(bare);
         total += scan_repo_to_db(conn, &repo_path, &repo_full_name, sprint_id, rules)?;
     }
     Ok(total)
+}
+
+/// Look up the `<org>/<repo>` form for a bare repo directory name by
+/// matching against `pull_requests.repo_full_name`. Returns `None` if no
+/// PR row references this repo (e.g. fresh project with no PRs yet).
+fn resolve_qualified_repo_name(conn: &Connection, bare: &str) -> Option<String> {
+    let like = format!("%/{}", bare);
+    conn.query_row(
+        "SELECT repo_full_name FROM pull_requests
+         WHERE repo_full_name = ? OR repo_full_name LIKE ?
+         ORDER BY (repo_full_name = ?) DESC, length(repo_full_name) DESC
+         LIMIT 1",
+        params![bare, like, bare],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .filter(|s| s.contains('/'))
 }
 
 /// Total violations recorded for one (project, sprint). Used by the
@@ -246,6 +280,50 @@ may_depend_on = []
     }
 
     #[test]
+    fn rerun_purges_legacy_bare_name_rows() {
+        // Regression: scan_project_to_db now writes the org-qualified
+        // `<org>/<repo>` form, but pre-fix runs left bare-name rows in the
+        // table. scan_repo_to_db must delete BOTH forms for the sprint
+        // before re-inserting, otherwise stale bogus violations from a
+        // pre-fix run linger forever.
+        let tmp = TempDir::new().unwrap();
+        write_java(
+            tmp.path(),
+            "src/main/java/com/x/controller/Bad.java",
+            "package com.x.controller;\n\
+             import com.x.repository.UserRepository;\n\
+             public class Bad {}",
+        );
+        let conn = Connection::open_in_memory().unwrap();
+        sprint_grader_core::db::apply_schema(&conn).unwrap();
+
+        // Seed legacy bare-name rows from a hypothetical old run.
+        conn.execute(
+            "INSERT INTO architecture_violations
+                (repo_full_name, sprint_id, file_path, rule_name, violation_kind,
+                 offending_import, severity, rule_kind)
+             VALUES
+                ('spring-x', 10, 'OldFile.java', 'domain->!infrastructure',
+                 'layer_dependency', 'jakarta.persistence.Entity', 'WARNING', 'layer_dependency')",
+            [],
+        )
+        .unwrap();
+
+        // New code path writes under qualified name and must purge the legacy row.
+        let rules = ArchitectureRules::from_toml_str(RULES).unwrap();
+        scan_repo_to_db(&conn, tmp.path(), "udg-x/spring-x", 10, &rules).unwrap();
+        let stale: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM architecture_violations
+                 WHERE repo_full_name = 'spring-x' AND sprint_id = 10",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0, "legacy bare-name rows must be purged on re-scan");
+    }
+
+    #[test]
     fn rerun_is_idempotent() {
         let tmp = TempDir::new().unwrap();
         write_java(
@@ -267,5 +345,69 @@ may_depend_on = []
             })
             .unwrap();
         assert_eq!(total, 1, "row count must not duplicate");
+    }
+
+    #[test]
+    fn scan_project_qualifies_repo_name_from_pull_requests() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("team-x");
+        let repo = project.join("spring-x");
+        write_java(
+            &repo,
+            "src/main/java/com/x/controller/Bad.java",
+            "package com.x.controller;\n\
+             import com.x.repository.UserRepository;\n\
+             public class Bad {}",
+        );
+
+        let conn = Connection::open_in_memory().unwrap();
+        sprint_grader_core::db::apply_schema(&conn).unwrap();
+        // Seed a PR row carrying the org-qualified repo name; this is what
+        // collect normally writes during the GitHub fetch.
+        conn.execute(
+            "INSERT INTO pull_requests (id, repo_full_name) VALUES ('p1', 'udg-3c/spring-x')",
+            [],
+        )
+        .unwrap();
+        let rules = ArchitectureRules::from_toml_str(RULES).unwrap();
+        scan_project_to_db(&conn, &project, 10, &rules).unwrap();
+
+        let stored: String = conn
+            .query_row(
+                "SELECT repo_full_name FROM architecture_violations LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored, "udg-3c/spring-x",
+            "scan_project_to_db must persist <org>/<repo> when collect knows it"
+        );
+    }
+
+    #[test]
+    fn scan_project_falls_back_to_bare_name_when_no_pr_row() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("team-y");
+        let repo = project.join("spring-y");
+        write_java(
+            &repo,
+            "src/main/java/com/x/controller/Bad.java",
+            "package com.x.controller;\n\
+             import com.x.repository.UserRepository;\n\
+             public class Bad {}",
+        );
+        let conn = Connection::open_in_memory().unwrap();
+        sprint_grader_core::db::apply_schema(&conn).unwrap();
+        let rules = ArchitectureRules::from_toml_str(RULES).unwrap();
+        scan_project_to_db(&conn, &project, 10, &rules).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT repo_full_name FROM architecture_violations LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "spring-y");
     }
 }

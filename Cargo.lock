@@ -1540,12 +1540,38 @@ name = "sprint-grader-architecture"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "once_cell",
+ "regex",
  "rusqlite",
  "serde",
+ "sha2",
  "sprint-grader-core",
+ "sprint-grader-survival",
  "tempfile",
  "thiserror 1.0.69",
  "toml",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-java",
+ "walkdir",
+]
+
+[[package]]
+name = "sprint-grader-architecture-llm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rayon",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sprint-grader-architecture",
+ "sprint-grader-core",
+ "sprint-grader-evaluate",
+ "tempfile",
+ "thiserror 1.0.69",
  "tracing",
  "walkdir",
 ]
@@ -1709,6 +1735,7 @@ dependencies = [
  "sprint-grader-ai-detect",
  "sprint-grader-analyze",
  "sprint-grader-architecture",
+ "sprint-grader-architecture-llm",
  "sprint-grader-collect",
  "sprint-grader-compile",
  "sprint-grader-core",

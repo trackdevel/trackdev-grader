@@ -11,10 +11,13 @@ use tempfile::TempDir;
 
 /// Tiny stub: every call returns one fixed violation. Used in place of
 /// the real `LlmJudge` so the cache + persistence path is exercisable
-/// without an Anthropic key.
+/// without an Anthropic key. `calls` is atomic because the production
+/// signature now requires `&(dyn Judge + Send + Sync)` — the orchestrator
+/// fans out per-file judge calls across a Rayon pool sized by
+/// `architecture.judge_workers`.
 struct OneShotJudge {
     model: String,
-    calls: std::cell::Cell<u32>,
+    calls: std::sync::atomic::AtomicU32,
 }
 
 impl Judge for OneShotJudge {
@@ -27,7 +30,8 @@ impl Judge for OneShotJudge {
         _rubric: &str,
         _bytes: &[u8],
     ) -> Result<LlmResponse, JudgeError> {
-        self.calls.set(self.calls.get() + 1);
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(LlmResponse {
             violations: vec![LlmViolation {
                 rule_id: "FAT_METHOD".into(),
@@ -71,7 +75,7 @@ fn llm_review_writes_violations_then_caches() {
     let rubric = fixture_rubric();
     let judge = OneShotJudge {
         model: "stub-model".into(),
-        calls: 0.into(),
+        calls: std::sync::atomic::AtomicU32::new(0),
     };
 
     let n = run_llm_review_for_repo(
@@ -83,10 +87,15 @@ fn llm_review_writes_violations_then_caches() {
         "spring",
         &judge,
         &[],
+        1,
     )
     .unwrap();
     assert_eq!(n, 1, "one violation written");
-    assert_eq!(judge.calls.get(), 1, "the file was sent to the judge once");
+    assert_eq!(
+        judge.calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the file was sent to the judge once"
+    );
 
     // Second pass: same file_sha + rubric + model → cache hit, no new call.
     let n2 = run_llm_review_for_repo(
@@ -98,10 +107,15 @@ fn llm_review_writes_violations_then_caches() {
         "spring",
         &judge,
         &[],
+        1,
     )
     .unwrap();
     assert_eq!(n2, 1);
-    assert_eq!(judge.calls.get(), 1, "second run was a cache hit");
+    assert_eq!(
+        judge.calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "second run was a cache hit"
+    );
 
     // The LLM violation row carries rule_kind='llm' and the explanation column.
     let (rule_kind, explanation): (Option<String>, Option<String>) = conn
@@ -125,11 +139,11 @@ fn rerun_idempotent_does_not_duplicate() {
     let rubric = fixture_rubric();
     let judge = OneShotJudge {
         model: "stub-model".into(),
-        calls: 0.into(),
+        calls: std::sync::atomic::AtomicU32::new(0),
     };
 
-    run_llm_review_for_repo(&conn, tmp.path(), "x", 1, &rubric, "spring", &judge, &[]).unwrap();
-    run_llm_review_for_repo(&conn, tmp.path(), "x", 1, &rubric, "spring", &judge, &[]).unwrap();
+    run_llm_review_for_repo(&conn, tmp.path(), "x", 1, &rubric, "spring", &judge, &[], 1).unwrap();
+    run_llm_review_for_repo(&conn, tmp.path(), "x", 1, &rubric, "spring", &judge, &[], 1).unwrap();
 
     let count: i64 = conn
         .query_row(
@@ -151,7 +165,7 @@ fn skip_globs_filter_files_before_llm_call() {
     let rubric = fixture_rubric();
     let judge = OneShotJudge {
         model: "stub-model".into(),
-        calls: 0.into(),
+        calls: std::sync::atomic::AtomicU32::new(0),
     };
     run_llm_review_for_repo(
         &conn,
@@ -162,10 +176,11 @@ fn skip_globs_filter_files_before_llm_call() {
         "spring",
         &judge,
         &["**/build/**".to_string()],
+        1,
     )
     .unwrap();
     assert_eq!(
-        judge.calls.get(),
+        judge.calls.load(std::sync::atomic::Ordering::Relaxed),
         1,
         "only the non-skipped file goes to the judge"
     );
@@ -180,12 +195,7 @@ fn out_of_range_line_numbers_are_dropped() {
         fn model_id(&self) -> &str {
             &self.model
         }
-        fn judge(
-            &self,
-            _: &str,
-            _: &str,
-            _: &[u8],
-        ) -> Result<LlmResponse, JudgeError> {
+        fn judge(&self, _: &str, _: &str, _: &[u8]) -> Result<LlmResponse, JudgeError> {
             Ok(LlmResponse {
                 violations: vec![
                     LlmViolation {
@@ -214,7 +224,8 @@ fn out_of_range_line_numbers_are_dropped() {
     let judge = LiarJudge {
         model: "stub".into(),
     };
-    let n = run_llm_review_for_repo(&conn, tmp.path(), "x", 1, &rubric, "spring", &judge, &[]).unwrap();
+    let n = run_llm_review_for_repo(&conn, tmp.path(), "x", 1, &rubric, "spring", &judge, &[], 1)
+        .unwrap();
     assert_eq!(n, 1, "OK row inserted, BAD row dropped");
     let kept_rule: String = conn
         .query_row(

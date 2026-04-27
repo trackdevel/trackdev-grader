@@ -184,9 +184,8 @@ fn t_t3_2b_ast_rules_record_line_ranges_and_rule_kind() {
              private UserRepository userRepository;\n\
          }\n",
     );
-    let rules =
-        sprint_grader_architecture::ArchitectureRules::from_toml_str(ARCHITECTURE_TOML_AST)
-            .unwrap();
+    let rules = sprint_grader_architecture::ArchitectureRules::from_toml_str(ARCHITECTURE_TOML_AST)
+        .unwrap();
     sprint_grader_architecture::scan_repo_to_db(
         &conn,
         &android_root,
@@ -205,7 +204,10 @@ fn t_t3_2b_ast_rules_record_line_ranges_and_rule_kind() {
         )
         .unwrap();
     assert_eq!(rule_kind.as_deref(), Some("ast_forbidden_field_type"));
-    assert!(start.is_some() && end.is_some(), "AST rules must carry a line range");
+    assert!(
+        start.is_some() && end.is_some(),
+        "AST rules must carry a line range"
+    );
     assert!(start.unwrap() >= 1 && end.unwrap() >= start.unwrap());
 
     // The fixture's project dir is not a git repo, so attribution skips

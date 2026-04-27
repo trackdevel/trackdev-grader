@@ -413,21 +413,53 @@ fn run_ai_detection_block(
 }
 
 /// Clone or update every repo referenced by pull_requests in the DB. Mirrors
-/// Python's `orchestration.clone_repos`.
-fn clone_repos_from_db(db: &Database, entregues_dir: &Path) -> Result<()> {
-    let mut stmt = db.conn.prepare(
-        "SELECT DISTINCT pr.repo_full_name, p.name as project_name
-         FROM pull_requests pr
-         JOIN students s ON s.id = pr.author_id
-         JOIN projects p ON p.id = s.team_project_id
-         WHERE pr.repo_full_name IS NOT NULL AND pr.repo_full_name != ''",
-    )?;
-    let rows: Vec<(String, Option<String>)> = stmt
-        .query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(stmt);
+/// Python's `orchestration.clone_repos`. When `project_ids` is `Some`, scope
+/// the clone set to repos whose author belongs to one of those projects so
+/// `--projects` doesn't trigger 30+ unrelated `git fetch`es.
+fn clone_repos_from_db(
+    db: &Database,
+    entregues_dir: &Path,
+    project_ids: Option<&[i64]>,
+) -> Result<()> {
+    let rows: Vec<(String, Option<String>)> = if let Some(ids) = project_ids {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT DISTINCT pr.repo_full_name, p.name as project_name
+             FROM pull_requests pr
+             JOIN students s ON s.id = pr.author_id
+             JOIN projects p ON p.id = s.team_project_id
+             WHERE pr.repo_full_name IS NOT NULL AND pr.repo_full_name != ''
+               AND p.id IN ({placeholders})"
+        );
+        let mut stmt = db.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        let collected = stmt
+            .query_map(params.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        collected
+    } else {
+        let mut stmt = db.conn.prepare(
+            "SELECT DISTINCT pr.repo_full_name, p.name as project_name
+             FROM pull_requests pr
+             JOIN students s ON s.id = pr.author_id
+             JOIN projects p ON p.id = s.team_project_id
+             WHERE pr.repo_full_name IS NOT NULL AND pr.repo_full_name != ''",
+        )?;
+        let collected = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        collected
+    };
     if rows.is_empty() {
         return Ok(());
     }
@@ -494,8 +526,27 @@ pub fn rerun_post_collection_for_sprint_ids(
 
     let db = Database::open(db_path).context("reopening grading DB")?;
     db.create_tables().context("schema migration")?;
-    sprint_grader_analyze::compute_all_trajectories(&db.conn, &config.detector_thresholds)
-        .context("trajectory failed")?;
+    // Derive project scope from the sprint_ids we just reran, so trajectory
+    // recomputation doesn't sweep unrelated projects' rows.
+    let mut project_ids: Vec<i64> = Vec::new();
+    for sid in sprint_ids {
+        if let Ok(Some(pid)) =
+            db.conn
+                .query_row("SELECT project_id FROM sprints WHERE id = ?", [sid], |r| {
+                    r.get::<_, Option<i64>>(0)
+                })
+        {
+            if !project_ids.contains(&pid) {
+                project_ids.push(pid);
+            }
+        }
+    }
+    sprint_grader_analyze::compute_all_trajectories_filtered(
+        &db.conn,
+        &config.detector_thresholds,
+        Some(&project_ids),
+    )
+    .context("trajectory failed")?;
     Ok(())
 }
 
@@ -572,8 +623,30 @@ pub fn run_pipeline(
     sprint_grader_collect::run_collection(config, &db, &collect_opts)
         .context("collection failed")?;
 
+    // Resolve `--projects` slug filter to project_ids ONCE; from here on
+    // every globally-iterating stage takes this list so `--projects`
+    // strictly scopes the run.
+    let scoped_project_ids: Option<Vec<i64>> = match opts.project_filter.as_deref() {
+        Some(names) if !names.is_empty() => {
+            let mut ids: Vec<i64> = Vec::with_capacity(names.len());
+            for name in names {
+                if let Ok(pid) =
+                    db.conn
+                        .query_row("SELECT id FROM projects WHERE name = ?", [name], |r| {
+                            r.get::<_, i64>(0)
+                        })
+                {
+                    ids.push(pid);
+                }
+            }
+            Some(ids)
+        }
+        _ => None,
+    };
+    let project_ids_filter: Option<&[i64]> = scoped_project_ids.as_deref();
+
     if !opts.skip_repos && !opts.skip_github {
-        clone_repos_from_db(&db, &opts.entregues_dir)?;
+        clone_repos_from_db(&db, &opts.entregues_dir, project_ids_filter)?;
     }
 
     // T-P2.1: per-student estimation-bias fitter. Pools every estimated
@@ -582,7 +655,7 @@ pub fn run_pipeline(
     // the parallel block so `student_estimation_bias` is populated when
     // the ESTIMATION_BIAS detector queries it on the same run. The fit
     // depends only on `tasks` + `sprints`, both populated by `collect`.
-    match sprint_grader_estimation::fit_and_persist_for_all_projects(&db.conn) {
+    match sprint_grader_estimation::fit_and_persist_for_projects(&db.conn, project_ids_filter) {
         Ok(n) => info!(students_written = n, "estimation bias fitting done"),
         Err(e) => warn!(error = %e, "estimation bias fitting failed"),
     }
@@ -719,66 +792,79 @@ pub fn run_pipeline(
         );
     }
 
-    // T-P3.3: LLM-judged architecture review. Gated by config flag and
-    // by `ANTHROPIC_API_KEY` presence — both must be true for any API
-    // calls to fire. Mirrors the `evaluate` crate's silent-fallback
-    // contract; missing key → skip silently, never hard-fail.
+    // T-P3.3: LLM-judged architecture review. Gated by config flag +
+    // judge backend prerequisites:
+    //   - `judge = "claude-cli"` (default) requires the local `claude`
+    //     binary on `$PATH` (or via `claude_cli_path`). No API key.
+    //   - `judge = "anthropic-api"` requires `ANTHROPIC_API_KEY`.
+    // Either way, missing prerequisite → silent skip; never hard-fail.
     if config.architecture.llm_review {
-        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-        if api_key.is_empty() {
-            info!(
-                "[architecture] llm_review = true but ANTHROPIC_API_KEY is empty — skipping LLM review"
-            );
-        } else {
-            let rubric_path = opts.config_dir.join(&config.architecture.rubric_path);
-            match sprint_grader_architecture::rubric::load(&rubric_path) {
-                Ok(rubric) => match sprint_grader_architecture_llm::LlmJudge::new(
-                    &api_key,
-                    config.architecture.model_id.clone(),
-                    config.architecture.max_tokens,
-                ) {
-                    Ok(judge) => {
-                        for g in &groups {
-                            let project_root = opts.entregues_dir.join(&g.name);
-                            for sid in &g.sprint_ids {
-                                let entries = match std::fs::read_dir(&project_root) {
-                                    Ok(e) => e,
-                                    Err(_) => continue,
-                                };
-                                for entry in entries.flatten() {
-                                    if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-                                        continue;
-                                    }
-                                    let repo_path = entry.path();
-                                    let repo_full_name =
-                                        entry.file_name().to_string_lossy().into_owned();
-                                    let stack = if repo_full_name.starts_with("android-") {
-                                        "android"
-                                    } else {
-                                        "spring"
-                                    };
-                                    if let Err(e) =
-                                        sprint_grader_architecture_llm::run_llm_review_for_repo(
-                                            &db.conn,
-                                            &repo_path,
-                                            &repo_full_name,
-                                            *sid,
-                                            &rubric,
-                                            stack,
-                                            &judge,
-                                            &config.architecture.llm_skip_globs,
-                                        )
-                                    {
-                                        warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "LLM architecture review failed");
-                                    }
-                                }
+        let judge_kind = config.architecture.judge.as_str();
+        let judge_box: Option<Box<dyn sprint_grader_architecture_llm::Judge + Send + Sync>> =
+            match judge_kind {
+                "claude-cli" => {
+                    if !sprint_grader_architecture_llm::ClaudeCliJudge::is_available(
+                        &config.architecture.claude_cli_path,
+                    ) {
+                        info!(
+                            cli_path = %config.architecture.claude_cli_path,
+                            "[architecture] llm_review = true but `claude` CLI is not available — skipping LLM review"
+                        );
+                        None
+                    } else {
+                        Some(Box::new(
+                            sprint_grader_architecture_llm::ClaudeCliJudge::new(
+                                config.architecture.claude_cli_path.clone(),
+                                config.architecture.model_id.clone(),
+                                config.architecture.judge_timeout_seconds,
+                            ),
+                        ))
+                    }
+                }
+                "anthropic-api" => {
+                    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+                    if api_key.is_empty() {
+                        info!(
+                            "[architecture] llm_review = true with judge = \"anthropic-api\" but ANTHROPIC_API_KEY is empty — skipping LLM review"
+                        );
+                        None
+                    } else {
+                        match sprint_grader_architecture_llm::LlmJudge::new(
+                            &api_key,
+                            config.architecture.model_id.clone(),
+                            config.architecture.max_tokens,
+                        ) {
+                            Ok(j) => Some(Box::new(j)),
+                            Err(e) => {
+                                warn!(error = %e, "could not construct Anthropic client; skipping LLM review");
+                                None
                             }
                         }
-                        // Architecture stage wrote new violation rows; re-run
-                        // attribution per (repo, sprint) so the LLM rows pick
-                        // up blame weights too.
-                        for g in &groups {
-                            let project_root = opts.entregues_dir.join(&g.name);
+                    }
+                }
+                other => {
+                    warn!(
+                        judge = %other,
+                        "[architecture] unknown judge — expected \"claude-cli\" or \"anthropic-api\"; skipping LLM review"
+                    );
+                    None
+                }
+            };
+
+        if let Some(judge_box) = judge_box {
+            let rubric_path = opts.config_dir.join(&config.architecture.rubric_path);
+            let workers = config.architecture.judge_workers.max(1);
+            match sprint_grader_architecture::rubric::load(&rubric_path) {
+                Ok(rubric) => {
+                    info!(
+                        judge = %judge_kind,
+                        workers,
+                        "[architecture] running LLM review"
+                    );
+                    let judge = judge_box;
+                    for g in &groups {
+                        let project_root = opts.entregues_dir.join(&g.name);
+                        for sid in &g.sprint_ids {
                             let entries = match std::fs::read_dir(&project_root) {
                                 Ok(e) => e,
                                 Err(_) => continue,
@@ -790,24 +876,70 @@ pub fn run_pipeline(
                                 let repo_path = entry.path();
                                 let repo_full_name =
                                     entry.file_name().to_string_lossy().into_owned();
-                                for sid in &g.sprint_ids {
-                                    if let Err(e) =
-                                        sprint_grader_architecture::attribute_violations_for_repo(
-                                            &db.conn,
-                                            &repo_path,
-                                            &repo_full_name,
-                                            *sid,
-                                        )
-                                    {
-                                        warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "post-LLM attribution failed");
-                                    }
+                                let stack = if repo_full_name.starts_with("android-") {
+                                    "android"
+                                } else {
+                                    "spring"
+                                };
+                                // The judge implementation does its own
+                                // intra-repo concurrency via run_llm_review_for_repo;
+                                // we currently iterate (repo, sprint) pairs
+                                // sequentially in the orchestrator. Worker-pool
+                                // concurrency for the per-file calls happens
+                                // inside `run_llm_review_for_repo` (see
+                                // architecture_llm/src/lib.rs) when
+                                // `architecture.judge_workers > 1`.
+                                if let Err(e) =
+                                    sprint_grader_architecture_llm::run_llm_review_for_repo(
+                                        &db.conn,
+                                        &repo_path,
+                                        &repo_full_name,
+                                        *sid,
+                                        &rubric,
+                                        stack,
+                                        judge.as_ref(),
+                                        &config.architecture.llm_skip_globs,
+                                        workers,
+                                    )
+                                {
+                                    warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "LLM architecture review failed");
                                 }
                             }
                         }
                     }
-                    Err(e) => warn!(error = %e, "could not construct Anthropic client; skipping LLM review"),
-                },
-                Err(e) => warn!(error = %e, path = %rubric_path.display(), "rubric load failed; skipping LLM review"),
+                    // Architecture stage wrote new violation rows; re-run
+                    // attribution per (repo, sprint) so the LLM rows pick
+                    // up blame weights too.
+                    for g in &groups {
+                        let project_root = opts.entregues_dir.join(&g.name);
+                        let entries = match std::fs::read_dir(&project_root) {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
+                        for entry in entries.flatten() {
+                            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                                continue;
+                            }
+                            let repo_path = entry.path();
+                            let repo_full_name = entry.file_name().to_string_lossy().into_owned();
+                            for sid in &g.sprint_ids {
+                                if let Err(e) =
+                                    sprint_grader_architecture::attribute_violations_for_repo(
+                                        &db.conn,
+                                        &repo_path,
+                                        &repo_full_name,
+                                        *sid,
+                                    )
+                                {
+                                    warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "post-LLM attribution failed");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, path = %rubric_path.display(), "rubric load failed; skipping LLM review");
+                }
             }
         }
     }
@@ -838,8 +970,12 @@ pub fn run_pipeline(
         total = total_stages,
         "trajectory aggregation"
     );
-    sprint_grader_analyze::compute_all_trajectories(&db.conn, &config.detector_thresholds)
-        .context("trajectory failed")?;
+    sprint_grader_analyze::compute_all_trajectories_filtered(
+        &db.conn,
+        &config.detector_thresholds,
+        project_ids_filter,
+    )
+    .context("trajectory failed")?;
 
     // Stage 6: reports
     if opts.skip_reports {
