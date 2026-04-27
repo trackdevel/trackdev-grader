@@ -151,6 +151,73 @@ fn t_t3_2_architecture_scan_writes_violations_and_flag_fires() {
     assert_eq!(drift, 1, "ARCHITECTURE_DRIFT should fire 0→N");
 }
 
+// T-T3.2b — AST rules + per-student blame attribution (T-P3.1).
+//
+// Exercises the AST rule path: a Java class annotated `@RestController`
+// holding a `*Repository` field must produce one violation row with
+// non-NULL `start_line`/`end_line` and a `rule_kind` starting with `ast_`.
+// Attribution silently writes 0 rows here (the temp project dir isn't a
+// git repo, and the helper warns + skips on empty blame); the
+// ARCHITECTURE_HOTSPOT detector therefore stays quiet, which is the
+// negative half of the surface contract — the violation is recorded but
+// can't fire the per-student flag without blame data.
+const ARCHITECTURE_TOML_AST: &str = r#"
+severity = "WARNING"
+[[ast_rule]]
+name = "controller-no-repository-field"
+class_match.annotation = "RestController"
+kind = "forbidden_field_type"
+type_regex = ".*Repository$"
+severity = "WARNING"
+"#;
+
+#[test]
+fn t_t3_2b_ast_rules_record_line_ranges_and_rule_kind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (conn, paths) = Fixture::new().build(tmp.path()).unwrap();
+    let android_root = paths.project_dir.join("android-team-01");
+    write_java(
+        android_root.join("src/main/java/com/x/web/UserController.java"),
+        "package com.x.web;\n\
+         @RestController\n\
+         public class UserController {\n\
+             private UserRepository userRepository;\n\
+         }\n",
+    );
+    let rules =
+        sprint_grader_architecture::ArchitectureRules::from_toml_str(ARCHITECTURE_TOML_AST)
+            .unwrap();
+    sprint_grader_architecture::scan_repo_to_db(
+        &conn,
+        &android_root,
+        ids::ANDROID_REPO,
+        ids::SPRINT_ID,
+        &rules,
+    )
+    .unwrap();
+
+    let (rule_kind, start, end): (Option<String>, Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT rule_kind, start_line, end_line FROM architecture_violations
+             WHERE sprint_id = ? AND rule_name = 'controller-no-repository-field'",
+            [ids::SPRINT_ID],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(rule_kind.as_deref(), Some("ast_forbidden_field_type"));
+    assert!(start.is_some() && end.is_some(), "AST rules must carry a line range");
+    assert!(start.unwrap() >= 1 && end.unwrap() >= start.unwrap());
+
+    // The fixture's project dir is not a git repo, so attribution skips
+    // silently and the per-student hotspot flag stays quiet.
+    detect_flags_for_sprint_id(&conn, ids::SPRINT_ID, &Config::test_default()).unwrap();
+    assert_eq!(
+        count_flags(&conn, ids::SPRINT_ID, "ARCHITECTURE_HOTSPOT"),
+        0,
+        "no blame data → no hotspot fires; this is the silent half of the contract"
+    );
+}
+
 #[test]
 fn t_t3_2_architecture_scan_skipped_silently_when_no_rules_file() {
     // Surface contract: when the project lays out repos but no
