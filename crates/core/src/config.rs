@@ -33,6 +33,43 @@ pub struct Config {
     pub detector_thresholds: DetectorThresholdsConfig,
     pub grading: GradingConfig,
     pub mutation: MutationConfig,
+    pub architecture: ArchitectureConfig,
+}
+
+/// Architecture-conformance LLM config (T-P3.3). The structural and AST
+/// scans (T-P2.2 / T-P3.1) always run when `architecture.toml` exists;
+/// the LLM judge is opt-in. Missing `ANTHROPIC_API_KEY` falls back to a
+/// silent skip — running without keys is a supported mode.
+#[derive(Debug, Clone)]
+pub struct ArchitectureConfig {
+    /// When true and an Anthropic key is available, the pipeline runs
+    /// the per-file LLM rubric judge (T-P3.3). Default false.
+    pub llm_review: bool,
+    pub model_id: String,
+    pub max_tokens: u32,
+    /// Path to the markdown rubric, relative to `config/`. Default
+    /// `architecture.md` (T-P3.2).
+    pub rubric_path: String,
+    /// Files matching any of these globs are skipped before the LLM
+    /// call (generated code, build outputs, R.java, etc).
+    pub llm_skip_globs: Vec<String>,
+}
+
+impl Default for ArchitectureConfig {
+    fn default() -> Self {
+        Self {
+            llm_review: false,
+            model_id: "claude-haiku-4-5-20251001".to_string(),
+            max_tokens: 1024,
+            rubric_path: "architecture.md".to_string(),
+            llm_skip_globs: vec![
+                "**/build/**".to_string(),
+                "**/generated/**".to_string(),
+                "**/R.java".to_string(),
+                "**/*$$*.java".to_string(),
+            ],
+        }
+    }
 }
 
 /// Mutation-testing config (T-P2.4). The actual mutation command lives
@@ -96,6 +133,7 @@ pub struct ThresholdConfig {
     pub micro_pr_max_lines: u32,
     pub low_doc_score: u32,
     pub contribution_imbalance_stddev: f64,
+    pub contribution_imbalance_min_abs_deviation: f64,
     pub low_survival_rate_stddev: f64,
     pub low_survival_absolute_floor: f64,
     pub raw_normalized_divergence_threshold: f64,
@@ -226,6 +264,12 @@ pub struct DetectorThresholdsConfig {
     pub cosmetic_rewrite_pct_of_lat: f64,
     pub bulk_rename_adds_dels_ratio: f64,
     pub bulk_rename_line_floor: i64,
+    /// `ARCHITECTURE_HOTSPOT` (T-P3.1): a student fires when their summed
+    /// blame-attribution weight across the sprint's `architecture_violations`
+    /// rows is at or above this value. 1.0 ≈ "owns one full violation"; the
+    /// default 2.0 picks up students who own multiple violations or a clear
+    /// majority share of one severe span.
+    pub architecture_hotspot_min_weighted: f64,
 }
 
 impl Default for DetectorThresholdsConfig {
@@ -244,6 +288,7 @@ impl Default for DetectorThresholdsConfig {
             cosmetic_rewrite_pct_of_lat: 0.05,
             bulk_rename_adds_dels_ratio: 0.8,
             bulk_rename_line_floor: 50,
+            architecture_hotspot_min_weighted: 2.0,
         }
     }
 }
@@ -272,6 +317,22 @@ struct RawConfig {
     grading: RawGrading,
     #[serde(default)]
     mutation: RawMutation,
+    #[serde(default)]
+    architecture: RawArchitecture,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawArchitecture {
+    #[serde(default)]
+    llm_review: bool,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    rubric_path: Option<String>,
+    #[serde(default)]
+    llm_skip_globs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -312,6 +373,8 @@ struct RawThresholds {
     micro_pr_max_lines: u32,
     low_doc_score: u32,
     contribution_imbalance_stddev: f64,
+    #[serde(default = "default_contribution_imbalance_min_abs_deviation")]
+    contribution_imbalance_min_abs_deviation: f64,
     #[serde(default = "default_low_survival_rate_stddev")]
     low_survival_rate_stddev: f64,
     #[serde(default = "default_low_survival_absolute_floor")]
@@ -322,6 +385,9 @@ struct RawThresholds {
 
 fn default_low_survival_rate_stddev() -> f64 {
     1.5
+}
+fn default_contribution_imbalance_min_abs_deviation() -> f64 {
+    0.05
 }
 fn default_low_survival_absolute_floor() -> f64 {
     0.85
@@ -424,6 +490,7 @@ struct RawDetectorThresholds {
     cosmetic_rewrite_pct_of_lat: Option<f64>,
     bulk_rename_adds_dels_ratio: Option<f64>,
     bulk_rename_line_floor: Option<i64>,
+    architecture_hotspot_min_weighted: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,6 +525,7 @@ impl Config {
                 micro_pr_max_lines: 10,
                 low_doc_score: 2,
                 contribution_imbalance_stddev: 1.5,
+                contribution_imbalance_min_abs_deviation: 0.05,
                 low_survival_rate_stddev: 1.5,
                 low_survival_absolute_floor: 0.85,
                 raw_normalized_divergence_threshold: 0.20,
@@ -477,6 +545,7 @@ impl Config {
             detector_thresholds: DetectorThresholdsConfig::default(),
             grading: GradingConfig::default(),
             mutation: MutationConfig::default(),
+            architecture: ArchitectureConfig::default(),
         }
     }
 
@@ -496,6 +565,9 @@ impl Config {
             micro_pr_max_lines: raw.thresholds.micro_pr_max_lines,
             low_doc_score: raw.thresholds.low_doc_score,
             contribution_imbalance_stddev: raw.thresholds.contribution_imbalance_stddev,
+            contribution_imbalance_min_abs_deviation: raw
+                .thresholds
+                .contribution_imbalance_min_abs_deviation,
             low_survival_rate_stddev: raw.thresholds.low_survival_rate_stddev,
             low_survival_absolute_floor: raw.thresholds.low_survival_absolute_floor,
             raw_normalized_divergence_threshold: raw.thresholds.raw_normalized_divergence_threshold,
@@ -705,6 +777,10 @@ impl Config {
                 .detector_thresholds
                 .bulk_rename_line_floor
                 .unwrap_or(detector_defaults.bulk_rename_line_floor),
+            architecture_hotspot_min_weighted: raw
+                .detector_thresholds
+                .architecture_hotspot_min_weighted
+                .unwrap_or(detector_defaults.architecture_hotspot_min_weighted),
         };
 
         Ok(Config {
@@ -742,6 +818,28 @@ impl Config {
                     .mutation
                     .warning_threshold
                     .unwrap_or(MutationConfig::default().warning_threshold),
+            },
+            architecture: {
+                let arch_defaults = ArchitectureConfig::default();
+                ArchitectureConfig {
+                    llm_review: raw.architecture.llm_review,
+                    model_id: raw
+                        .architecture
+                        .model_id
+                        .unwrap_or(arch_defaults.model_id),
+                    max_tokens: raw
+                        .architecture
+                        .max_tokens
+                        .unwrap_or(arch_defaults.max_tokens),
+                    rubric_path: raw
+                        .architecture
+                        .rubric_path
+                        .unwrap_or(arch_defaults.rubric_path),
+                    llm_skip_globs: raw
+                        .architecture
+                        .llm_skip_globs
+                        .unwrap_or(arch_defaults.llm_skip_globs),
+                }
             },
         })
     }
