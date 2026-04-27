@@ -140,8 +140,15 @@ pub fn run_collection(
         info!("Skipping GitHub collection (--skip-github)");
     }
 
-    // Step 4 — PR author attribution.
-    resolve_pr_authors(db)?;
+    // Step 4 — PR author attribution. Scoped to the projects we just
+    // collected, so `--projects pds26-3c` doesn't re-resolve every PR in
+    // the whole DB.
+    let pid_filter: Option<&[i64]> = if opts.project_filter.is_some() {
+        Some(project_ids.as_slice())
+    } else {
+        None
+    };
+    resolve_pr_authors(db, pid_filter)?;
 
     // Step 5 — optional: clone/update repos.
     if !opts.skip_repos {
@@ -864,14 +871,39 @@ fn collect_github_users(gh: &GitHubClient, db: &Database) -> Result<(), CollectE
 /// 1. github_author_login → students.github_login
 /// 2. fallback via github_users.student_id
 /// 3. sole task assignee across linked non-USER_STORY tasks
-fn resolve_pr_authors(db: &Database) -> Result<(), CollectError> {
-    let mut stmt = db
-        .conn
-        .prepare("SELECT id, author_id, github_author_login FROM pull_requests")?;
-    let rows: Vec<(String, Option<String>, Option<String>)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(stmt);
+fn resolve_pr_authors(db: &Database, project_ids: Option<&[i64]>) -> Result<(), CollectError> {
+    let rows: Vec<(String, Option<String>, Option<String>)> = if let Some(ids) = project_ids {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        // Scope the loop to PRs authored by students of the targeted
+        // projects. Without this, `--projects` re-resolves every PR in the
+        // entire DB (1000+) on every collect pass.
+        let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT pr.id, pr.author_id, pr.github_author_login
+             FROM pull_requests pr
+             JOIN students s ON s.id = pr.author_id
+             WHERE s.team_project_id IN ({placeholders})"
+        );
+        let mut stmt = db.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        let collected = stmt
+            .query_map(params.as_slice(), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        collected
+    } else {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT id, author_id, github_author_login FROM pull_requests")?;
+        let collected = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        collected
+    };
 
     let mut resolved_count = 0usize;
     let mut error_count = 0usize;
