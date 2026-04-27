@@ -119,6 +119,11 @@ pub fn apply_threshold_jitter(config: &mut Config, today: &str, course_id: u32) 
         t.cramming_commit_pct = jitter_one(&mut rng, t.cramming_commit_pct, jitter_pct);
         t.contribution_imbalance_stddev =
             jitter_one(&mut rng, t.contribution_imbalance_stddev, jitter_pct);
+        t.contribution_imbalance_min_abs_deviation = jitter_one(
+            &mut rng,
+            t.contribution_imbalance_min_abs_deviation,
+            jitter_pct,
+        );
         t.low_survival_rate_stddev = jitter_one(&mut rng, t.low_survival_rate_stddev, jitter_pct);
         t.low_survival_absolute_floor =
             jitter_one(&mut rng, t.low_survival_absolute_floor, jitter_pct);
@@ -129,6 +134,10 @@ pub fn apply_threshold_jitter(config: &mut Config, today: &str, course_id: u32) 
         realised.insert(
             "contribution_imbalance_stddev".into(),
             t.contribution_imbalance_stddev,
+        );
+        realised.insert(
+            "contribution_imbalance_min_abs_deviation".into(),
+            t.contribution_imbalance_min_abs_deviation,
         );
         realised.insert(
             "low_survival_rate_stddev".into(),
