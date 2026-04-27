@@ -48,17 +48,56 @@ pub fn compute_all_trajectories(
     conn: &Connection,
     dt: &DetectorThresholdsConfig,
 ) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM student_trajectory", [])?;
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT sc.student_id, s.team_project_id
-         FROM student_sprint_contribution sc
-         JOIN students s ON s.id = sc.student_id
-         WHERE s.team_project_id IS NOT NULL",
-    )?;
-    let students: Vec<(String, i64)> = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(stmt);
+    compute_all_trajectories_filtered(conn, dt, None)
+}
+
+/// Project-scoped variant of `compute_all_trajectories`. Pass `Some(&[…])`
+/// to delete + recompute only those projects' rows; pass `None` for the
+/// historical full-table recompute.
+pub fn compute_all_trajectories_filtered(
+    conn: &Connection,
+    dt: &DetectorThresholdsConfig,
+    project_ids: Option<&[i64]>,
+) -> rusqlite::Result<()> {
+    let students: Vec<(String, i64)> = if let Some(ids) = project_ids {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        // Scoped delete: keep other projects' trajectory rows intact.
+        let del_sql =
+            format!("DELETE FROM student_trajectory WHERE project_id IN ({placeholders})");
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        conn.execute(&del_sql, params.as_slice())?;
+        let sel_sql = format!(
+            "SELECT DISTINCT sc.student_id, s.team_project_id
+             FROM student_sprint_contribution sc
+             JOIN students s ON s.id = sc.student_id
+             WHERE s.team_project_id IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sel_sql)?;
+        let collected = stmt
+            .query_map(params.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        collected
+    } else {
+        conn.execute("DELETE FROM student_trajectory", [])?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT sc.student_id, s.team_project_id
+             FROM student_sprint_contribution sc
+             JOIN students s ON s.id = sc.student_id
+             WHERE s.team_project_id IS NOT NULL",
+        )?;
+        let collected = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        collected
+    };
 
     for (sid, project_id) in &students {
         let mut stmt = conn.prepare(
