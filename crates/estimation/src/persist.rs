@@ -88,19 +88,37 @@ pub fn fit_and_persist_for_project(conn: &Connection, project_id: i64) -> Result
 /// Fit and persist for every project that has at least one task.
 /// Returns the total number of student rows written.
 pub fn fit_and_persist_for_all_projects(conn: &Connection) -> Result<usize> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT s.project_id
-         FROM tasks t JOIN sprints s ON s.id = t.sprint_id
-         WHERE t.type != 'USER_STORY'
-           AND t.assignee_id IS NOT NULL
-           AND t.estimation_points IS NOT NULL
-           AND t.estimation_points > 0",
-    )?;
-    let project_ids: Vec<i64> = stmt
-        .query_map([], |r| r.get::<_, i64>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    fit_and_persist_for_projects(conn, None)
+}
+
+/// Project-scoped variant. When `project_ids` is `Some(&[…])`, only those
+/// projects are fitted; pass `None` for the historical full-DB sweep.
+pub fn fit_and_persist_for_projects(
+    conn: &Connection,
+    project_ids: Option<&[i64]>,
+) -> Result<usize> {
+    let pids: Vec<i64> = if let Some(ids) = project_ids {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        ids.to_vec()
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT s.project_id
+             FROM tasks t JOIN sprints s ON s.id = t.sprint_id
+             WHERE t.type != 'USER_STORY'
+               AND t.assignee_id IS NOT NULL
+               AND t.estimation_points IS NOT NULL
+               AND t.estimation_points > 0",
+        )?;
+        let collected = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        collected
+    };
     let mut total = 0usize;
-    for pid in project_ids {
+    for pid in pids {
         total += fit_and_persist_for_project(conn, pid)?;
     }
     Ok(total)
