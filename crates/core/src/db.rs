@@ -4,7 +4,14 @@ use rusqlite::{params, Connection, Row};
 
 use crate::error::Result;
 
-const SCHEMA_SQL: &str = include_str!("schema.sql");
+pub const SCHEMA_SQL: &str = include_str!("schema.sql");
+
+/// Apply the canonical schema to an open connection. Used by the integration
+/// test harnesses in dependent crates so they can build an in-memory DB without
+/// going through `Database::open` (which insists on a filesystem path).
+pub fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(SCHEMA_SQL)
+}
 
 pub struct Database {
     pub db_path: PathBuf,
@@ -54,6 +61,12 @@ impl Database {
             ("task_group_members", "ls_per_point_deviation", "REAL"),
             ("pr_submission_tiers", "pr_kind", "TEXT"),
             ("pull_requests", "last_github_fetch_updated_at", "TEXT"),
+            // T-P3.1: enrich architecture_violations with line ranges + classifier.
+            ("architecture_violations", "start_line", "INTEGER"),
+            ("architecture_violations", "end_line", "INTEGER"),
+            ("architecture_violations", "rule_kind", "TEXT"),
+            ("architecture_violations", "rule_version", "TEXT"),
+            ("architecture_violations", "explanation", "TEXT"),
         ];
         for (table, column, coltype) in migrations {
             let existing: Vec<String> = self.column_names(table)?;
@@ -207,14 +220,40 @@ impl Database {
         merged_by_email: Option<&str>,
         attribution_errors: Option<&str>,
     ) -> Result<()> {
+        // T-P1.5: attribution_errors accumulates across collect runs, so we
+        // can't use INSERT OR REPLACE (which wipes the entire row, including
+        // that column). Use INSERT ... ON CONFLICT DO UPDATE that lists every
+        // column EXCEPT attribution_errors, so existing data-quality entries
+        // survive a refresh of GitHub-side fields. Initial inserts still
+        // accept the caller's attribution_errors value (always None today,
+        // but kept on the surface for back-compat).
         self.conn.execute(
-            "INSERT OR REPLACE INTO pull_requests
+            "INSERT INTO pull_requests
              (id, pr_number, repo_full_name, url, title, body, state, merged,
               author_id, github_author_login, github_author_email,
               merged_by_login, merged_by_email,
               additions, deletions, changed_files,
               created_at, updated_at, merged_at, attribution_errors)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                pr_number = excluded.pr_number,
+                repo_full_name = excluded.repo_full_name,
+                url = excluded.url,
+                title = excluded.title,
+                body = excluded.body,
+                state = excluded.state,
+                merged = excluded.merged,
+                author_id = excluded.author_id,
+                github_author_login = excluded.github_author_login,
+                github_author_email = excluded.github_author_email,
+                merged_by_login = excluded.merged_by_login,
+                merged_by_email = excluded.merged_by_email,
+                additions = excluded.additions,
+                deletions = excluded.deletions,
+                changed_files = excluded.changed_files,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                merged_at = excluded.merged_at",
             params![
                 id,
                 pr_number,
@@ -337,6 +376,26 @@ impl Database {
                 additions,
                 deletions
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Capture an original commit author for a merged PR (T-P1.4). Used by
+    /// `author_mismatch` as the authoritative source — `pr_commits` is the
+    /// fallback if no rows exist for a PR. Idempotent on (pr_id, sha).
+    pub fn upsert_pr_pre_squash_author(
+        &self,
+        pr_id: &str,
+        sha: &str,
+        author_login: Option<&str>,
+        author_email: Option<&str>,
+        captured_at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO pr_pre_squash_authors
+             (pr_id, sha, author_login, author_email, captured_at)
+             VALUES (?, ?, ?, ?, ?)",
+            params![pr_id, sha, author_login, author_email, captured_at],
         )?;
         Ok(())
     }

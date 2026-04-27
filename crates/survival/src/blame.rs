@@ -116,9 +116,28 @@ struct CommitMeta {
     summary: String,
 }
 
+/// If `<repo>/.git-blame-ignore-revs` exists, return its path so callers can
+/// pass `--ignore-revs-file <path>` to `git blame`. Returns `None` when the
+/// file is absent, so repos that haven't opted in are unaffected.
+fn ignore_revs_file_arg(repo_path: &Path) -> Option<String> {
+    let path = repo_path.join(".git-blame-ignore-revs");
+    if path.is_file() {
+        Some(path.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
 pub fn blame_file(repo_path: &Path, file_path: &str) -> HashMap<u32, BlameLine> {
+    let mut args: Vec<String> = vec!["blame".into(), "--porcelain".into(), "-w".into()];
+    if let Some(p) = ignore_revs_file_arg(repo_path) {
+        args.push("--ignore-revs-file".into());
+        args.push(p);
+    }
+    args.push("--".into());
+    args.push(file_path.to_string());
     let output = Command::new("git")
-        .args(["blame", "--porcelain", "--", file_path])
+        .args(&args)
         .current_dir(repo_path)
         .output();
     let out = match output {
@@ -133,8 +152,21 @@ pub fn blame_file_with_copy_detection(
     repo_path: &Path,
     file_path: &str,
 ) -> HashMap<u32, BlameLine> {
+    let mut args: Vec<String> = vec![
+        "blame".into(),
+        "--porcelain".into(),
+        "-w".into(),
+        "-C".into(),
+        "-C".into(),
+    ];
+    if let Some(p) = ignore_revs_file_arg(repo_path) {
+        args.push("--ignore-revs-file".into());
+        args.push(p);
+    }
+    args.push("--".into());
+    args.push(file_path.to_string());
     let output = Command::new("git")
-        .args(["blame", "--porcelain", "-C", "-C", "--", file_path])
+        .args(&args)
         .current_dir(repo_path)
         .output();
     let out = match output {
@@ -343,4 +375,36 @@ filename foo.java
             "0123456789abcdef0123456789abcdef01234567"
         );
     }
+
+    #[test]
+    fn ignore_revs_file_arg_returns_some_when_file_present() {
+        let dir = std::env::temp_dir().join(format!(
+            "sprint_grader_blame_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Absent: returns None.
+        assert!(ignore_revs_file_arg(&dir).is_none());
+
+        // Present: returns Some with the absolute path.
+        let revs = dir.join(".git-blame-ignore-revs");
+        std::fs::write(&revs, "abc123\n").unwrap();
+        let got = ignore_revs_file_arg(&dir).expect("file is present");
+        assert!(
+            got.ends_with(".git-blame-ignore-revs"),
+            "expected suffix, got {got}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // TODO(T-P2.7): full integration test that builds a tiny git repo with
+    // tempfile + Command::new("git"), reformats whitespace in a second commit,
+    // and asserts blame attributes the line to the original author. Deferred
+    // because survival has no test-fixture infrastructure yet (no tempfile
+    // dev-dep) and the chunk says to defer if heavy.
 }

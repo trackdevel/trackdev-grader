@@ -7,7 +7,7 @@
 //! test under `tests/parity_harness.rs`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::{types::Value, Connection};
@@ -484,7 +484,7 @@ pub fn format_report(reports: &[TableReport]) -> (String, usize) {
 
 /// Entry point for the CLI subcommand. Emits a human report to stdout and
 /// returns the number of mismatches.
-pub fn run_diff(db_a: &PathBuf, db_b: &PathBuf, opts: &DiffOptions) -> Result<usize> {
+pub fn run_diff(db_a: &Path, db_b: &Path, opts: &DiffOptions) -> Result<usize> {
     let reports = diff_dbs(db_a, db_b, opts)?;
     let (body, mismatches) = format_report(&reports);
     println!("# Comparing {} ⇄ {}", db_a.display(), db_b.display());
@@ -500,6 +500,7 @@ pub fn run_diff(db_a: &PathBuf, db_b: &PathBuf, opts: &DiffOptions) -> Result<us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn mk_pair(seed_a: &str, seed_b: &str) -> (TempDir, PathBuf, PathBuf) {

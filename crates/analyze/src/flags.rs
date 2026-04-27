@@ -7,8 +7,109 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use sprint_grader_core::config::{Config, ThresholdConfig};
+use sprint_grader_core::config::{Config, DetectorThresholdsConfig, ThresholdConfig};
 use sprint_grader_core::stats::{median_upper, percentile_pos, round_half_even, stddev_pop};
+
+#[allow(clippy::type_complexity)]
+mod row_aliases {
+    pub type PrAuthorRepoLines = (String, Option<i64>, Option<String>, Option<String>, i64);
+    pub type PrAuthorRepoLogin = (
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    pub type PrAuthorRepoNum = (String, Option<i64>, Option<String>, Option<String>);
+    pub type PrFingerprintRow = (
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+    pub type CrossTeamRow = (
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+    pub type PrReviewRow = (
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+    );
+    pub type PrCommitsRow = (
+        String,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+    pub type DoneTaskRow = (i64, Option<String>, Option<String>, Option<String>, i64);
+    pub type DonePrFullRow = (
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        i64,
+    );
+    pub type FlagDetailRow = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    );
+    pub type StudentMetricRow = (i64, String, Option<f64>, Option<f64>, Option<f64>);
+    pub type StudentFloatsRow = (
+        String,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    );
+    pub type CompilationRow = (
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    pub type ApprovedBrokenRow = (String, Option<String>, Option<String>, Option<i64>);
+    pub type SuspectFastTaskRow = (
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<String>,
+    );
+}
+use row_aliases::*;
 
 #[derive(Debug, Clone)]
 pub struct Flag {
@@ -18,31 +119,10 @@ pub struct Flag {
     pub details: Value,
 }
 
-/// Per-detector tuning knobs. Collected in one struct so thresholds aren't
-/// scattered as bare literals across 1500 lines of detectors. Values mirror
-/// the Python reference at `src/analyze/flags.py`; tune by editing the const
-/// below (or wire to TOML when threshold tuning becomes a live workflow).
-#[derive(Debug, Clone, Copy)]
-pub struct DetectorThresholds {
-    /// `team_inequality`: gini above this marks a WARNING.
-    pub gini_warn: f64,
-    /// `team_inequality`: gini above this marks a CRITICAL.
-    pub gini_crit: f64,
-    /// `low_composite_score`: composite below this marks WARNING.
-    pub composite_warn: f64,
-    /// `low_composite_score`: composite below this marks CRITICAL.
-    pub composite_crit: f64,
-    /// `all_prs_late`: avg regularity below this trips the flag.
-    pub late_regularity: f64,
-}
-
-pub const DETECTOR_DEFAULTS: DetectorThresholds = DetectorThresholds {
-    gini_warn: 0.35,
-    gini_crit: 0.50,
-    composite_warn: 0.20,
-    composite_crit: 0.10,
-    late_regularity: 0.20,
-};
+// Detector tuning knobs were previously local consts here. They moved to
+// `sprint_grader_core::config::DetectorThresholdsConfig` (T-P1.3) and are now
+// loaded from `course.toml [detector_thresholds]`. Detectors take
+// `&DetectorThresholdsConfig` directly.
 
 fn round3(x: f64) -> f64 {
     round_half_even(x, 3)
@@ -188,8 +268,11 @@ fn contribution_imbalance(
     let mut flags = Vec::new();
     if std > 0.0 {
         for (sid, share) in shares {
-            let z = (share - expected).abs() / std;
-            if z > thresh.contribution_imbalance_stddev {
+            let abs_dev = (share - expected).abs();
+            let z = abs_dev / std;
+            if z > thresh.contribution_imbalance_stddev
+                && abs_dev >= thresh.contribution_imbalance_min_abs_deviation
+            {
                 flags.push(Flag {
                     student_id: sid,
                     flag_type: "CONTRIBUTION_IMBALANCE",
@@ -198,6 +281,8 @@ fn contribution_imbalance(
                         "share": round3(share),
                         "expected": round3(expected),
                         "z_score": round2(z),
+                        "abs_deviation": round3(abs_dev),
+                        "min_abs_deviation": round3(thresh.contribution_imbalance_min_abs_deviation),
                     }),
                 });
             }
@@ -251,11 +336,11 @@ fn round_to(x: f64, digits: u32) -> f64 {
     round_half_even(x, digits)
 }
 
-fn team_inequality_is_material_outlier(value: f64, average: f64) -> bool {
+fn team_inequality_is_material_outlier(value: f64, average: f64, deviation: f64) -> bool {
     if average.abs() < f64::EPSILON {
         return value.abs() > f64::EPSILON;
     }
-    ((value - average).abs() / average) >= 0.35
+    ((value - average).abs() / average) >= deviation
 }
 
 fn point_code_mismatch(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
@@ -300,45 +385,38 @@ fn point_code_mismatch(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Ve
     Ok(flags)
 }
 
+// Reads `student_sprint_temporal` (per-author, keyed on the commit author's
+// github_login, populated by the `temporal` process stage). Previously this
+// detector read `student_sprint_metrics.temporal_spread`, which is keyed on
+// `task.assignee_id` — so a teammate's late-night commits on Bob's task
+// flagged Bob, not the actual late-night committer. See T-P1.1.
 fn cramming(
     conn: &Connection,
     sprint_id: i64,
     thresh: &ThresholdConfig,
 ) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(
-        "SELECT student_id, temporal_spread FROM student_sprint_metrics WHERE sprint_id = ?",
+        "SELECT student_id, cramming_ratio FROM student_sprint_temporal WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(String, Option<String>)> = stmt
+    let rows: Vec<(String, Option<f64>)> = stmt
         .query_map([sprint_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<f64>>(1)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
     let mut flags = Vec::new();
-    for (sid, spread_json) in rows {
-        let spread_json = match spread_json {
-            Some(s) => s,
+    for (sid, ratio) in rows {
+        let cramming_ratio = match ratio {
+            Some(r) => r,
             None => continue,
         };
-        let spread: Value = match serde_json::from_str(&spread_json) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let get = |k: &str| spread.get(k).and_then(Value::as_i64).unwrap_or(0);
-        let total = get("early") + get("mid") + get("late") + get("cramming");
-        if total == 0 {
-            continue;
-        }
-        let cramming_pct = get("cramming") as f64 / total as f64;
-        if cramming_pct > thresh.cramming_commit_pct {
+        if cramming_ratio > thresh.cramming_commit_pct {
             flags.push(Flag {
                 student_id: sid,
                 flag_type: "CRAMMING",
                 severity: "WARNING",
                 details: json!({
-                    "cramming_commits": get("cramming"),
-                    "total_commits": total,
-                    "cramming_pct": round3(cramming_pct),
+                    "cramming_ratio": round3(cramming_ratio),
                     "threshold": thresh.cramming_commit_pct,
                 }),
             });
@@ -408,7 +486,7 @@ fn single_commit_dump(
          JOIN tasks t ON t.id = tpr.task_id
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY'",
     )?;
-    let rows: Vec<(String, Option<i64>, Option<String>, Option<String>, i64)> = stmt
+    let rows: Vec<PrAuthorRepoLines> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -519,13 +597,7 @@ fn author_mismatch(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
          JOIN tasks t ON t.id = tpr.task_id
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY'",
     )?;
-    let rows: Vec<(
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<PrAuthorRepoLogin> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -558,11 +630,29 @@ fn author_mismatch(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
             None => continue,
         };
 
-        let mut stmt = conn.prepare("SELECT author_login FROM pr_commits WHERE pr_id = ?")?;
-        let commits: Vec<Option<String>> = stmt
-            .query_map([&pr_id], |r| r.get::<_, Option<String>>(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        drop(stmt);
+        // T-P1.4: prefer pr_pre_squash_authors (captured at collect time
+        // before any future force-push erases per-commit history). If the
+        // pre-squash table has rows for this PR, treat them as authoritative;
+        // otherwise fall back to pr_commits.
+        let pre_squash: Vec<Option<String>> = {
+            let mut stmt =
+                conn.prepare("SELECT author_login FROM pr_pre_squash_authors WHERE pr_id = ?")?;
+            let rows = stmt
+                .query_map([&pr_id], |r| r.get::<_, Option<String>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            rows
+        };
+        let commits: Vec<Option<String>> = if pre_squash.is_empty() {
+            let mut stmt = conn.prepare("SELECT author_login FROM pr_commits WHERE pr_id = ?")?;
+            let rows = stmt
+                .query_map([&pr_id], |r| r.get::<_, Option<String>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            rows
+        } else {
+            pre_squash
+        };
         let mismatched: std::collections::BTreeSet<String> = commits
             .into_iter()
             .flatten()
@@ -615,7 +705,7 @@ fn orphan_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(&sql)?;
     let params_vec: Vec<&dyn rusqlite::ToSql> =
         repos.iter().map(|r| r as &dyn rusqlite::ToSql).collect();
-    let rows: Vec<(String, Option<i64>, Option<String>, Option<String>)> = stmt
+    let rows: Vec<PrAuthorRepoNum> = stmt
         .query_map(&params_vec[..], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -655,13 +745,7 @@ fn foreign_merge(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY'
            AND t.status = 'DONE' AND pr.merged = 1",
     )?;
-    let rows: Vec<(
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<PrFingerprintRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, Option<String>>(0)?,
@@ -701,17 +785,13 @@ fn unknown_contributor(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Ve
     let mut known: BTreeSet<String> = BTreeSet::new();
     let mut stmt =
         conn.prepare("SELECT github_login FROM students WHERE github_login IS NOT NULL")?;
-    for r in stmt.query_map([], |r| r.get::<_, String>(0))? {
-        if let Ok(s) = r {
-            known.insert(s.to_lowercase());
-        }
+    for s in stmt.query_map([], |r| r.get::<_, String>(0))?.flatten() {
+        known.insert(s.to_lowercase());
     }
     drop(stmt);
     let mut stmt = conn.prepare("SELECT login FROM github_users WHERE student_id IS NOT NULL")?;
-    for r in stmt.query_map([], |r| r.get::<_, String>(0))? {
-        if let Ok(s) = r {
-            known.insert(s.to_lowercase());
-        }
+    for s in stmt.query_map([], |r| r.get::<_, String>(0))?.flatten() {
+        known.insert(s.to_lowercase());
     }
     drop(stmt);
 
@@ -854,7 +934,7 @@ fn low_survival_rate(
     if std > 0.0 {
         for (sid, rate) in rows {
             let z = (m - rate) / std;
-            if z > thresh.low_survival_rate_stddev {
+            if z > thresh.low_survival_rate_stddev && rate < thresh.low_survival_absolute_floor {
                 flags.push(Flag {
                     student_id: sid,
                     flag_type: "LOW_SURVIVAL_RATE",
@@ -863,6 +943,7 @@ fn low_survival_rate(
                         "rate": round3(rate),
                         "team_avg": round3(m),
                         "z_score": round2(z),
+                        "absolute_floor": thresh.low_survival_absolute_floor,
                     }),
                 });
             }
@@ -926,18 +1007,49 @@ fn cosmetic_rewrite(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<F
             r.get::<_, Option<String>>(5)?,
         ))
     })?;
+    // Emit two flags per rewrite (T-P1.2):
+    //   VICTIM (INFO)   — original author is told their code was rewritten.
+    //   ACTOR  (WARNING) — rewriter is told to avoid churn-only changes.
+    // Legacy COSMETIC_REWRITE rows in old DBs are still rendered via a
+    // fallback in report::flag_details; this detector no longer emits them.
     let mut flags = Vec::new();
     for r in rows {
         let (orig, rewriter, affected, change, file, repo) = r?;
-        if let Some(orig) = orig {
+        if let (Some(orig), Some(rewriter)) = (orig.clone(), rewriter.clone()) {
             flags.push(Flag {
-                student_id: orig,
-                flag_type: "COSMETIC_REWRITE",
+                student_id: orig.clone(),
+                flag_type: "COSMETIC_REWRITE_VICTIM",
+                severity: "INFO",
+                details: json!({
+                    "file": file,
+                    "repo": repo,
+                    "counterpart_user_id": rewriter.clone(),
+                    "statements_affected": affected,
+                    "change_type": change,
+                }),
+            });
+            flags.push(Flag {
+                student_id: rewriter,
+                flag_type: "COSMETIC_REWRITE_ACTOR",
                 severity: "WARNING",
                 details: json!({
                     "file": file,
                     "repo": repo,
-                    "rewriter": rewriter,
+                    "counterpart_user_id": orig,
+                    "statements_affected": affected,
+                    "change_type": change,
+                }),
+            });
+        } else if let Some(orig) = orig {
+            // Rewriter unknown — keep the victim notice only, INFO severity.
+            flags.push(Flag {
+                student_id: orig,
+                flag_type: "COSMETIC_REWRITE_VICTIM",
+                severity: "INFO",
+                details: json!({
+                    "file": file,
+                    "repo": repo,
+                    "counterpart_user_id": rewriter,
                     "statements_affected": affected,
                     "change_type": change,
                 }),
@@ -953,14 +1065,7 @@ fn cross_team_similarity(conn: &Connection, sprint_id: i64) -> rusqlite::Result<
                 method_name, fingerprint
          FROM cross_team_matches WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(
-        i64,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    )> = stmt
+    let rows: Vec<CrossTeamRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -998,7 +1103,11 @@ fn cross_team_similarity(conn: &Connection, sprint_id: i64) -> rusqlite::Result<
     Ok(flags)
 }
 
-fn bulk_rename_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+fn bulk_rename_pr(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT pr.id, pr.pr_number, pr.repo_full_name, pr.author_id,
                 pr.additions, pr.deletions
@@ -1007,14 +1116,7 @@ fn bulk_rename_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fla
          JOIN tasks t ON t.id = tpr.task_id
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY' AND pr.merged = 1",
     )?;
-    let rows: Vec<(
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        i64,
-        i64,
-    )> = stmt
+    let rows: Vec<PrReviewRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1038,7 +1140,7 @@ fn bulk_rename_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fla
         } else {
             0.0
         };
-        if ratio > 0.8 && adds + dels > 50 {
+        if ratio > dt.bulk_rename_adds_dels_ratio && adds + dels > dt.bulk_rename_line_floor {
             let surv: Option<(i64, i64, i64, i64)> = conn
                 .query_row(
                     "SELECT statements_surviving_raw, statements_added_raw,
@@ -1091,14 +1193,7 @@ fn cosmetic_heavy_pr(
          JOIN pull_requests pr ON pr.id = plm.pr_id
          WHERE plm.sprint_id = ? AND plm.lat > 0",
     )?;
-    let rows: Vec<(
-        String,
-        i64,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<PrCommitsRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1240,7 +1335,7 @@ fn task_evidence_for_member(
          WHERE sprint_id = ? AND assignee_id = ? AND status = 'DONE' AND type != 'USER_STORY'
          ORDER BY task_key, id",
     )?;
-    let rows: Vec<(i64, Option<String>, Option<String>, Option<String>, i64)> = stmt
+    let rows: Vec<DoneTaskRow> = stmt
         .query_map(params![sprint_id, student_id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1287,21 +1382,7 @@ fn pr_evidence_for_author(
            AND pr.author_id = ? AND s.team_project_id = ?
          ORDER BY pr.repo_full_name, pr.pr_number, pr.id",
     )?;
-    let rows: Vec<(
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        i64,
-    )> = stmt
+    let rows: Vec<DonePrFullRow> = stmt
         .query_map(params![sprint_id, sprint_id, student_id, project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1377,20 +1458,7 @@ fn review_evidence_for_member(
          WHERE s.id = ? AND t.sprint_id = ? AND t.type != 'USER_STORY'
          ORDER BY rv.submitted_at, rv.pr_id",
     )?;
-    let rows: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    )> = stmt
+    let rows: Vec<FlagDetailRow> = stmt
         .query_map(params![sprint_id, student_id, sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1532,14 +1600,19 @@ fn team_inequality_evidence_for_member(
     }))
 }
 
-fn team_inequality(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
-    let gini_warn = DETECTOR_DEFAULTS.gini_warn;
-    let gini_crit = DETECTOR_DEFAULTS.gini_crit;
+fn team_inequality(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
+    let gini_warn = dt.gini_warn;
+    let gini_crit = dt.gini_crit;
+    let outlier_deviation = dt.team_inequality_outlier_deviation;
     let mut stmt = conn.prepare(
         "SELECT project_id, metric_name, gini, hoover, cv
          FROM team_sprint_inequality WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(i64, String, Option<f64>, Option<f64>, Option<f64>)> = stmt
+    let rows: Vec<StudentMetricRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1615,7 +1688,7 @@ fn team_inequality(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
                     _ => None,
                 })
                 .unwrap_or(0.0);
-            if !team_inequality_is_material_outlier(value, average) {
+            if !team_inequality_is_material_outlier(value, average, outlier_deviation) {
                 continue;
             }
             let details = json!({
@@ -1640,22 +1713,19 @@ fn team_inequality(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
     Ok(flags)
 }
 
-fn low_composite_score(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
-    let warn = DETECTOR_DEFAULTS.composite_warn;
-    let crit = DETECTOR_DEFAULTS.composite_crit;
+fn low_composite_score(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
+    let warn = dt.composite_warn;
+    let crit = dt.composite_crit;
     let mut stmt = conn.prepare(
         "SELECT student_id, composite_score, code_signal, review_signal,
                 task_signal, process_signal
          FROM student_sprint_contribution WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(
-        String,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    )> = stmt
+    let rows: Vec<StudentFloatsRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1785,13 +1855,7 @@ fn pr_does_not_compile(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Ve
          JOIN pull_requests pr ON pr.id = pc.pr_id
          WHERE pc.sprint_id = ? AND pc.compiles = 0 AND pr.merged = 1",
     )?;
-    let rows: Vec<(
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<CompilationRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, Option<i64>>(0)?,
@@ -1828,7 +1892,7 @@ fn approved_broken_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec
          FROM pr_compilation pc
          WHERE pc.sprint_id = ? AND pc.compiles = 0",
     )?;
-    let rows: Vec<(String, Option<String>, Option<String>, Option<i64>)> = stmt
+    let rows: Vec<ApprovedBrokenRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1913,15 +1977,7 @@ fn last_minute_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fla
          JOIN pull_requests pr ON pr.id = prr.pr_id
          WHERE prr.sprint_id = ? AND prr.regularity_band = 'last_minute'",
     )?;
-    let rows: Vec<(
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<f64>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<SuspectFastTaskRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, Option<i64>>(0)?,
@@ -1956,9 +2012,12 @@ fn last_minute_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fla
     Ok(flags)
 }
 
-fn all_prs_late(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
-    // Python gets `late_threshold` via getattr fallback to 0.20.
-    let late_threshold = DETECTOR_DEFAULTS.late_regularity;
+fn all_prs_late(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
+    let late_threshold = dt.late_regularity;
     let mut stmt = conn.prepare(
         "SELECT student_id, avg_regularity, pr_count, prs_in_last_24h, prs_in_last_3h
          FROM student_sprint_regularity WHERE sprint_id = ? AND pr_count >= 2",
@@ -1996,37 +2055,58 @@ fn all_prs_late(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>
     Ok(flags)
 }
 
-fn regularity_declining(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+fn regularity_declining(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
+    // Below 3 PRs in either sprint, avg_regularity is noise: a single
+    // late merge dominates. Skip the comparison entirely. Kept as a Rust
+    // constant per T-P1.3 scope (not a tunable threshold).
+    const MIN_PR_COUNT: i64 = 3;
+
     let mut stmt = conn.prepare(
-        "SELECT student_id, avg_regularity FROM student_sprint_regularity WHERE sprint_id = ?",
+        "SELECT student_id, avg_regularity, pr_count
+         FROM student_sprint_regularity WHERE sprint_id = ?",
     )?;
-    let rows: Vec<(String, Option<f64>)> = stmt
+    let rows: Vec<(String, Option<f64>, Option<i64>)> = stmt
         .query_map([sprint_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<f64>>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<f64>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
     let mut flags = Vec::new();
-    for (sid, avg) in rows {
+    for (sid, avg, cur_pr_count) in rows {
         let a = match avg {
             Some(x) => x,
             None => continue,
         };
-        let prev: Option<f64> = conn
+        let cur_pr_count = cur_pr_count.unwrap_or(0);
+        if cur_pr_count < MIN_PR_COUNT {
+            continue;
+        }
+        let prev: Option<(Option<f64>, Option<i64>)> = conn
             .query_row(
-                "SELECT sr.avg_regularity FROM student_sprint_regularity sr
+                "SELECT sr.avg_regularity, sr.pr_count FROM student_sprint_regularity sr
                  JOIN sprints sp ON sp.id = sr.sprint_id
                  JOIN sprints sp_curr ON sp_curr.id = ?
                  WHERE sr.student_id = ? AND sp.start_date < sp_curr.start_date
                  ORDER BY sp.start_date DESC LIMIT 1",
                 params![sprint_id, &sid],
-                |r| r.get::<_, Option<f64>>(0),
+                |r| Ok((r.get::<_, Option<f64>>(0)?, r.get::<_, Option<i64>>(1)?)),
             )
-            .ok()
-            .flatten();
-        if let Some(p) = prev {
+            .ok();
+        if let Some((Some(p), prev_pr_count)) = prev {
+            let prev_pr_count = prev_pr_count.unwrap_or(0);
+            if prev_pr_count < MIN_PR_COUNT {
+                continue;
+            }
             let delta = a - p;
-            if delta < -0.30 {
+            if delta < dt.regularity_declining_delta {
                 flags.push(Flag {
                     student_id: sid,
                     flag_type: "REGULARITY_DECLINING",
@@ -2035,10 +2115,324 @@ fn regularity_declining(conn: &Connection, sprint_id: i64) -> rusqlite::Result<V
                         "current": round3(a),
                         "previous": round3(p),
                         "delta": round3(delta),
+                        "pr_count": cur_pr_count,
+                        "previous_pr_count": prev_pr_count,
                     }),
                 });
             }
         }
+    }
+    Ok(flags)
+}
+
+/// ARCHITECTURE_DRIFT (T-P2.2). For each project covered by this sprint,
+/// compare the count of `architecture_violations` rows against the most
+/// recent prior sprint. Fire WARNING when the current count is strictly
+/// higher — i.e., the team regressed against the layered model.
+///
+/// The flag is project-scoped; we attribute it to a synthetic
+/// `PROJECT_<id>` student, matching `cross_team_similarity`'s convention
+/// so the renderer treats it as a team-level note rather than punishing
+/// any single member.
+fn architecture_drift(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+    let project_id: Option<i64> = conn
+        .query_row(
+            "SELECT project_id FROM sprints WHERE id = ?",
+            [sprint_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let project_id = match project_id {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    let current: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM architecture_violations av
+             JOIN sprints s ON s.id = av.sprint_id
+             WHERE s.project_id = ? AND av.sprint_id = ?",
+            params![project_id, sprint_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let prev: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT s.id, COUNT(av.sprint_id)
+             FROM sprints s
+             LEFT JOIN architecture_violations av ON av.sprint_id = s.id
+             JOIN sprints curr ON curr.id = ?
+             WHERE s.project_id = curr.project_id
+                   AND s.start_date < curr.start_date
+             GROUP BY s.id
+             ORDER BY s.start_date DESC LIMIT 1",
+            [sprint_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .ok();
+    let mut flags = Vec::new();
+    if let Some((prev_sprint_id, prev_count)) = prev {
+        if current > prev_count {
+            flags.push(Flag {
+                student_id: format!("PROJECT_{project_id}"),
+                flag_type: "ARCHITECTURE_DRIFT",
+                severity: "WARNING",
+                details: json!({
+                    "current": current,
+                    "previous": prev_count,
+                    "previous_sprint_id": prev_sprint_id,
+                    "delta": current - prev_count,
+                }),
+            });
+        }
+    }
+    Ok(flags)
+}
+
+/// ARCHITECTURE_HOTSPOT (T-P3.1). Per-student companion to
+/// `ARCHITECTURE_DRIFT`. Sums each student's blame-weighted contribution
+/// across this sprint's `architecture_violations` and fires when that sum
+/// is ≥ the configured threshold. The team-level drift flag tells you
+/// "the team regressed against the layered model"; the hotspot flag tells
+/// you *who* owns the offending lines.
+///
+/// Severity is the maximum severity of the contributing violations (rows
+/// in `architecture_violations` carry their own severity from
+/// `architecture.toml`); ties resolve to WARNING. INFO when only INFO
+/// rules contributed.
+fn architecture_hotspot(
+    conn: &Connection,
+    sprint_id: i64,
+    min_weighted: f64,
+) -> rusqlite::Result<Vec<Flag>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.student_id, av.severity, a.weight, av.rule_name, av.rule_kind, av.file_path
+         FROM architecture_violation_attribution a
+         JOIN architecture_violations av ON av.rowid = a.violation_rowid
+         WHERE a.sprint_id = ?",
+    )?;
+    let rows = stmt
+        .query_map([sprint_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct Acc {
+        weighted: f64,
+        worst_severity: String,
+        offenders: Vec<Value>,
+    }
+    let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
+    for (student_id, severity, weight, rule_name, rule_kind, file_path) in rows {
+        let acc = by_student.entry(student_id).or_default();
+        acc.weighted += weight;
+        if severity_rank(&severity) > severity_rank(&acc.worst_severity) {
+            acc.worst_severity = severity.clone();
+        }
+        acc.offenders.push(json!({
+            "rule_name": rule_name,
+            "rule_kind": rule_kind,
+            "file_path": file_path,
+            "severity": severity,
+            "weight": weight,
+        }));
+    }
+    let mut flags = Vec::new();
+    for (student_id, acc) in by_student {
+        if acc.weighted >= min_weighted {
+            // Trim the per-student offender list to keep the JSON compact.
+            let mut offenders = acc.offenders;
+            offenders.truncate(10);
+            let severity = if acc.worst_severity.is_empty() {
+                "WARNING"
+            } else if acc.worst_severity == "CRITICAL" {
+                "CRITICAL"
+            } else if acc.worst_severity == "INFO" {
+                "INFO"
+            } else {
+                "WARNING"
+            };
+            flags.push(Flag {
+                student_id,
+                flag_type: "ARCHITECTURE_HOTSPOT",
+                severity,
+                details: json!({
+                    "weighted": round3(acc.weighted),
+                    "min_weighted": min_weighted,
+                    "offenders": offenders,
+                }),
+            });
+        }
+    }
+    Ok(flags)
+}
+
+fn severity_rank(sev: &str) -> u8 {
+    match sev {
+        "CRITICAL" => 3,
+        "WARNING" => 2,
+        "INFO" => 1,
+        _ => 0,
+    }
+}
+
+/// ESTIMATION_BIAS (T-P2.1). Per-student calibration flag based on the
+/// `student_estimation_bias` posterior fitted by the `estimation` crate.
+/// Fires WARNING when the 95 % credible interval for `β_u` excludes 0
+/// by more than 0.5 logits AND the student has at least 5 estimated
+/// tasks (the plan's small-sample mitigation; the prior keeps the
+/// posterior defined below 5, but we don't fire on it).
+///
+/// Note: the bias table is keyed by `(student_id, project_id)`, so for
+/// each sprint we resolve its project_id once and query all qualifying
+/// students for that project. The same student fires once per sprint
+/// they were active in — matching how the trajectory and inequality
+/// flags scope their per-sprint commentary.
+fn estimation_bias(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+    const LOGIT_MARGIN: f64 = 0.5;
+    const MIN_TASKS: i64 = 5;
+    let project_id: Option<i64> = conn
+        .query_row(
+            "SELECT project_id FROM sprints WHERE id = ?",
+            [sprint_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let project_id = match project_id {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    let mut stmt = conn.prepare(
+        "SELECT seb.student_id, seb.beta_mean, seb.beta_lower95, seb.beta_upper95, seb.n_tasks
+         FROM student_estimation_bias seb
+         WHERE seb.project_id = ? AND seb.n_tasks >= ?",
+    )?;
+    let rows = stmt
+        .query_map(params![project_id, MIN_TASKS], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut flags = Vec::new();
+    for (student_id, beta_mean, lower95, upper95, n_tasks) in rows {
+        let direction = if lower95 > LOGIT_MARGIN {
+            "over"
+        } else if upper95 < -LOGIT_MARGIN {
+            "under"
+        } else {
+            continue;
+        };
+        flags.push(Flag {
+            student_id,
+            flag_type: "ESTIMATION_BIAS",
+            severity: "WARNING",
+            details: json!({
+                "beta_mean": beta_mean,
+                "beta_lower95": lower95,
+                "beta_upper95": upper95,
+                "n_tasks": n_tasks,
+                "direction": direction,
+            }),
+        });
+    }
+    Ok(flags)
+}
+
+/// LOW_MUTATION_SCORE (T-P2.4). Per-PR flag, attributed to the PR
+/// author. Severity escalates with mutation score:
+/// * `mutation_score < warning_threshold` (default 0.30) → WARNING
+/// * `mutation_score < info_threshold` (default 0.50)    → INFO
+///
+/// PRs with no Pitest run (no row in `pr_mutation`) are silently
+/// skipped — mutation testing is opt-in via `[mutation] enabled` and
+/// `BuildProfile.mutation_command`. PRs with a NULL `mutation_score`
+/// (every mutant non-viable, or the run timed out) also skip — we
+/// don't grade what we couldn't measure.
+fn low_mutation_score(
+    conn: &Connection,
+    sprint_id: i64,
+    info_thresh: f64,
+    warning_thresh: f64,
+) -> rusqlite::Result<Vec<Flag>> {
+    let mut stmt = conn.prepare(
+        "SELECT pm.pr_id, pm.mutation_score, pm.mutants_total, pm.mutants_killed,
+                pr.pr_number, pr.author_id, pr.title, pr.url, pr.repo_full_name
+         FROM pr_mutation pm
+         JOIN pull_requests pr ON pr.id = pm.pr_id
+         WHERE pm.sprint_id = ? AND pm.mutation_score IS NOT NULL",
+    )?;
+    struct MutationRow {
+        score: f64,
+        total: Option<i64>,
+        killed: Option<i64>,
+        pr_number: Option<i64>,
+        author_id: Option<String>,
+        title: Option<String>,
+        url: Option<String>,
+        repo: Option<String>,
+    }
+    let rows: Vec<MutationRow> = stmt
+        .query_map([sprint_id], |r| {
+            Ok(MutationRow {
+                score: r.get::<_, f64>(1)?,
+                total: r.get::<_, Option<i64>>(2)?,
+                killed: r.get::<_, Option<i64>>(3)?,
+                pr_number: r.get::<_, Option<i64>>(4)?,
+                author_id: r.get::<_, Option<String>>(5)?,
+                title: r.get::<_, Option<String>>(6)?,
+                url: r.get::<_, Option<String>>(7)?,
+                repo: r.get::<_, Option<String>>(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    let mut flags = Vec::new();
+    for row in rows {
+        let MutationRow {
+            score,
+            total,
+            killed,
+            pr_number,
+            author_id,
+            title,
+            url,
+            repo,
+        } = row;
+        let Some(sid) = author_id else { continue };
+        let severity = if score < warning_thresh {
+            "WARNING"
+        } else if score < info_thresh {
+            "INFO"
+        } else {
+            continue;
+        };
+        flags.push(Flag {
+            student_id: sid,
+            flag_type: "LOW_MUTATION_SCORE",
+            severity,
+            details: json!({
+                "pr_number": pr_number,
+                "pr_title": title,
+                "pr_url": url,
+                "repo": repo,
+                "mutation_score": score,
+                "mutants_total": total,
+                "mutants_killed": killed,
+            }),
+        });
     }
     Ok(flags)
 }
@@ -2070,6 +2464,7 @@ pub fn detect_flags_for_sprint_id(
 ) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM flags WHERE sprint_id = ?", [sprint_id])?;
     let t = &config.thresholds;
+    let dt = &config.detector_thresholds;
 
     // Each detector is allowed to fail independently — matches Python's
     // try/except around the dispatcher loop.
@@ -2117,15 +2512,21 @@ pub fn detect_flags_for_sprint_id(
         "RAW_NORMALIZED_DIVERGENCE",
         raw_normalized_divergence(conn, sprint_id, t)
     );
-    total += run!("COSMETIC_REWRITE", cosmetic_rewrite(conn, sprint_id));
+    total += run!(
+        "COSMETIC_REWRITE_VICTIM/ACTOR",
+        cosmetic_rewrite(conn, sprint_id)
+    );
     total += run!(
         "CROSS_TEAM_SIMILARITY",
         cross_team_similarity(conn, sprint_id)
     );
-    total += run!("BULK_RENAME_PR", bulk_rename_pr(conn, sprint_id));
+    total += run!("BULK_RENAME_PR", bulk_rename_pr(conn, sprint_id, dt));
     total += run!("LOW_DOC_SCORE", low_doc_score(conn, sprint_id, t));
-    total += run!("TEAM_INEQUALITY", team_inequality(conn, sprint_id));
-    total += run!("LOW_COMPOSITE_SCORE", low_composite_score(conn, sprint_id));
+    total += run!("TEAM_INEQUALITY", team_inequality(conn, sprint_id, dt));
+    total += run!(
+        "LOW_COMPOSITE_SCORE",
+        low_composite_score(conn, sprint_id, dt)
+    );
     total += run!("GHOST_CONTRIBUTOR", ghost_contributor(conn, sprint_id));
     total += run!("HIDDEN_CONTRIBUTOR", hidden_contributor(conn, sprint_id));
     total += run!("PR_DOES_NOT_COMPILE", pr_does_not_compile(conn, sprint_id));
@@ -2135,10 +2536,29 @@ pub fn detect_flags_for_sprint_id(
         high_compile_failure_rate(conn, sprint_id)
     );
     total += run!("LAST_MINUTE_PR", last_minute_pr(conn, sprint_id));
-    total += run!("ALL_PRS_LATE", all_prs_late(conn, sprint_id));
+    total += run!("ALL_PRS_LATE", all_prs_late(conn, sprint_id, dt));
     total += run!(
         "REGULARITY_DECLINING",
-        regularity_declining(conn, sprint_id)
+        regularity_declining(conn, sprint_id, dt)
+    );
+    total += run!("ARCHITECTURE_DRIFT", architecture_drift(conn, sprint_id));
+    total += run!(
+        "ARCHITECTURE_HOTSPOT",
+        architecture_hotspot(
+            conn,
+            sprint_id,
+            config.detector_thresholds.architecture_hotspot_min_weighted
+        )
+    );
+    total += run!("ESTIMATION_BIAS", estimation_bias(conn, sprint_id));
+    total += run!(
+        "LOW_MUTATION_SCORE",
+        low_mutation_score(
+            conn,
+            sprint_id,
+            config.mutation.info_threshold,
+            config.mutation.warning_threshold
+        )
     );
 
     // Config-dependent detector.
@@ -2153,4 +2573,385 @@ pub fn detect_flags_for_sprint_id(
 
     info!(sprint_id, total, "Flag detection complete");
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn mk_dt() -> DetectorThresholdsConfig {
+        DetectorThresholdsConfig::default()
+    }
+
+    fn mk_thresh() -> ThresholdConfig {
+        ThresholdConfig {
+            carrying_team_pct: 0.40,
+            cramming_hours: 48,
+            cramming_commit_pct: 0.70,
+            single_commit_dump_lines: 200,
+            micro_pr_max_lines: 10,
+            low_doc_score: 2,
+            contribution_imbalance_stddev: 1.5,
+            contribution_imbalance_min_abs_deviation: 0.05,
+            low_survival_rate_stddev: 1.5,
+            low_survival_absolute_floor: 0.85,
+            raw_normalized_divergence_threshold: 0.20,
+        }
+    }
+
+    fn mk_survival_conn(rates: &[(&str, f64)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sprints (id INTEGER PRIMARY KEY, project_id INTEGER);
+             CREATE TABLE students (id TEXT PRIMARY KEY, team_project_id INTEGER);
+             CREATE TABLE student_sprint_survival (
+                student_id TEXT, sprint_id INTEGER,
+                survival_rate_normalized REAL,
+                PRIMARY KEY (student_id, sprint_id));
+             INSERT INTO sprints(id, project_id) VALUES (10, 1);",
+        )
+        .unwrap();
+        for (sid, rate) in rates {
+            conn.execute(
+                "INSERT INTO students(id, team_project_id) VALUES (?, 1)",
+                [sid],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO student_sprint_survival(student_id, sprint_id, survival_rate_normalized)
+                 VALUES (?, 10, ?)",
+                params![sid, rate],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn low_survival_rate_silent_when_team_all_high() {
+        let conn = mk_survival_conn(&[("a", 0.99), ("b", 0.99), ("c", 0.99), ("d", 0.95)]);
+        let flags = low_survival_rate(&conn, 10, &mk_thresh()).unwrap();
+        assert!(
+            flags.is_empty(),
+            "team uniformly high: must not flag — got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn low_survival_rate_fires_when_absolute_low_and_relative_low() {
+        let conn = mk_survival_conn(&[("a", 0.99), ("b", 0.99), ("c", 0.99), ("d", 0.50)]);
+        let flags = low_survival_rate(&conn, 10, &mk_thresh()).unwrap();
+        assert_eq!(flags.len(), 1, "expected exactly one flag, got {flags:?}");
+        assert_eq!(flags[0].student_id, "d");
+        assert_eq!(flags[0].flag_type, "LOW_SURVIVAL_RATE");
+        assert_eq!(
+            flags[0].details["absolute_floor"].as_f64(),
+            Some(0.85),
+            "details must record the floor used"
+        );
+    }
+
+    fn mk_regularity_conn(rows: &[(i64, &str, f64, i64)]) -> Connection {
+        // rows: (sprint_id, student_id, avg_regularity, pr_count).
+        // Sprint 10 = current, sprint 9 = previous (start_date earlier).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sprints (id INTEGER PRIMARY KEY, start_date TEXT);
+             CREATE TABLE student_sprint_regularity (
+                student_id TEXT, sprint_id INTEGER,
+                avg_regularity REAL, pr_count INTEGER,
+                PRIMARY KEY (student_id, sprint_id));
+             INSERT INTO sprints(id, start_date) VALUES (9, '2026-01-01');
+             INSERT INTO sprints(id, start_date) VALUES (10, '2026-02-01');",
+        )
+        .unwrap();
+        for (sid, student, avg, count) in rows {
+            conn.execute(
+                "INSERT INTO student_sprint_regularity(student_id, sprint_id, avg_regularity, pr_count)
+                 VALUES (?, ?, ?, ?)",
+                params![student, sid, avg, count],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn regularity_declining_silent_when_pr_count_low() {
+        // delta = 0.20 - 0.70 = -0.50 (well past -0.30) but pr_count is only 2.
+        let conn = mk_regularity_conn(&[
+            (9, "a", 0.70, 5),
+            (10, "a", 0.20, 2),
+            (9, "b", 0.70, 2),
+            (10, "b", 0.20, 5),
+        ]);
+        let flags = regularity_declining(&conn, 10, &mk_dt()).unwrap();
+        assert!(
+            flags.is_empty(),
+            "low pr_count in either sprint must suppress the flag — got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn regularity_declining_fires_when_count_sufficient() {
+        // Both sprints have pr_count = 5; delta = 0.30 - 0.70 = -0.40.
+        let conn = mk_regularity_conn(&[(9, "a", 0.70, 4), (10, "a", 0.30, 5)]);
+        let flags = regularity_declining(&conn, 10, &mk_dt()).unwrap();
+        assert_eq!(flags.len(), 1, "expected exactly one flag, got {flags:?}");
+        assert_eq!(flags[0].student_id, "a");
+        assert_eq!(flags[0].flag_type, "REGULARITY_DECLINING");
+        assert_eq!(flags[0].details["pr_count"].as_i64(), Some(5));
+        assert_eq!(flags[0].details["previous_pr_count"].as_i64(), Some(4));
+    }
+
+    fn mk_temporal_conn(rows: &[(&str, f64)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE student_sprint_temporal (
+                student_id TEXT NOT NULL,
+                sprint_id INTEGER NOT NULL,
+                cramming_ratio REAL,
+                PRIMARY KEY (student_id, sprint_id));",
+        )
+        .unwrap();
+        for (sid, ratio) in rows {
+            conn.execute(
+                "INSERT INTO student_sprint_temporal(student_id, sprint_id, cramming_ratio)
+                 VALUES (?, 10, ?)",
+                params![sid, ratio],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn cramming_attributes_to_commit_author_not_task_assignee() {
+        // Scenario: Alice (teammate) made all the late-night commits on Bob's
+        // task. student_sprint_temporal is per-author (it joins pr_commits on
+        // pc.author_login), so Alice's cramming_ratio is high and Bob's is 0.
+        // Pre-T-P1.1 the detector read student_sprint_metrics.temporal_spread,
+        // which is task-assignee-keyed, and flagged Bob.
+        let conn = mk_temporal_conn(&[("alice", 0.85), ("bob", 0.0)]);
+        let flags = cramming(&conn, 10, &mk_thresh()).unwrap();
+        assert_eq!(flags.len(), 1, "expected exactly one flag, got {flags:?}");
+        assert_eq!(flags[0].student_id, "alice");
+        assert_eq!(flags[0].flag_type, "CRAMMING");
+        assert_eq!(flags[0].severity, "WARNING");
+        assert_eq!(
+            flags[0].details["threshold"].as_f64(),
+            Some(mk_thresh().cramming_commit_pct),
+        );
+    }
+
+    fn mk_cosmetic_conn(rows: &[(&str, &str, i64)]) -> Connection {
+        // rows: (original_author_id, rewriter_id, statements_affected).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cosmetic_rewrites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sprint_id INTEGER,
+                file_path TEXT,
+                repo_full_name TEXT,
+                original_author_id TEXT,
+                rewriter_id TEXT,
+                statements_affected INTEGER,
+                change_type TEXT);",
+        )
+        .unwrap();
+        for (orig, rewriter, affected) in rows {
+            conn.execute(
+                "INSERT INTO cosmetic_rewrites
+                    (sprint_id, file_path, repo_full_name, original_author_id,
+                     rewriter_id, statements_affected, change_type)
+                 VALUES (10, 'src/A.java', 'org/repo', ?, ?, ?, 'rename_local')",
+                params![orig, rewriter, affected],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn cosmetic_rewrite_emits_victim_info_and_actor_warning() {
+        // Alice rewrote 50 statements originally authored by Bob.
+        let conn = mk_cosmetic_conn(&[("bob", "alice", 50)]);
+        let flags = cosmetic_rewrite(&conn, 10).unwrap();
+        assert_eq!(flags.len(), 2, "expected exactly two flags, got {flags:?}");
+
+        let victim = flags
+            .iter()
+            .find(|f| f.flag_type == "COSMETIC_REWRITE_VICTIM")
+            .expect("victim flag missing");
+        assert_eq!(victim.student_id, "bob");
+        assert_eq!(victim.severity, "INFO");
+        assert_eq!(
+            victim.details["counterpart_user_id"].as_str(),
+            Some("alice")
+        );
+        assert_eq!(victim.details["statements_affected"].as_i64(), Some(50));
+
+        let actor = flags
+            .iter()
+            .find(|f| f.flag_type == "COSMETIC_REWRITE_ACTOR")
+            .expect("actor flag missing");
+        assert_eq!(actor.student_id, "alice");
+        assert_eq!(actor.severity, "WARNING");
+        assert_eq!(actor.details["counterpart_user_id"].as_str(), Some("bob"));
+
+        // Severity-aggregation invariant: rewriter accumulates WARNING+CRITICAL,
+        // victim does not.
+        let warn_or_crit = |sid: &str| -> usize {
+            flags
+                .iter()
+                .filter(|f| {
+                    f.student_id == sid && (f.severity == "WARNING" || f.severity == "CRITICAL")
+                })
+                .count()
+        };
+        assert_eq!(warn_or_crit("alice"), 1);
+        assert_eq!(warn_or_crit("bob"), 0);
+    }
+
+    #[test]
+    fn cramming_silent_below_threshold() {
+        let conn = mk_temporal_conn(&[("alice", 0.50), ("bob", 0.10)]);
+        let flags = cramming(&conn, 10, &mk_thresh()).unwrap();
+        assert!(
+            flags.is_empty(),
+            "below threshold must not flag — got {flags:?}"
+        );
+    }
+
+    // T-P1.3 wiring tests: prove `DetectorThresholdsConfig` overrides reach
+    // each migrated literal. Each test uses a fixture sized so the default
+    // threshold produces no flag and a custom override produces one (or
+    // vice versa).
+
+    #[test]
+    fn regularity_declining_delta_threshold_is_wired() {
+        // delta = 0.50 - 0.70 = -0.20. Default threshold (-0.30) → no flag.
+        // Lower the bar to -0.10 and the flag fires.
+        let conn = mk_regularity_conn(&[(9, "a", 0.70, 4), (10, "a", 0.50, 5)]);
+        let default_flags = regularity_declining(&conn, 10, &mk_dt()).unwrap();
+        assert!(default_flags.is_empty(), "default delta must not fire");
+
+        let mut dt = mk_dt();
+        dt.regularity_declining_delta = -0.10;
+        let lenient = regularity_declining(&conn, 10, &dt).unwrap();
+        assert_eq!(lenient.len(), 1, "loosened threshold must fire");
+    }
+
+    #[test]
+    fn team_inequality_outlier_deviation_threshold_is_wired() {
+        // Helper used by team_inequality to filter spurious outliers. With
+        // value=100, average=80, ratio = 0.25. Default 0.35 → not an outlier.
+        // Override to 0.20 → counts as an outlier.
+        assert!(!team_inequality_is_material_outlier(100.0, 80.0, 0.35));
+        assert!(team_inequality_is_material_outlier(100.0, 80.0, 0.20));
+    }
+
+    fn mk_author_mismatch_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sprints (id INTEGER PRIMARY KEY);
+             CREATE TABLE students (id TEXT PRIMARY KEY, github_login TEXT);
+             CREATE TABLE tasks (id INTEGER PRIMARY KEY, sprint_id INTEGER, type TEXT);
+             CREATE TABLE pull_requests (id TEXT PRIMARY KEY, pr_number INTEGER,
+                repo_full_name TEXT, author_id TEXT, github_author_login TEXT);
+             CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT);
+             CREATE TABLE pr_commits (pr_id TEXT, sha TEXT, author_login TEXT);
+             CREATE TABLE pr_pre_squash_authors (
+                pr_id TEXT NOT NULL, sha TEXT NOT NULL,
+                author_login TEXT, author_email TEXT, captured_at TEXT,
+                PRIMARY KEY (pr_id, sha));
+             INSERT INTO sprints(id) VALUES (10);
+             INSERT INTO students(id, github_login) VALUES ('alice', 'alice-gh');
+             INSERT INTO students(id, github_login) VALUES ('bob', 'bob-gh');
+             INSERT INTO tasks(id, sprint_id, type) VALUES (1, 10, 'TASK');
+             INSERT INTO pull_requests(id, pr_number, repo_full_name, author_id, github_author_login)
+                VALUES ('pr-1', 42, 'org/repo', 'alice', 'alice-gh');
+             INSERT INTO task_pull_requests(task_id, pr_id) VALUES (1, 'pr-1');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn author_mismatch_prefers_pr_pre_squash_authors() {
+        // After a squash, pr_commits collapses to the squasher (alice).
+        // pr_pre_squash_authors retains the original commit authors (bob).
+        // Detector must read from pr_pre_squash_authors and flag the mismatch.
+        let conn = mk_author_mismatch_conn();
+        conn.execute(
+            "INSERT INTO pr_commits(pr_id, sha, author_login)
+             VALUES ('pr-1', 'squash-sha', 'alice-gh')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO pr_pre_squash_authors(pr_id, sha, author_login, captured_at)
+             VALUES ('pr-1', 'orig-sha-1', 'bob-gh', '2026-04-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let flags = author_mismatch(&conn, 10).unwrap();
+        assert_eq!(flags.len(), 1, "expected mismatch flag, got {flags:?}");
+        assert_eq!(flags[0].flag_type, "AUTHOR_MISMATCH");
+        // Detail should name the original committer (bob), not the squasher.
+        let commit_authors = flags[0].details["commit_authors"]
+            .as_array()
+            .expect("commit_authors array");
+        assert!(
+            commit_authors.iter().any(|v| v.as_str() == Some("bob-gh")),
+            "must include original committer; got {commit_authors:?}"
+        );
+        assert!(
+            !commit_authors
+                .iter()
+                .any(|v| v.as_str() == Some("alice-gh")),
+            "must not include the PR author (squasher) from pr_commits fallback"
+        );
+    }
+
+    #[test]
+    fn author_mismatch_falls_back_to_pr_commits_when_pre_squash_empty() {
+        // No pr_pre_squash_authors rows → fall back to pr_commits, which
+        // contains the same author as the PR — no flag.
+        let conn = mk_author_mismatch_conn();
+        conn.execute(
+            "INSERT INTO pr_commits(pr_id, sha, author_login)
+             VALUES ('pr-1', 'sha-1', 'alice-gh')",
+            [],
+        )
+        .unwrap();
+        let flags = author_mismatch(&conn, 10).unwrap();
+        assert!(
+            flags.is_empty(),
+            "matching authors must not flag — got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn trajectory_thresholds_are_wired() {
+        use crate::trajectory::classify_trajectory;
+        // Steady fixture: cv ~ 0.05 → "steady" under default; raise
+        // trajectory_cv_low past 0.05 should still be steady; lower it
+        // below 0.05 should push the same scores past the steady cutoff.
+        let scores = [10.0, 11.0, 10.5, 11.5];
+        let dt_default = mk_dt();
+        let r_default = classify_trajectory(&scores, &dt_default);
+        assert_eq!(r_default.class, "steady");
+
+        let mut dt_strict = mk_dt();
+        dt_strict.trajectory_cv_low = 0.001;
+        dt_strict.trajectory_cv_high = 0.01;
+        let r_strict = classify_trajectory(&scores, &dt_strict);
+        assert_ne!(
+            r_strict.class, "steady",
+            "tightened cv bands must reclassify the same scores"
+        );
+    }
 }

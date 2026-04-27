@@ -13,6 +13,10 @@ use crate::keywords::{action_tag, layer_tags, tokenize};
 
 const ANY: &str = "*";
 
+type PrLineMetrics = (Option<f64>, Option<f64>, Option<f64>);
+type StackLayerAction = (String, String, String);
+type TaskPrimaries = (i64, Vec<StackLayerAction>);
+
 const LAYER_ORDER: &[&str] = &[
     "spring_controller",
     "spring_service",
@@ -103,6 +107,7 @@ fn build_label(stack: &str, layer: &str, action: &str) -> String {
 #[derive(Debug, Clone)]
 struct TaskInfo {
     task_id: i64,
+    #[allow(dead_code)]
     name: String,
     project_id: Option<i64>,
     estimation_points: Option<f64>,
@@ -208,7 +213,7 @@ fn load_tasks_for_sprint(conn: &Connection, sprint_id: i64) -> rusqlite::Result<
     }
     drop(stmt);
 
-    let mut pr_metrics: HashMap<String, (Option<f64>, Option<f64>, Option<f64>)> = HashMap::new();
+    let mut pr_metrics: HashMap<String, PrLineMetrics> = HashMap::new();
     let mut stmt =
         conn.prepare("SELECT pr_id, lar, lat, ls FROM pr_line_metrics WHERE sprint_id = ?")?;
     for row in stmt
@@ -358,7 +363,7 @@ fn build_groups_with_backoff(
     min_size: usize,
 ) -> BTreeMap<(String, String, String), Vec<i64>> {
     let mut candidate_sets: HashMap<(String, String, String), BTreeSet<i64>> = HashMap::new();
-    let mut task_primaries: Vec<(i64, Vec<(String, String, String)>)> = Vec::new();
+    let mut task_primaries: Vec<TaskPrimaries> = Vec::new();
 
     for t in tasks {
         let primaries = task_tuples(t, max_per_task);
@@ -773,8 +778,6 @@ pub fn compute_task_similarity(
         "task similarity"
     );
     let task_count = tasks.len();
-    // silence unused
-    let _ = tasks.iter().map(|t| &t.name).count();
     Ok(TaskSimilaritySummary {
         task_count,
         group_count,

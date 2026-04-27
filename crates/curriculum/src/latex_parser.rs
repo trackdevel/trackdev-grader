@@ -119,7 +119,7 @@ fn extract_from_code_blocks(content: &str) -> Vec<(String, String)> {
         }
         for m in API_METHOD_PATTERN.captures_iter(block) {
             let method = &m[1];
-            if method.len() > 2 && method.chars().next().map_or(false, |c| c.is_lowercase()) {
+            if method.len() > 2 && method.chars().next().is_some_and(|c| c.is_lowercase()) {
                 out.push(("api_method".into(), method.to_string()));
             }
         }
@@ -220,7 +220,7 @@ pub fn parse_all_slides(slides_dir: &Path, num_sprints: u32) -> Vec<CurriculumCo
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .map(|e| e.path().to_path_buf())
-        .filter(|p| p.extension().map_or(false, |ext| ext == "tex"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "tex"))
         .collect();
     tex_files.sort();
 

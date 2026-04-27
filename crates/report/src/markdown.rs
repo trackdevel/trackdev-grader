@@ -10,7 +10,7 @@
 //! Inline `<svg>` blocks keep the document self-contained (GitHub, GitLab,
 //! and most Markdown viewers render SVG). No external image assets.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +19,35 @@ use tracing::info;
 
 use crate::charts::{html_escape, sparkline_svg, stacked_bars_svg, StackedRow};
 use crate::flag_details::{enrich_flag_details, render_flag_details, render_flag_severity};
+
+type DoneTaskRow = (
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<String>,
+);
+
+type DonePrRow = (
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+    Option<String>,
+);
+
+type GroupMemberRow = (
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<f64>,
+);
 
 /// Aggregated per-student LS and LD for the team. LS captures surviving new
 /// code; LD (cosmetic-filtered) captures legitimate cleanup/refactor value
@@ -271,7 +300,7 @@ fn pr_ls_for_team(
 
 fn md_escape(s: &str) -> String {
     // Minimal escaping for table cells: pipes break tables, newlines break rows.
-    s.replace('|', "\\|").replace('\n', " ").replace('\r', " ")
+    s.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
 fn push_table_header(buf: &mut String, headers: &[&str]) {
@@ -318,6 +347,41 @@ fn fmt_f2(v: f64) -> String {
 }
 fn fmt_pct(v: f64) -> String {
     format!("{}%", fmt_trim(v * 100.0, 1))
+}
+
+/// Render the per-PR attribution-errors warning glyph for the markdown report
+/// (T-P1.5). Returns an empty string when the column is NULL, empty, or the
+/// literal `[]`. Otherwise returns `⚠ (kind1, kind2)` where the kinds come
+/// from the JSON entries; if parsing fails we fall back to a bare ⚠ so a
+/// stale legacy value still surfaces as a signal.
+fn attribution_error_glyph(raw: Option<&str>) -> String {
+    let raw = match raw {
+        Some(s) if !s.trim().is_empty() && s.trim() != "[]" => s,
+        _ => return String::new(),
+    };
+    let parsed: Option<serde_json::Value> = serde_json::from_str(raw).ok();
+    let kinds: Vec<String> = match parsed.as_ref().and_then(|v| v.as_array()) {
+        Some(arr) => {
+            let mut out: Vec<String> = arr
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .get("kind")
+                        .and_then(|k| k.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            out.sort();
+            out.dedup();
+            out
+        }
+        None => Vec::new(),
+    };
+    if kinds.is_empty() {
+        "⚠".to_string()
+    } else {
+        format!("⚠ ({})", kinds.join(", "))
+    }
 }
 
 fn compact_reason_numbers(reason: &str) -> String {
@@ -384,10 +448,24 @@ struct StudentSummaryRow {
     surv_norm: f64,
     density: f64,
     flag_count: i64,
+    /// T-P2.1: per-student estimation bias (β_u). Only populated by
+    /// `cumulative_student_summary`; per-sprint rows leave it `None`
+    /// because bias is fitted across all sprints (the posterior wants
+    /// the full per-student history).
+    estimation_bias: Option<EstimationBiasCell>,
 }
 
-fn student_summary_headers() -> &'static [&'static str] {
-    &[
+#[derive(Debug, Clone, Copy)]
+struct EstimationBiasCell {
+    beta_mean: f64,
+    /// Half-width of the 95 % credible interval. Used to decide the
+    /// directional symbol: when the CrI excludes 0 by more than the
+    /// detector's 0.5-logit margin we render ▲/▼; otherwise ≈.
+    half_width: f64,
+}
+
+fn student_summary_headers(include_bias: bool) -> Vec<&'static str> {
+    let mut h = vec![
         "Student",
         "GitHub",
         "Points",
@@ -400,32 +478,69 @@ fn student_summary_headers() -> &'static [&'static str] {
         "Density",
         "Doc score",
         "Flags",
-    ]
+    ];
+    if include_bias {
+        h.push("β_u");
+    }
+    h
+}
+
+/// Render the β_u cell. Symbol semantics mirror the ESTIMATION_BIAS
+/// detector: ▲ over-estimator (CrI strictly above +0.5 logits), ▼
+/// under-estimator (CrI strictly below −0.5), ≈ calibrated otherwise.
+fn fmt_bias_cell(bias: Option<EstimationBiasCell>) -> String {
+    let Some(b) = bias else {
+        return String::new();
+    };
+    const MARGIN: f64 = 0.5;
+    let lower = b.beta_mean - b.half_width;
+    let upper = b.beta_mean + b.half_width;
+    let symbol = if lower > MARGIN {
+        "▲"
+    } else if upper < -MARGIN {
+        "▼"
+    } else {
+        "≈"
+    };
+    format!("{symbol} {:+.2}", b.beta_mean)
 }
 
 fn write_student_summary_table(buf: &mut String, students: &[StudentSummaryRow]) {
-    push_table_header(buf, student_summary_headers());
+    write_student_summary_table_inner(buf, students, false);
+}
+
+fn write_cumulative_student_summary_table(buf: &mut String, students: &[StudentSummaryRow]) {
+    write_student_summary_table_inner(buf, students, true);
+}
+
+fn write_student_summary_table_inner(
+    buf: &mut String,
+    students: &[StudentSummaryRow],
+    include_bias: bool,
+) {
+    push_table_header(buf, &student_summary_headers(include_bias));
     for s in students {
-        push_table_row(
-            buf,
-            &[
-                s.full_name.clone(),
-                s.github_login
-                    .as_deref()
-                    .map(github_cell)
-                    .unwrap_or_default(),
-                fmt_f1(s.pts),
-                fmt_pct(s.share),
-                fmt_f1(s.lines),
-                fmt_f1(s.ls),
-                fmt_f1(s.ld),
-                fmt_f2(s.ls_per_pt),
-                fmt_pct(s.surv_norm),
-                fmt_f2(s.density),
-                s.avg_doc.map(fmt_f1).unwrap_or_default(),
-                fmt_int(s.flag_count),
-            ],
-        );
+        let mut cells = vec![
+            s.full_name.clone(),
+            s.github_login
+                .as_deref()
+                .map(github_cell)
+                .unwrap_or_default(),
+            fmt_f1(s.pts),
+            fmt_pct(s.share),
+            fmt_f1(s.lines),
+            fmt_f1(s.ls),
+            fmt_f1(s.ld),
+            fmt_f2(s.ls_per_pt),
+            fmt_pct(s.surv_norm),
+            fmt_f2(s.density),
+            s.avg_doc.map(fmt_f1).unwrap_or_default(),
+            fmt_int(s.flag_count),
+        ];
+        if include_bias {
+            cells.push(fmt_bias_cell(s.estimation_bias));
+        }
+        push_table_row(buf, &cells);
     }
     buf.push('\n');
 }
@@ -489,6 +604,7 @@ fn current_student_summary(
                     ls: stats.ls,
                     ld: stats.ld,
                     ls_per_pt: stats.ls_per_pt,
+                    estimation_bias: None,
                 })
             },
         )?
@@ -619,6 +735,31 @@ fn cumulative_student_summary(
             0.0
         };
 
+        // T-P2.1: pull the per-student bias posterior for this project.
+        // Falls back to None when the row is missing (project skipped or
+        // student never had any estimated tasks). The half-width is
+        // `(upper95 - lower95) / 2`, which equals 1.96 · σ_post for the
+        // Gaussian posterior we fit.
+        let bias: Option<EstimationBiasCell> = conn
+            .query_row(
+                "SELECT beta_mean, beta_lower95, beta_upper95
+                 FROM student_estimation_bias
+                 WHERE student_id = ? AND project_id = ?",
+                rusqlite::params![id, project_id],
+                |r| {
+                    Ok((
+                        r.get::<_, f64>(0)?,
+                        r.get::<_, f64>(1)?,
+                        r.get::<_, f64>(2)?,
+                    ))
+                },
+            )
+            .ok()
+            .map(|(mean, lo, hi)| EstimationBiasCell {
+                beta_mean: mean,
+                half_width: (hi - lo) / 2.0,
+            });
+
         rows.push(StudentSummaryRow {
             id,
             full_name,
@@ -633,6 +774,7 @@ fn cumulative_student_summary(
             surv_norm,
             density,
             flag_count,
+            estimation_bias: bias,
         });
     }
 
@@ -713,6 +855,44 @@ fn github_inline(login: &str) -> String {
     format!("[`{}`]({})", md_escape(login), github_url(login))
 }
 
+/// Resolve each comma-separated owner identifier (typically a TrackDev
+/// student_id, but may already be a GitHub login if no student matched
+/// at ownership-aggregation time) to its human-readable display string,
+/// preserving the input order.
+fn humanize_owner_csv(conn: &Connection, owners_csv: &str) -> String {
+    owners_csv
+        .split(',')
+        .map(|raw| raw.trim())
+        .filter(|s| !s.is_empty())
+        .map(|owner| humanize_owner(conn, owner))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn humanize_owner(conn: &Connection, owner: &str) -> String {
+    if let Ok((full_name, github_login)) = conn.query_row(
+        "SELECT full_name, github_login FROM students WHERE id = ?",
+        [owner],
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        },
+    ) {
+        let name = full_name.unwrap_or_default();
+        let login = github_login.and_then(|l| normalize_github_login(&l));
+        return match (name.is_empty(), login) {
+            (false, Some(l)) => format!("{} ({})", name, l),
+            (false, None) => name,
+            (true, Some(l)) => l,
+            (true, None) => owner.to_string(),
+        };
+    }
+    // Fallback: treat the raw value as a GitHub login if it looks like one.
+    owner.to_string()
+}
+
 fn canonical_timing_tier(tier: &str) -> Option<&'static str> {
     match tier {
         "Regular" | "Green" => Some("Regular"),
@@ -775,7 +955,13 @@ fn write_section_a(
         if !sprint_ids.is_empty() {
             let cumulative_students = cumulative_student_summary(conn, sprint_ids, project_id)?;
             let _ = writeln!(buf, "{} Cumulative through this sprint\n", h3);
-            write_student_summary_table(buf, &cumulative_students);
+            write_cumulative_student_summary_table(buf, &cumulative_students);
+            buf.push_str(
+                "_Legend:_ **Density** = surviving statements per estimated point \
+(higher = more code per point delivered, a code-volume signal). \
+**β_u** = per-student estimation bias in logits, posterior mean ± symbol \
+(▲ over-estimator, ▼ under-estimator, ≈ calibrated within ±0.5 logits).\n\n",
+            );
         }
     }
 
@@ -824,6 +1010,97 @@ fn write_section_a(
         buf.push_str("\n\n");
     }
 
+    // Truck factor headline (T-P2.3). The per-file ownership treemap was
+    // removed: with realistic file counts the diagram is too crowded to read.
+    let truck: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT truck_factor, owners_csv FROM team_sprint_ownership
+             WHERE project_id = ? AND sprint_id = ?",
+            rusqlite::params![project_id, sprint_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .ok();
+    if let Some((tf, owners_csv)) = truck {
+        let _ = writeln!(buf, "{} Code ownership\n", h3);
+        let owners = owners_csv.unwrap_or_default();
+        let owners_display = if owners.is_empty() {
+            "—".to_string()
+        } else {
+            humanize_owner_csv(conn, &owners)
+        };
+        let _ = writeln!(
+            buf,
+            "**Truck factor:** {} (top owners: {})\n",
+            tf, owners_display
+        );
+    }
+
+    // T-P2.2: architecture conformance roll-up. Reads
+    // `architecture_violations` totals + per-rule top-3 so the team sees
+    // both the headline count and which rules are biting.
+    let arch_total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM architecture_violations av
+             JOIN sprints s ON s.id = av.sprint_id
+             WHERE s.project_id = ? AND av.sprint_id = ?",
+            rusqlite::params![project_id, sprint_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if arch_total > 0 {
+        let _ = writeln!(buf, "{} Architecture conformance\n", h3);
+        // Severity breakdown across the whole project for this sprint.
+        let mut sev_stmt = conn.prepare(
+            "SELECT av.severity, COUNT(*) FROM architecture_violations av
+             JOIN sprints s ON s.id = av.sprint_id
+             WHERE s.project_id = ? AND av.sprint_id = ?
+             GROUP BY av.severity",
+        )?;
+        let mut crit = 0i64;
+        let mut warn = 0i64;
+        let mut info_n = 0i64;
+        for row in sev_stmt
+            .query_map(rusqlite::params![project_id, sprint_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+        {
+            let (sev, n) = row?;
+            match sev.to_ascii_uppercase().as_str() {
+                "CRITICAL" => crit = n,
+                "WARNING" => warn = n,
+                "INFO" => info_n = n,
+                _ => {}
+            }
+        }
+        drop(sev_stmt);
+        let _ = writeln!(
+            buf,
+            "**Total violations:** {} ({} critical · {} warning · {} info). \
+Severity bands per `architecture.toml`. Per-student attribution \
+(by dominant author of the offending file) follows in Section B.\n",
+            arch_total, crit, warn, info_n
+        );
+        let mut stmt = conn.prepare(
+            "SELECT rule_name, COUNT(*) as n FROM architecture_violations av
+             JOIN sprints s ON s.id = av.sprint_id
+             WHERE s.project_id = ? AND av.sprint_id = ?
+             GROUP BY rule_name ORDER BY n DESC, rule_name LIMIT 5",
+        )?;
+        let rows: Vec<(String, i64)> = stmt
+            .query_map(rusqlite::params![project_id, sprint_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        if !rows.is_empty() {
+            let _ = writeln!(buf, "Top rules:");
+            for (rule, n) in rows {
+                let _ = writeln!(buf, "- `{}` — {}", html_escape(&rule), n);
+            }
+            buf.push('\n');
+        }
+    }
+
     // Flag severity roll-up for the team
     let critical = count_severity(conn, sprint_id, project_id, "CRITICAL");
     let warning = count_severity(conn, sprint_id, project_id, "WARNING");
@@ -849,6 +1126,116 @@ fn count_severity(conn: &Connection, sprint_id: i64, project_id: i64, severity: 
 
 // ── Section B: per-student dashboards ────────────────────────────────────────
 
+/// One architecture violation, attributed to whichever student owns the
+/// majority of statements in the offending file (per `file_ownership_for_project`).
+/// Unattributed rows (no fingerprints for the file, or owner login not
+/// resolvable to a student in the team) are dropped from the per-student
+/// view — the team-level total still counts them.
+///
+/// `repo_full_qualified` is the `<org>/<repo>` form pulled from the matching
+/// fingerprint row. It survives the basename-based join so the renderer can
+/// build a `https://github.com/<org>/<repo>/blob/HEAD/<file_path>` URL.
+#[derive(Debug, Clone)]
+struct AttributedArchViolation {
+    rule_name: String,
+    file_path: String,
+    severity: String,
+    offending_import: String,
+    repo_full_qualified: String,
+}
+
+/// Normalize a repo_full_name to its trailing component. The architecture
+/// stage stores `<repo>` while survival/blame stores `<org>/<repo>`; this
+/// strips any leading `<org>/` so both sources can be matched by basename.
+fn repo_basename(repo: &str) -> &str {
+    repo.rsplit('/').next().unwrap_or(repo)
+}
+
+fn architecture_violations_per_student(
+    conn: &Connection,
+    sprint_id: i64,
+    project_id: i64,
+) -> rusqlite::Result<HashMap<String, Vec<AttributedArchViolation>>> {
+    let ownership =
+        sprint_grader_repo_analysis::file_ownership_for_project(conn, sprint_id, project_id)
+            .unwrap_or_default();
+    // (file_path, repo_basename) → (student_id, repo_full_qualified). The
+    // ownership query already collapsed authors per file and resolved login
+    // → student_id where possible, so we only have to index it. Keying by
+    // repo basename keeps the lookup robust to the org-prefix mismatch
+    // between `architecture_violations` and `fingerprints`; we keep the
+    // org-qualified name alongside so URLs can be built later.
+    let mut owner_by_file: HashMap<(String, String), (String, String)> = HashMap::new();
+    for f in ownership {
+        let repo = f.repo_full_name.unwrap_or_default();
+        let key = (f.file_path, repo_basename(&repo).to_string());
+        owner_by_file.insert(key, (f.dominant_author, repo));
+    }
+
+    // Limit to student_ids that actually belong to this team — keeps
+    // anonymous logins or stale identities from leaking into the report.
+    let mut team_stmt =
+        conn.prepare("SELECT id FROM students WHERE team_project_id = ?")?;
+    let team: HashSet<String> = team_stmt
+        .query_map([project_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(team_stmt);
+
+    let mut stmt = conn.prepare(
+        "SELECT av.rule_name, av.file_path, av.repo_full_name, av.severity,
+                av.offending_import
+         FROM architecture_violations av
+         JOIN sprints s ON s.id = av.sprint_id
+         WHERE s.project_id = ? AND av.sprint_id = ?",
+    )?;
+    let rows: Vec<(String, String, String, String, String)> = stmt
+        .query_map(rusqlite::params![project_id, sprint_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let mut out: HashMap<String, Vec<AttributedArchViolation>> = HashMap::new();
+    for (rule, file, repo, severity, import) in rows {
+        let key = (file.clone(), repo_basename(&repo).to_string());
+        let Some((owner, repo_fqn)) = owner_by_file.get(&key) else {
+            continue;
+        };
+        if !team.contains(owner) {
+            continue;
+        }
+        out.entry(owner.clone())
+            .or_default()
+            .push(AttributedArchViolation {
+                rule_name: rule,
+                file_path: file,
+                severity,
+                offending_import: import,
+                repo_full_qualified: repo_fqn.clone(),
+            });
+    }
+    Ok(out)
+}
+
+/// Build a clickable GitHub URL for a file at the default branch (`HEAD`).
+/// Returns `None` when `repo_full_qualified` is missing the `<org>/<repo>`
+/// form (e.g. an old DB row that only stored the bare repo name).
+fn github_file_url(repo_full_qualified: &str, file_path: &str) -> Option<String> {
+    if !repo_full_qualified.contains('/') {
+        return None;
+    }
+    Some(format!(
+        "https://github.com/{}/blob/HEAD/{}",
+        repo_full_qualified, file_path
+    ))
+}
+
 fn write_section_b(
     buf: &mut String,
     conn: &Connection,
@@ -862,6 +1249,7 @@ fn write_section_b(
 
     let task_ls = task_ls_for_team(conn, sprint_id, project_id)?;
     let pr_ls = pr_ls_for_team(conn, sprint_id, project_id)?;
+    let arch_per_student = architecture_violations_per_student(conn, sprint_id, project_id)?;
 
     let mut stmt = conn.prepare(
         "SELECT id, full_name, github_login FROM students
@@ -928,13 +1316,7 @@ fn write_section_b(
                AND t.type != 'USER_STORY' AND t.status = 'DONE'
              ORDER BY t.task_key",
         )?;
-        let tasks: Vec<(
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<f64>,
-            Option<String>,
-        )> = stmt
+        let tasks: Vec<DoneTaskRow> = stmt
             .query_map(rusqlite::params![sprint_id, sid], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -982,7 +1364,7 @@ fn write_section_b(
         // PR table — only PRs whose linked task is a DONE TASK/BUG show up.
         let mut stmt = conn.prepare(
             "SELECT DISTINCT pr.id, pr.pr_number, pr.repo_full_name, pr.title, pr.url,
-                    pr.additions, pr.deletions
+                    pr.additions, pr.deletions, pr.attribution_errors
              FROM pull_requests pr
              JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
              JOIN tasks t ON t.id = tpr.task_id
@@ -990,15 +1372,7 @@ fn write_section_b(
                AND t.type != 'USER_STORY' AND t.status = 'DONE'
              ORDER BY pr.pr_number",
         )?;
-        let prs: Vec<(
-            String,
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-        )> = stmt
+        let prs: Vec<DonePrRow> = stmt
             .query_map(rusqlite::params![sprint_id, sid], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -1008,6 +1382,7 @@ fn write_section_b(
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, Option<i64>>(5)?.unwrap_or(0),
                     r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    r.get::<_, Option<String>>(7)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -1027,7 +1402,7 @@ fn write_section_b(
                     "LS/pt",
                 ],
             );
-            for (pr_id, num, repo, title, url, adds, dels) in prs {
+            for (pr_id, num, repo, title, url, adds, dels, attr_errors) in prs {
                 let repo_short = repo
                     .as_deref()
                     .and_then(|s| s.rsplit('/').next())
@@ -1040,6 +1415,12 @@ fn write_section_b(
                     }
                     _ => (format!("#{}", num), md_escape(&title_str)),
                 };
+                let attr_glyph = attribution_error_glyph(attr_errors.as_deref());
+                let num_cell_with_glyph = if attr_glyph.is_empty() {
+                    num_cell
+                } else {
+                    format!("{num_cell} {attr_glyph}")
+                };
                 let (ls, ld, linked_pts) = pr_ls.get(&pr_id).copied().unwrap_or((0.0, 0.0, 0.0));
                 let ls_per_pt = if linked_pts > 0.0 {
                     ls / linked_pts
@@ -1051,7 +1432,7 @@ fn write_section_b(
                 let _ = writeln!(
                     buf,
                     "| {} | {} | {} | +{} / -{} | {} | {} | {} | {} |",
-                    num_cell,
+                    num_cell_with_glyph,
                     md_escape(&repo_short),
                     linked_title.replace('|', "\\|"),
                     adds,
@@ -1100,9 +1481,79 @@ fn write_section_b(
             buf.push('\n');
         }
 
+        if let Some(violations) = arch_per_student.get(sid) {
+            if !violations.is_empty() {
+                write_student_architecture_block(buf, violations);
+            }
+        }
+
         buf.push_str("---\n\n");
     }
     Ok(())
+}
+
+/// Per-student architecture detail. Aggregates violations by rule, lists the
+/// top files for each rule, and emits a compact severity breakdown so each
+/// student sees their own architectural debt as an individual signal.
+fn write_student_architecture_block(buf: &mut String, violations: &[AttributedArchViolation]) {
+    let total = violations.len();
+    let crit = violations
+        .iter()
+        .filter(|v| v.severity.eq_ignore_ascii_case("CRITICAL"))
+        .count();
+    let warn = violations
+        .iter()
+        .filter(|v| v.severity.eq_ignore_ascii_case("WARNING"))
+        .count();
+    let info_n = violations
+        .iter()
+        .filter(|v| v.severity.eq_ignore_ascii_case("INFO"))
+        .count();
+
+    let _ = writeln!(
+        buf,
+        "**Architecture violations:** {} ({} critical · {} warning · {} info)\n",
+        total, crit, warn, info_n
+    );
+
+    // Group by rule_name. Each grouped row keeps the file path, the
+    // org-qualified repo name (for URL building), and the offending import.
+    // Rule order: descending count, tie-break alphabetical for determinism.
+    type RuleExample = (String, String, String);
+    let mut by_rule: HashMap<String, Vec<RuleExample>> = HashMap::new();
+    for v in violations {
+        by_rule.entry(v.rule_name.clone()).or_default().push((
+            v.file_path.clone(),
+            v.repo_full_qualified.clone(),
+            v.offending_import.clone(),
+        ));
+    }
+    let mut rules: Vec<(String, Vec<RuleExample>)> = by_rule.into_iter().collect();
+    rules.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+
+    for (rule, files) in rules {
+        let _ = writeln!(buf, "- `{}` — {} file(s)", html_escape(&rule), files.len());
+        // Show up to 3 examples per rule with the offending import. The file
+        // appears as a [basename](github-url) link with the full path in the
+        // markdown title attribute (`[label](url "title")`), so the visible
+        // text stays short while the source of truth is one click away.
+        let mut shown: Vec<&RuleExample> = files.iter().collect();
+        shown.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+        shown.dedup_by(|a, b| a.0 == b.0 && a.2 == b.2);
+        for (file, repo_fqn, import) in shown.iter().take(3) {
+            let basename = file.rsplit('/').next().unwrap_or(file);
+            let label = format!("`{}`", basename);
+            let file_cell = match github_file_url(repo_fqn, file) {
+                Some(url) => format!("[{}]({} \"{}\")", label, url, md_escape(file)),
+                None => label,
+            };
+            let _ = writeln!(buf, "  - {} ← `{}`", file_cell, html_escape(import));
+        }
+        if shown.len() > 3 {
+            let _ = writeln!(buf, "  - … and {} more", shown.len() - 3);
+        }
+    }
+    buf.push('\n');
 }
 
 // ── Section C: peer-group analysis ───────────────────────────────────────────
@@ -1191,15 +1642,7 @@ fn write_section_c(
                AND t.type != 'USER_STORY' AND t.status = 'DONE'
              ORDER BY tgm.is_outlier DESC, t.task_key",
         )?;
-        let members: Vec<(
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-            Option<String>,
-            Option<f64>,
-        )> = stmt
+        let members: Vec<GroupMemberRow> = stmt
             .query_map([g.group_id], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -1584,6 +2027,38 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::TempDir;
 
+    #[test]
+    fn attribution_error_glyph_empty_for_null_or_empty_array() {
+        assert_eq!(attribution_error_glyph(None), "");
+        assert_eq!(attribution_error_glyph(Some("")), "");
+        assert_eq!(attribution_error_glyph(Some("[]")), "");
+        assert_eq!(attribution_error_glyph(Some("   ")), "");
+    }
+
+    #[test]
+    fn attribution_error_glyph_lists_kinds() {
+        let raw = r#"[{"kind":"base_sha_fallback","detail":"x","observed_at":"t"},
+                       {"kind":"null_author_login","detail":"y","observed_at":"t"}]"#;
+        let s = attribution_error_glyph(Some(raw));
+        assert!(s.starts_with("⚠ ("));
+        assert!(s.contains("base_sha_fallback"));
+        assert!(s.contains("null_author_login"));
+    }
+
+    #[test]
+    fn attribution_error_glyph_dedupes_repeated_kinds() {
+        let raw = r#"[{"kind":"github_http_error","detail":"a","observed_at":"t"},
+                       {"kind":"github_http_error","detail":"b","observed_at":"t"}]"#;
+        let s = attribution_error_glyph(Some(raw));
+        assert_eq!(s, "⚠ (github_http_error)");
+    }
+
+    #[test]
+    fn attribution_error_glyph_falls_back_for_garbage() {
+        // Unparseable / non-array → bare glyph still signals.
+        assert_eq!(attribution_error_glyph(Some("not-json")), "⚠");
+    }
+
     fn mk_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -1598,7 +2073,8 @@ mod tests {
              CREATE TABLE pull_requests (id TEXT PRIMARY KEY, pr_number INTEGER,
                 repo_full_name TEXT, title TEXT, url TEXT, author_id TEXT,
                 additions INTEGER, deletions INTEGER, changed_files INTEGER,
-                created_at TEXT, merged INTEGER, merged_at TEXT, body TEXT);
+                created_at TEXT, merged INTEGER, merged_at TEXT, body TEXT,
+                attribution_errors TEXT);
              CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT,
                 PRIMARY KEY (task_id, pr_id));
              CREATE TABLE student_sprint_metrics (student_id TEXT, sprint_id INTEGER,
@@ -1620,6 +2096,20 @@ mod tests {
              CREATE TABLE flags (flag_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 student_id TEXT, sprint_id INTEGER, flag_type TEXT, severity TEXT,
                 details TEXT);
+             CREATE TABLE github_users (login TEXT PRIMARY KEY, name TEXT, email TEXT,
+                student_id TEXT, fetched_at TEXT);
+             CREATE TABLE fingerprints (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT, repo_full_name TEXT, statement_index INTEGER,
+                method_name TEXT, raw_fingerprint TEXT, normalized_fingerprint TEXT,
+                method_fingerprint TEXT, blame_commit TEXT, blame_author_login TEXT,
+                sprint_id INTEGER);
+             CREATE TABLE team_sprint_ownership (project_id INTEGER, sprint_id INTEGER,
+                truck_factor INTEGER, owners_csv TEXT,
+                PRIMARY KEY (project_id, sprint_id));
+             CREATE TABLE architecture_violations (repo_full_name TEXT, sprint_id INTEGER,
+                file_path TEXT, rule_name TEXT, violation_kind TEXT,
+                offending_import TEXT, severity TEXT,
+                PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import));
              CREATE TABLE task_similarity_groups (group_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sprint_id INTEGER, project_id INTEGER, representative_task_id INTEGER,
                 group_label TEXT, stack TEXT, layer TEXT, action TEXT,
@@ -1707,6 +2197,160 @@ mod tests {
     }
 
     #[test]
+    fn truck_factor_humanizes_owner_csv_to_full_names() {
+        let conn = mk_conn();
+        conn.execute_batch(
+            "INSERT INTO students (id, full_name, github_login, team_project_id, email)
+                VALUES ('uuid-bob', 'Bob C', 'bob-gh', 1, 'b@ex.com');
+             INSERT INTO team_sprint_ownership (project_id, sprint_id, truck_factor, owners_csv)
+                VALUES (1, 10, 2, 'u1,uuid-bob');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        // Names + GitHub logins, not raw UUIDs.
+        assert!(
+            body.contains("Alice Bob (alice-gh)"),
+            "missing humanized name for u1 in: {body}",
+        );
+        assert!(body.contains("Bob C (bob-gh)"), "missing humanized name for uuid-bob");
+        assert!(!body.contains("uuid-bob"), "raw student_id leaked into output");
+    }
+
+    #[test]
+    fn code_ownership_section_renders_truck_factor_only() {
+        let conn = mk_conn();
+        // The per-file treemap was removed because realistic file counts make
+        // it unreadable; only the truck-factor headline survives.
+        conn.execute_batch(
+            "INSERT INTO github_users (login, student_id) VALUES ('alice-gh', 'u1');
+             INSERT INTO students (id, full_name, github_login, team_project_id, email)
+                VALUES ('u2', 'Bob C', 'bob-gh', 1, 'b@ex.com');
+             INSERT INTO team_sprint_ownership (project_id, sprint_id, truck_factor, owners_csv)
+                VALUES (1, 10, 2, 'u1,u2');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("### Code ownership"),
+            "missing ownership heading"
+        );
+        assert!(
+            body.contains("Truck factor:** 2"),
+            "missing truck factor line"
+        );
+        assert!(
+            !body.contains("Files (sized by statement count"),
+            "treemap should no longer be rendered",
+        );
+    }
+
+    #[test]
+    fn architecture_section_renders_when_violations_exist() {
+        let conn = mk_conn();
+        conn.execute_batch(
+            "INSERT INTO architecture_violations
+                (repo_full_name, sprint_id, file_path, rule_name,
+                 violation_kind, offending_import, severity)
+             VALUES
+                ('udg/spring-foo', 10, 'A.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING'),
+                ('udg/spring-foo', 10, 'B.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING'),
+                ('udg/spring-foo', 10, 'C.java', 'domain-no-spring-web',
+                 'forbidden_import', 'org.springframework.web.RestController', 'WARNING');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("### Architecture conformance"));
+        assert!(body.contains("**Total violations:** 3"));
+        assert!(body.contains("presentation-&gt;!infrastructure"));
+    }
+
+    #[test]
+    fn per_student_architecture_attribution_matches_on_repo_basename() {
+        // Regression: the architecture stage writes `repo_full_name` as a
+        // bare repo (e.g. `spring-foo`) while fingerprints store `org/repo`
+        // (e.g. `udg-pds/spring-foo`). Attribution must match on basename.
+        let conn = mk_conn();
+        conn.execute_batch(
+            "INSERT INTO github_users (login, student_id) VALUES ('alice-gh', 'u1');
+             INSERT INTO fingerprints (file_path, repo_full_name, statement_index,
+                raw_fingerprint, normalized_fingerprint, blame_author_login, sprint_id)
+                VALUES ('A.java', 'udg-pds/spring-foo', 0, 'r0', 'n0', 'alice-gh', 10),
+                       ('A.java', 'udg-pds/spring-foo', 1, 'r1', 'n1', 'alice-gh', 10);
+             INSERT INTO architecture_violations
+                (repo_full_name, sprint_id, file_path, rule_name,
+                 violation_kind, offending_import, severity)
+             VALUES
+                ('spring-foo', 10, 'A.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("**Architecture violations:** 1 (0 critical · 1 warning · 0 info)"),
+            "violation must be attributed to Alice despite the org-prefix mismatch",
+        );
+    }
+
+    #[test]
+    fn per_student_architecture_block_attributes_to_dominant_owner() {
+        // Two violated files. Alice (`u1`) owns A.java via fingerprints; the
+        // C.java file has no fingerprints so it must stay unattributed and
+        // therefore not show up in Alice's per-student block.
+        let conn = mk_conn();
+        conn.execute_batch(
+            "INSERT INTO github_users (login, student_id) VALUES ('alice-gh', 'u1');
+             INSERT INTO fingerprints (file_path, repo_full_name, statement_index,
+                raw_fingerprint, normalized_fingerprint, blame_author_login, sprint_id)
+                VALUES ('A.java', 'udg/spring-foo', 0, 'r0', 'n0', 'alice-gh', 10),
+                       ('A.java', 'udg/spring-foo', 1, 'r1', 'n1', 'alice-gh', 10);
+             INSERT INTO architecture_violations
+                (repo_full_name, sprint_id, file_path, rule_name,
+                 violation_kind, offending_import, severity)
+             VALUES
+                ('udg/spring-foo', 10, 'A.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING'),
+                ('udg/spring-foo', 10, 'A.java', 'domain-no-spring-web',
+                 'forbidden_import', 'org.springframework.web.RestController', 'CRITICAL'),
+                ('udg/spring-foo', 10, 'C.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repo.OtherRepo', 'WARNING');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        // Section B per-student block under Alice.
+        assert!(
+            body.contains("**Architecture violations:** 2 (1 critical · 1 warning · 0 info)"),
+            "missing per-student arch headline; got: {}",
+            body
+        );
+        assert!(
+            body.contains("- `presentation-&gt;!infrastructure` — 1 file(s)"),
+            "missing rule-grouped breakdown",
+        );
+        assert!(
+            body.contains(
+                "[`A.java`](https://github.com/udg/spring-foo/blob/HEAD/A.java \"A.java\") \
+← `com.x.repo.UserRepo`"
+            ),
+            "missing linked example offending-import line; got body:\n{body}",
+        );
+        // Team-level severity breakdown reflects all three (including the
+        // unattributed one).
+        assert!(body.contains("**Total violations:** 3 (1 critical · 2 warning · 0 info)"));
+    }
+
+    #[test]
     fn md_escape_preserves_pipes_as_backslash() {
         let s = md_escape("a|b\nc");
         assert_eq!(s, "a\\|b c");
@@ -1718,6 +2362,20 @@ mod tests {
         assert_eq!(
             compact_reason_numbers(reason),
             "LS=243.08 vs median=74.39 (z=+4.8); LS/pt=30.2 vs median=12.56 (z=-6)"
+        );
+    }
+
+    #[test]
+    fn cumulative_table_carries_density_and_beta_legend() {
+        let conn = mk_conn();
+        let tmp = TempDir::new().unwrap();
+        let path =
+            generate_markdown_report_ex(&conn, 11, 1, "pds26-1a", tmp.path(), Some(&[10, 11]))
+                .unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("**Density**") && body.contains("**β_u**"),
+            "missing legend explaining Density / β_u columns",
         );
     }
 

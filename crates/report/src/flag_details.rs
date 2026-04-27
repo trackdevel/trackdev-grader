@@ -29,6 +29,12 @@ pub(crate) fn render_flag_details(flag_type: &str, details: Option<&str>) -> Ren
         ("PR_DOES_NOT_COMPILE", Some(v)) => render_pr_reference("Does not compile", v, false),
         ("APPROVED_BROKEN_PR", Some(v)) => render_pr_reference("Approved broken PR", v, false),
         ("LAST_MINUTE_PR", Some(v)) => render_last_minute_pr(v),
+        ("COSMETIC_REWRITE_VICTIM", Some(v)) => render_cosmetic_rewrite_victim(v),
+        ("COSMETIC_REWRITE_ACTOR", Some(v)) => render_cosmetic_rewrite_actor(v),
+        // Legacy rows from pre-T-P1.2 DBs: the single COSMETIC_REWRITE type
+        // was attributed to the original author (victim) but the detail
+        // named the rewriter under "rewriter".
+        ("COSMETIC_REWRITE", Some(v)) => render_cosmetic_rewrite_legacy(v),
         (_, Some(v)) => render_generic(v),
         (_, None) => {
             let text = details.unwrap_or_default().to_string();
@@ -374,6 +380,48 @@ fn deadline_delta(hours_before_deadline: f64) -> String {
     } else {
         format!("{} before the deadline", fmt_hours(hours_before_deadline))
     }
+}
+
+fn render_cosmetic_rewrite_victim(v: &Value) -> RenderedFlagDetails {
+    let actor = string_field(v, "counterpart_user_id").unwrap_or_else(|| "A teammate".into());
+    let stmts = number_field(v, "statements_affected").unwrap_or(0.0);
+    let stmts_label = if (stmts - 1.0).abs() < 0.05 {
+        "1 statement".to_string()
+    } else {
+        format!("{} statements", fmt_num(stmts))
+    };
+    let text = format!(
+        "{actor} cosmetically rewrote {stmts_label} you originally authored. No action needed."
+    );
+    RenderedFlagDetails::new(text.clone(), md_escape(&text), None)
+}
+
+fn render_cosmetic_rewrite_actor(v: &Value) -> RenderedFlagDetails {
+    let victim = string_field(v, "counterpart_user_id").unwrap_or_else(|| "a teammate".into());
+    let stmts = number_field(v, "statements_affected").unwrap_or(0.0);
+    let stmts_label = if (stmts - 1.0).abs() < 0.05 {
+        "1 statement".to_string()
+    } else {
+        format!("{} statements", fmt_num(stmts))
+    };
+    let text = format!(
+        "Cosmetically rewrote {stmts_label} originally authored by {victim}. Avoid churn-only changes."
+    );
+    RenderedFlagDetails::new(text.clone(), md_escape(&text), None)
+}
+
+fn render_cosmetic_rewrite_legacy(v: &Value) -> RenderedFlagDetails {
+    let rewriter = string_field(v, "rewriter").unwrap_or_else(|| "a teammate".into());
+    let stmts = number_field(v, "statements_affected").unwrap_or(0.0);
+    let stmts_label = if (stmts - 1.0).abs() < 0.05 {
+        "1 statement".to_string()
+    } else {
+        format!("{} statements", fmt_num(stmts))
+    };
+    let text = format!(
+        "{rewriter} cosmetically rewrote {stmts_label} originally authored by this student."
+    );
+    RenderedFlagDetails::new(text.clone(), md_escape(&text), None)
 }
 
 fn render_team_inequality(v: &Value) -> RenderedFlagDetails {
@@ -734,8 +782,7 @@ fn fmt_num(v: f64) -> String {
 
 fn md_escape(s: &str) -> String {
     s.replace('|', "\\|")
-        .replace('\n', " ")
-        .replace('\r', " ")
+        .replace(['\n', '\r'], " ")
         .replace('[', "\\[")
         .replace(']', "\\]")
 }

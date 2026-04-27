@@ -12,3 +12,7 @@ CLAUDE.md
 *.swp
 .DS_Store
 *.env
+plan*/
+.gaviero/
+.claude/
+.mcp.json

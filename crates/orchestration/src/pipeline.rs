@@ -158,6 +158,7 @@ fn run_parallel_project_block(
     entregues_dir: &Path,
     sprint_ids: &[i64],
     max_workers: usize,
+    use_llm_pr_docs: bool,
 ) -> Result<Vec<ProjectResult>> {
     let workers = max_workers.max(1).min(sprint_ids.len().max(1));
     info!(
@@ -179,7 +180,9 @@ fn run_parallel_project_block(
         sprint_ids
             .par_iter()
             .copied()
-            .map(|sid| run_project_stage_block(db_path, config, entregues_dir, sid))
+            .map(|sid| {
+                run_project_stage_block(db_path, config, entregues_dir, sid, use_llm_pr_docs)
+            })
             .collect()
     });
 
@@ -198,6 +201,7 @@ fn run_project_stage_block(
     config: &Config,
     entregues_dir: &Path,
     sprint_id: i64,
+    use_llm_pr_docs: bool,
 ) -> ProjectResult {
     let start = Instant::now();
     let mut errors: Vec<(String, String)> = Vec::new();
@@ -238,6 +242,7 @@ fn run_project_stage_block(
             let max_parallel = config.build.max_parallel_builds as usize;
             let stderr_cap = config.build.stderr_max_chars as usize;
             let skip_tested = config.build.skip_already_tested;
+            let mutation_enabled = config.mutation.enabled;
             stage("compile", &mut || {
                 sprint_grader_compile::check_sprint_compilations_parallel(
                     &conn,
@@ -247,6 +252,7 @@ fn run_project_stage_block(
                     max_parallel,
                     stderr_cap,
                     skip_tested,
+                    mutation_enabled,
                 )?;
                 sprint_grader_compile::summarize_compilation(&conn, sid)?;
                 Ok(())
@@ -254,7 +260,14 @@ fn run_project_stage_block(
         }
     }
 
-    // metrics + heuristics + flags + inequality + contribution
+    // Stage order matters: several flag detectors read derived tables.
+    //   team_inequality      reads team_sprint_inequality      (← inequality)
+    //   low_composite_score  reads student_sprint_contribution (← contribution)
+    //   ghost_contributor    reads student_sprint_contribution
+    //   hidden_contributor   reads student_sprint_contribution
+    //   cramming             reads student_sprint_temporal     (← temporal)
+    // On a fresh DB, running `flags` before its writers silently emits zero
+    // flags. Keep inequality + contribution + temporal before flags.
     let cramming_hours = config.thresholds.cramming_hours;
     stage("metrics", &mut || {
         sprint_grader_analyze::metrics::compute_metrics_for_sprint_id(
@@ -266,8 +279,17 @@ fn run_project_stage_block(
     stage("heuristics", &mut || {
         sprint_grader_evaluate::run_heuristics_for_sprint_id(&conn, sprint_id).map(|_| ())
     });
-    stage("flags", &mut || {
-        sprint_grader_analyze::flags::detect_flags_for_sprint_id(&conn, sprint_id, config)
+    stage("llm_eval_pr_docs", &mut || {
+        sprint_grader_evaluate::run_pr_doc_evaluation_for_sprint_id(
+            &conn,
+            sprint_id,
+            config,
+            use_llm_pr_docs,
+        )
+        .map(|_| ())
+    });
+    stage("llm_eval_task_descriptions", &mut || {
+        sprint_grader_evaluate::score_task_descriptions_for_sprint_id(&conn, sprint_id, config)
             .map(|_| ())
     });
     stage("inequality", &mut || {
@@ -276,10 +298,13 @@ fn run_project_stage_block(
     stage("contribution", &mut || {
         sprint_grader_analyze::compute_all_contributions(&conn, sprint_id, None)
     });
-
-    // llm_eval (heuristic path always runs; network path is best-effort)
-    stage("llm_eval_task_descriptions", &mut || {
-        sprint_grader_evaluate::score_task_descriptions_for_sprint_id(&conn, sprint_id, config)
+    // temporal must run before `flags`: the cramming detector reads
+    // student_sprint_temporal (per-author timing), populated here.
+    stage("temporal", &mut || {
+        sprint_grader_process::compute_all_temporal(&conn, sprint_id)
+    });
+    stage("flags", &mut || {
+        sprint_grader_analyze::flags::detect_flags_for_sprint_id(&conn, sprint_id, config)
             .map(|_| ())
     });
 
@@ -297,9 +322,6 @@ fn run_project_stage_block(
     });
     stage("regularity", &mut || {
         sprint_grader_process::compute_all_regularity(&conn, sprint_id, &config.regularity)
-    });
-    stage("temporal", &mut || {
-        sprint_grader_process::compute_all_temporal(&conn, sprint_id)
     });
     stage("collaboration", &mut || {
         sprint_grader_process::compute_all_collaboration(&conn, sprint_id)
@@ -321,6 +343,11 @@ fn run_project_stage_block(
             &config.repo_analysis,
         )
         .map(|_| ())
+    });
+    // Ownership snapshot (T-P2.3): truck factor + per-file dominant author.
+    // Reads `fingerprints`, so depends on survival having populated them.
+    stage("ownership", &mut || {
+        sprint_grader_repo_analysis::compute_team_ownership(&conn, sprint_id).map(|_| ())
     });
 
     ProjectResult {
@@ -348,7 +375,7 @@ fn run_ai_detection_block(
     };
     let fusion_cfg = sprint_grader_ai_detect::fusion::FusionConfig::default();
     for entry in repo_dirs.flatten() {
-        if !entry.file_type().map_or(false, |t| t.is_dir()) {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let repo_path = entry.path();
@@ -438,16 +465,21 @@ pub fn rerun_post_collection_for_sprint_ids(
     // its inner `sprint_id_for_project(ord)` lookup hits the same sprint.
     for sid in sprint_ids {
         let ord = sprint_grader_survival::survival::ordinal_for_sprint_id(&db, *sid).unwrap_or(1);
-        if let Err(e) =
-            sprint_grader_survival::survival::compute_survival(&db, ord, data_dir, Some(vec![*sid]))
-        {
+        if let Err(e) = sprint_grader_survival::survival::compute_survival(
+            &db,
+            ord,
+            data_dir,
+            Some(vec![*sid]),
+            config.detector_thresholds.cosmetic_rewrite_pct_of_lat,
+        ) {
             warn!(sprint_id = sid, error = %e, "survival failed");
         }
     }
     drop(db);
 
     let workers = max_workers.unwrap_or(sprint_ids.len());
-    let results = run_parallel_project_block(db_path, config, entregues_dir, sprint_ids, workers)?;
+    let results =
+        run_parallel_project_block(db_path, config, entregues_dir, sprint_ids, workers, true)?;
     for r in &results {
         if !r.stage_errors.is_empty() {
             let failed: Vec<&str> = r.stage_errors.iter().map(|(k, _)| k.as_str()).collect();
@@ -462,7 +494,8 @@ pub fn rerun_post_collection_for_sprint_ids(
 
     let db = Database::open(db_path).context("reopening grading DB")?;
     db.create_tables().context("schema migration")?;
-    sprint_grader_analyze::compute_all_trajectories(&db.conn).context("trajectory failed")?;
+    sprint_grader_analyze::compute_all_trajectories(&db.conn, &config.detector_thresholds)
+        .context("trajectory failed")?;
     Ok(())
 }
 
@@ -483,6 +516,18 @@ pub fn run_pipeline(
     let db = Database::open(db_path).context("opening grading DB")?;
     db.create_tables().context("schema migration")?;
 
+    // T-P2.6: jitter the detector thresholds (seeded by today + course_id)
+    // when `[grading] hidden_thresholds = true`. The audit row always
+    // lands so re-runs can be cross-referenced even with jitter disabled.
+    let mut config = config.clone();
+    let course_id = config.course_id;
+    let jitter_record =
+        sprint_grader_core::jitter::apply_threshold_jitter(&mut config, &opts.today, course_id);
+    if let Err(e) = sprint_grader_core::jitter::record_pipeline_run(&db.conn, &jitter_record) {
+        warn!(error = %e, "could not write pipeline_run row (non-fatal)");
+    }
+    let config = &config;
+
     // Stage 0: purge existing (go / go-quick only)
     if variant.purge_existing() {
         if let Some(names) = &opts.project_filter {
@@ -502,7 +547,7 @@ pub fn run_pipeline(
                     projects = ?names,
                     "purging existing project data before collection"
                 );
-                crate::purge::purge_projects(&db.conn, &project_ids)
+                crate::purge::purge_projects(&db.conn, &project_ids, false)
                     .context("purge_projects failed")?;
             }
         }
@@ -531,6 +576,17 @@ pub fn run_pipeline(
         clone_repos_from_db(&db, &opts.entregues_dir)?;
     }
 
+    // T-P2.1: per-student estimation-bias fitter. Pools every estimated
+    // task across every sprint of each project (Bayesian posterior wants
+    // all the data). Runs *before* the per-sprint flag detection inside
+    // the parallel block so `student_estimation_bias` is populated when
+    // the ESTIMATION_BIAS detector queries it on the same run. The fit
+    // depends only on `tasks` + `sprints`, both populated by `collect`.
+    match sprint_grader_estimation::fit_and_persist_for_all_projects(&db.conn) {
+        Ok(n) => info!(students_written = n, "estimation bias fitting done"),
+        Err(e) => warn!(error = %e, "estimation bias fitting failed"),
+    }
+
     // Resolve sprint groupings after collection.
     let groups = resolve_all_sprint_tuples(&db, &opts.today, opts.project_filter.as_deref())?;
     if groups.is_empty() {
@@ -547,9 +603,13 @@ pub fn run_pipeline(
     let data_dir = opts.entregues_dir.parent().unwrap_or(&opts.entregues_dir);
     for sid in &flat_sprint_ids {
         let ord = sprint_grader_survival::survival::ordinal_for_sprint_id(&db, *sid).unwrap_or(1);
-        if let Err(e) =
-            sprint_grader_survival::survival::compute_survival(&db, ord, data_dir, Some(vec![*sid]))
-        {
+        if let Err(e) = sprint_grader_survival::survival::compute_survival(
+            &db,
+            ord,
+            data_dir,
+            Some(vec![*sid]),
+            config.detector_thresholds.cosmetic_rewrite_pct_of_lat,
+        ) {
             if variant.ai_detection() {
                 warn!(sprint_id = sid, error = %e, "survival failed (tolerant in go/go-quick)");
             } else {
@@ -576,6 +636,7 @@ pub fn run_pipeline(
         &opts.entregues_dir,
         &flat_sprint_ids,
         max_workers,
+        !matches!(variant, PipelineVariant::GoQuick),
     )?;
     for r in &results {
         if r.stage_errors.is_empty() {
@@ -598,6 +659,158 @@ pub fn run_pipeline(
 
     // Re-open the master DB for the tail (AI detection + trajectory + reports).
     let db = Database::open(db_path).context("reopening grading DB")?;
+
+    // T-P2.5: auto-freeze the curriculum for any sprint whose end_date has
+    // passed. The freeze is idempotent so running this on every pipeline
+    // invocation is safe — already-frozen sprints become no-ops.
+    if config.curriculum_freeze_after_sprint_end {
+        for sid in &flat_sprint_ids {
+            let end_date: Option<String> = db
+                .conn
+                .query_row("SELECT end_date FROM sprints WHERE id = ?", [*sid], |r| {
+                    r.get::<_, Option<String>>(0)
+                })
+                .ok()
+                .flatten();
+            if let Some(end_date) = end_date {
+                if end_date.as_str() < opts.today.as_str() {
+                    let ord = sprint_grader_survival::survival::ordinal_for_sprint_id(&db, *sid)
+                        .unwrap_or(1) as i64;
+                    if let Err(e) =
+                        sprint_grader_curriculum::freeze_curriculum_for_sprint(&db.conn, *sid, ord)
+                    {
+                        warn!(sprint_id = sid, error = %e, "curriculum freeze failed");
+                    }
+                }
+            }
+        }
+    }
+
+    // T-P2.2: architecture conformance scan. Runs on every variant
+    // (not gated by ai_detection) — it's a deterministic scan of the
+    // already-cloned repos, not an LLM call. Skips silently when
+    // `architecture.toml` is absent or the project dir doesn't exist.
+    let arch_rules_path = opts.config_dir.join("architecture.toml");
+    if arch_rules_path.is_file() {
+        match sprint_grader_architecture::ArchitectureRules::load(&arch_rules_path) {
+            Ok(arch_rules) => {
+                for g in &groups {
+                    let project_root = opts.entregues_dir.join(&g.name);
+                    for sid in &g.sprint_ids {
+                        if let Err(e) = sprint_grader_architecture::scan_project_to_db(
+                            &db.conn,
+                            &project_root,
+                            *sid,
+                            &arch_rules,
+                        ) {
+                            warn!(project = %g.name, sprint_id = sid, error = %e, "architecture scan failed");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, path = %arch_rules_path.display(), "architecture rules load failed")
+            }
+        }
+    } else {
+        info!(
+            path = %arch_rules_path.display(),
+            "architecture.toml absent — skipping architecture scan"
+        );
+    }
+
+    // T-P3.3: LLM-judged architecture review. Gated by config flag and
+    // by `ANTHROPIC_API_KEY` presence — both must be true for any API
+    // calls to fire. Mirrors the `evaluate` crate's silent-fallback
+    // contract; missing key → skip silently, never hard-fail.
+    if config.architecture.llm_review {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            info!(
+                "[architecture] llm_review = true but ANTHROPIC_API_KEY is empty — skipping LLM review"
+            );
+        } else {
+            let rubric_path = opts.config_dir.join(&config.architecture.rubric_path);
+            match sprint_grader_architecture::rubric::load(&rubric_path) {
+                Ok(rubric) => match sprint_grader_architecture_llm::LlmJudge::new(
+                    &api_key,
+                    config.architecture.model_id.clone(),
+                    config.architecture.max_tokens,
+                ) {
+                    Ok(judge) => {
+                        for g in &groups {
+                            let project_root = opts.entregues_dir.join(&g.name);
+                            for sid in &g.sprint_ids {
+                                let entries = match std::fs::read_dir(&project_root) {
+                                    Ok(e) => e,
+                                    Err(_) => continue,
+                                };
+                                for entry in entries.flatten() {
+                                    if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                                        continue;
+                                    }
+                                    let repo_path = entry.path();
+                                    let repo_full_name =
+                                        entry.file_name().to_string_lossy().into_owned();
+                                    let stack = if repo_full_name.starts_with("android-") {
+                                        "android"
+                                    } else {
+                                        "spring"
+                                    };
+                                    if let Err(e) =
+                                        sprint_grader_architecture_llm::run_llm_review_for_repo(
+                                            &db.conn,
+                                            &repo_path,
+                                            &repo_full_name,
+                                            *sid,
+                                            &rubric,
+                                            stack,
+                                            &judge,
+                                            &config.architecture.llm_skip_globs,
+                                        )
+                                    {
+                                        warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "LLM architecture review failed");
+                                    }
+                                }
+                            }
+                        }
+                        // Architecture stage wrote new violation rows; re-run
+                        // attribution per (repo, sprint) so the LLM rows pick
+                        // up blame weights too.
+                        for g in &groups {
+                            let project_root = opts.entregues_dir.join(&g.name);
+                            let entries = match std::fs::read_dir(&project_root) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+                            for entry in entries.flatten() {
+                                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                                    continue;
+                                }
+                                let repo_path = entry.path();
+                                let repo_full_name =
+                                    entry.file_name().to_string_lossy().into_owned();
+                                for sid in &g.sprint_ids {
+                                    if let Err(e) =
+                                        sprint_grader_architecture::attribute_violations_for_repo(
+                                            &db.conn,
+                                            &repo_path,
+                                            &repo_full_name,
+                                            *sid,
+                                        )
+                                    {
+                                        warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "post-LLM attribution failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "could not construct Anthropic client; skipping LLM review"),
+                },
+                Err(e) => warn!(error = %e, path = %rubric_path.display(), "rubric load failed; skipping LLM review"),
+            }
+        }
+    }
 
     // Stage 4: AI detection (go / go-quick) — per (project, sprint).
     if variant.ai_detection() {
@@ -625,7 +838,8 @@ pub fn run_pipeline(
         total = total_stages,
         "trajectory aggregation"
     );
-    sprint_grader_analyze::compute_all_trajectories(&db.conn).context("trajectory failed")?;
+    sprint_grader_analyze::compute_all_trajectories(&db.conn, &config.detector_thresholds)
+        .context("trajectory failed")?;
 
     // Stage 6: reports
     if opts.skip_reports {

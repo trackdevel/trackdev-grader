@@ -18,6 +18,8 @@ pub enum ConditionalResult<T> {
     Fresh { value: T, etag: Option<String> },
 }
 
+type PageResponse = (Value, Option<String>, Option<String>);
+
 const GITHUB_API: &str = "https://api.github.com";
 const MAX_RETRIES: u32 = 3;
 const BACKOFF_BASE_SECS: u64 = 2;
@@ -157,7 +159,7 @@ impl GitHubClient {
         &self,
         url: &str,
         if_none_match: Option<&str>,
-    ) -> Result<Option<(Value, Option<String>, Option<String>)>, GitHubClientError> {
+    ) -> Result<Option<PageResponse>, GitHubClientError> {
         let mut last_err: Option<reqwest::Error> = None;
 
         for attempt in 0..MAX_RETRIES {

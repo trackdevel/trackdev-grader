@@ -6,6 +6,15 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 use tracing::info;
 
+type PrHeuristicRow = (
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 // Patterns that indicate a generic, low-effort PR title.
 // Uses RegexSet so one pass over the title tests them all; each pattern is
 // anchored and carries `(?i)` where the Python used re.IGNORECASE.
@@ -69,14 +78,7 @@ pub fn run_heuristics_for_sprint_id(
          JOIN tasks t ON t.id = tpr.task_id
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY'",
     )?;
-    let rows: Vec<(
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<PrHeuristicRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,

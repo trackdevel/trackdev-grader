@@ -23,6 +23,12 @@ use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Url, Workbook, W
 use serde_json::Value;
 use tracing::info;
 
+type StudentMetricsRow = (f64, f64, f64, i64, i64, i64, Option<f64>, Option<String>);
+type SurvivalRow = (i64, i64, f64, i64, i64, f64, i64, i64, f64);
+type PrDocRow = (Option<f64>, Option<f64>, Option<f64>, Option<String>);
+type FlagRow = (String, String, String, Option<String>, Option<String>);
+type EstimationRow = (Option<String>, Option<f64>, Option<i64>, Option<f64>);
+
 use crate::flag_details::{enrich_flag_details, render_flag_details, render_flag_severity};
 
 const TEMPORAL_TIERS: &[&str] = &["Regular", "Late", "Critical", "Fix"];
@@ -255,7 +261,7 @@ fn write_members_sheet(
     for (idx, (sid, full_name, github)) in students.iter().enumerate() {
         let row = (idx + 1) as u32;
 
-        let metrics: Option<(f64, f64, f64, i64, i64, i64, Option<f64>, Option<String>)> = conn
+        let metrics: Option<StudentMetricsRow> = conn
             .query_row(
                 "SELECT points_delivered, points_share, weighted_pr_lines,
                         commit_count, files_touched, reviews_given,
@@ -277,7 +283,7 @@ fn write_members_sheet(
             )
             .ok();
 
-        let survival: Option<(i64, i64, f64, i64, i64, f64, i64, i64, f64)> = conn
+        let survival: Option<SurvivalRow> = conn
             .query_row(
                 "SELECT total_stmts_raw, surviving_stmts_raw, survival_rate_raw,
                         total_stmts_normalized, surviving_stmts_normalized,
@@ -307,7 +313,10 @@ fn write_members_sheet(
             &[sid, &sprint_id],
         );
 
-        // Parse temporal_spread JSON
+        // Parse task-keyed temporal_spread JSON. Buckets are keyed on
+        // task.assignee_id, so a teammate's commits on this row's tasks count
+        // here. For per-author timing the source of truth is
+        // student_sprint_temporal.
         let spread: Value = metrics
             .as_ref()
             .and_then(|m| m.7.as_deref())
@@ -579,7 +588,7 @@ fn write_prs_sheet(
             )
             .ok();
 
-        let doc: Option<(Option<f64>, Option<f64>, Option<f64>, Option<String>)> = conn
+        let doc: Option<PrDocRow> = conn
             .query_row(
                 "SELECT title_score, description_score, total_doc_score, justification
                  FROM pr_doc_evaluation WHERE pr_id = ? AND sprint_id = ?",
@@ -726,7 +735,7 @@ fn write_flags_sheet(
     };
     let mut stmt = conn.prepare(sql)?;
 
-    let rows: Vec<(String, String, String, Option<String>, Option<String>)> = match project_id {
+    let rows: Vec<FlagRow> = match project_id {
         Some(pid) => stmt
             .query_map(rusqlite::params![sprint_id, pid], |r| {
                 Ok((
@@ -834,7 +843,7 @@ fn write_estimation_quality_sheet(
          WHERE sss.sprint_id = ? AND s.team_project_id = ?
          ORDER BY s.full_name",
     )?;
-    let rows: Vec<(Option<String>, Option<f64>, Option<i64>, Option<f64>)> = stmt
+    let rows: Vec<EstimationRow> = stmt
         .query_map(rusqlite::params![sprint_id, project_id], |r| {
             Ok((
                 r.get::<_, Option<String>>(0)?,
@@ -1323,7 +1332,7 @@ pub fn generate_summary_report(
                 ws.write_string(next_row, 4, method.as_deref().unwrap_or(""))
                     .map_err(to_rusqlite)?;
                 let fp_short: String = fingerprint.chars().take(16).collect();
-                ws.write_string(next_row, 5, &format!("{}...", fp_short))
+                ws.write_string(next_row, 5, format!("{}...", fp_short))
                     .map_err(to_rusqlite)?;
                 next_row += 1;
             }

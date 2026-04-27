@@ -85,6 +85,19 @@ CREATE TABLE IF NOT EXISTS pr_commits (
     deletions INTEGER
 );
 
+-- Pre-squash author capture (T-P1.4). When `/pulls/{n}/commits` returns the
+-- per-commit history of a merged PR, we shadow it here so AUTHOR_MISMATCH
+-- still works after a future force-push deletes the head ref. This table is
+-- supplementary to pr_commits, never a replacement.
+CREATE TABLE IF NOT EXISTS pr_pre_squash_authors (
+    pr_id        TEXT NOT NULL,
+    sha          TEXT NOT NULL,
+    author_login TEXT,
+    author_email TEXT,
+    captured_at  TEXT,
+    PRIMARY KEY (pr_id, sha)
+);
+
 CREATE TABLE IF NOT EXISTS pr_reviews (
     pr_id TEXT,
     reviewer_login TEXT,
@@ -162,7 +175,7 @@ CREATE TABLE IF NOT EXISTS student_sprint_metrics (
     commit_count INTEGER,
     files_touched INTEGER,
     reviews_given INTEGER,
-    temporal_spread TEXT,
+    temporal_spread TEXT, -- task-assignee-keyed JSON; for per-AUTHOR timing see student_sprint_temporal
     avg_doc_score REAL
 );
 
@@ -471,6 +484,20 @@ CREATE TABLE IF NOT EXISTS curriculum_concepts (
     UNIQUE(category, value)
 );
 
+-- Per-sprint frozen view of `curriculum_concepts` (T-P2.5). Once a sprint
+-- ends, instructors freeze the curriculum-as-taught into this snapshot so
+-- editing a future sprint's slide deck cannot silently re-grade past sprints.
+-- Rows for a given `sprint_id` are written once and treated as immutable;
+-- `freeze_curriculum_for_sprint` is a no-op on subsequent calls.
+CREATE TABLE IF NOT EXISTS curriculum_concepts_snapshot (
+    sprint_id     INTEGER NOT NULL,
+    category      TEXT NOT NULL,
+    value         TEXT NOT NULL,
+    source_file   TEXT,
+    sprint_taught INTEGER,
+    PRIMARY KEY (sprint_id, category, value)
+);
+
 CREATE TABLE IF NOT EXISTS curriculum_violations (
     file_path       TEXT NOT NULL,
     repo_name       TEXT NOT NULL,
@@ -686,6 +713,139 @@ CREATE INDEX IF NOT EXISTS idx_task_pull_requests_pr_id
     ON task_pull_requests(pr_id);
 CREATE INDEX IF NOT EXISTS idx_pr_line_metrics_merge_sha
     ON pr_line_metrics(pr_id, merge_sha);
+
+-- One row per `run_pipeline` invocation (T-P2.6). When `[grading]
+-- hidden_thresholds = true` the threshold values used by detectors are
+-- jittered ±jitter_pct from their published defaults, seeded by
+-- (today, course_id) so the same `--today` reproduces. `thresholds_json`
+-- is the realised value map for forensic comparison; reports show the
+-- published threshold + a `±N%` notation, never the realised value.
+CREATE TABLE IF NOT EXISTS pipeline_run (
+    run_id          TEXT PRIMARY KEY,
+    today           TEXT NOT NULL,
+    course_id       INTEGER NOT NULL,
+    jitter_pct      REAL,
+    seed            INTEGER NOT NULL,
+    thresholds_json TEXT,
+    created_at      TEXT NOT NULL
+);
+
+-- Architecture conformance violations (T-P2.2). One row per
+-- (file, rule, offending import) so a single layer-leak in a controller
+-- importing a repository doesn't get aggregated away. `violation_kind`
+-- is one of `layer_dependency` (a layered rule was broken) or
+-- `forbidden_import` (a category-level prohibition fired). `rule_name`
+-- is the rule label from `architecture.toml` for cross-referencing.
+CREATE TABLE IF NOT EXISTS architecture_violations (
+    repo_full_name   TEXT NOT NULL,
+    sprint_id        INTEGER NOT NULL,
+    file_path        TEXT NOT NULL,
+    rule_name        TEXT NOT NULL,
+    violation_kind   TEXT NOT NULL,
+    offending_import TEXT NOT NULL,
+    severity         TEXT NOT NULL,
+    -- T-P3.1 additions: line range so attribution can blame the offending
+    -- code, not the whole file. NULL on rows produced before T-P3.1.
+    start_line       INTEGER,
+    end_line         INTEGER,
+    -- "package_glob" / "forbidden_import" / "ast_*" / "llm". NULL on legacy rows.
+    rule_kind        TEXT,
+    -- Reserved for T-P3.3: hash of the rubric/rule body that produced this row,
+    -- so a rubric edit invalidates cached LLM judgements. NULL on AST/glob rows.
+    rule_version     TEXT,
+    -- Free-form explanation; primarily populated for LLM-judged rows.
+    explanation      TEXT,
+    PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import)
+);
+
+-- Per-student attribution of `architecture_violations` rows (T-P3.1).
+-- Computed by running `git blame -w --ignore-revs-file` over the violation's
+-- (file, start_line..end_line) and tallying lines per student. `weight` is
+-- `lines_authored / total_lines` in [0, 1] so the per-student WARNING
+-- magnitude scales with how much of the offending code each student actually
+-- wrote — a 1-line typo fix on a 30-line bad method gets ~3 % weight.
+-- The join key is the parent row's implicit `rowid`; pre-existing
+-- attribution for a given (repo, sprint) is deleted when the architecture
+-- scan re-runs, mirroring the violation-table idempotency idiom.
+CREATE TABLE IF NOT EXISTS architecture_violation_attribution (
+    violation_rowid INTEGER NOT NULL,
+    student_id      TEXT NOT NULL,
+    lines_authored  INTEGER NOT NULL,
+    total_lines     INTEGER NOT NULL,
+    weight          REAL NOT NULL,
+    sprint_id       INTEGER NOT NULL,
+    PRIMARY KEY (violation_rowid, student_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_arch_attr_sprint
+    ON architecture_violation_attribution(sprint_id);
+
+-- LLM-judged architecture cache (T-P3.3). Keyed by `(file_sha,
+-- rubric_version, model_id)` so the cache invalidates when the file
+-- content changes, when the rubric edits change the version field or
+-- the body hash, or when the model id changes. The cache stores the
+-- model's raw `response_json` (already schema-validated at insert
+-- time) so re-runs reproduce byte-identical `architecture_violations`
+-- rows from the cached response without needing to re-call the API.
+-- `evaluated_at` is ISO-8601 UTC; useful for forensic comparison and
+-- the optional `architecture-rubric --show-cache-stats` subcommand.
+CREATE TABLE IF NOT EXISTS architecture_llm_cache (
+    file_sha       TEXT NOT NULL,
+    rubric_version TEXT NOT NULL,
+    model_id       TEXT NOT NULL,
+    response_json  TEXT NOT NULL,
+    evaluated_at   TEXT NOT NULL,
+    PRIMARY KEY (file_sha, rubric_version, model_id)
+);
+
+-- Per-team ownership snapshot (T-P2.3). `truck_factor` is the smallest k
+-- such that the top-k authors jointly own >=95% of statements attributed in
+-- the project's fingerprints for this sprint. `owners_csv` lists those k
+-- student_ids in descending share order. Both columns are NULL when the
+-- project has no fingerprints yet (compile/survival did not produce data).
+CREATE TABLE IF NOT EXISTS team_sprint_ownership (
+    project_id   INTEGER NOT NULL,
+    sprint_id    INTEGER NOT NULL,
+    truck_factor INTEGER,
+    owners_csv   TEXT,
+    PRIMARY KEY (project_id, sprint_id)
+);
+
+-- Per-PR mutation-testing summary (T-P2.4). Populated by the
+-- `compile_stage` builder when the matching `BuildProfile` sets
+-- `mutation_command` (typically `./gradlew pitest --info` for the
+-- Pitest Gradle plugin in `scmMutationCoverage` mode). One row per
+-- (PR, repo); subsequent runs `INSERT OR REPLACE`. `mutation_score`
+-- is `(killed + timed_out) / (total − non_viable)` in `[0, 1]` —
+-- non-viable mutants don't compile so they're excluded from the
+-- denominator. `duration_seconds` measures the mutation run only,
+-- not the primary build.
+CREATE TABLE IF NOT EXISTS pr_mutation (
+    pr_id            TEXT NOT NULL,
+    repo_name        TEXT NOT NULL,
+    sprint_id        INTEGER,
+    mutants_total    INTEGER,
+    mutants_killed   INTEGER,
+    mutation_score   REAL,
+    duration_seconds REAL,
+    PRIMARY KEY (pr_id, repo_name)
+);
+
+-- Per-student estimation-bias posterior (T-P2.1). Fitted by the
+-- `estimation` crate via a Rasch-style additive model
+-- log(estimation_points) = β_u + δ_i + ε with N(0,1) priors. β > 0 means
+-- this student's estimates run high (over-estimate); β < 0 means under.
+-- The 95% credible interval is Gaussian (posterior mean ± 1.96·σ_post).
+CREATE TABLE IF NOT EXISTS student_estimation_bias (
+    student_id   TEXT NOT NULL,
+    project_id   INTEGER NOT NULL,
+    beta_mean    REAL,
+    beta_lower95 REAL,
+    beta_upper95 REAL,
+    n_tasks      INTEGER,
+    fitted_at    TEXT,
+    PRIMARY KEY (student_id, project_id)
+);
 
 CREATE TABLE IF NOT EXISTS student_sprint_ai_usage (
     student_id              TEXT NOT NULL,

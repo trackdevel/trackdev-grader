@@ -14,11 +14,14 @@ use sprint_grader_core::Database;
 use sprint_grader_survival::diff_lines::compute_metrics_for_pr;
 use tracing::warn;
 
+type PrLineMetricsRow = (String, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
+
 pub fn debug_pr_lines(
     db: &Database,
     data_dir: &Path,
     sprint_ids: &[i64],
     project_names: &[(i64, String)],
+    cosmetic_pct_of_lat: f64,
 ) -> Result<()> {
     let repo_map = sprint_grader_survival::survival::discover_repos(data_dir, db)?;
 
@@ -34,7 +37,7 @@ pub fn debug_pr_lines(
         let mut stmt = db.conn.prepare(
             "SELECT pr_id, lat, lar, ls, cosmetic_lines FROM pr_line_metrics WHERE sprint_id = ?",
         )?;
-        let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = stmt
+        let rows: Vec<PrLineMetricsRow> = stmt
             .query_map([sid], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -146,6 +149,7 @@ pub fn debug_pr_lines(
                 &default_branch,
                 &repo_full,
                 None,
+                cosmetic_pct_of_lat,
             ) {
                 None => println!("    RESULT: None (git commands failed)"),
                 Some(m) => {

@@ -30,6 +30,11 @@ pub struct BuildProfileRe {
     pub timeout_seconds: u64,
     pub working_dir: String,
     pub env: HashMap<String, String>,
+    /// T-P2.4: mutation-testing command (typically `./gradlew pitest`).
+    /// `None` skips mutation for matching PRs silently.
+    pub mutation_command: Option<String>,
+    pub mutation_timeout_seconds: u64,
+    pub mutation_report_path: String,
 }
 
 pub fn load_build_profiles_from_config(
@@ -48,6 +53,9 @@ pub fn load_build_profiles_from_config(
             timeout_seconds: p.timeout_seconds,
             working_dir: p.working_dir.clone(),
             env: p.env.clone(),
+            mutation_command: p.mutation_command.clone(),
+            mutation_timeout_seconds: p.mutation_timeout_seconds,
+            mutation_report_path: p.mutation_report_path.clone(),
         });
     }
     Ok(out)
@@ -215,6 +223,104 @@ pub fn run_build(
     }
 }
 
+/// Result of a Pitest run scoped to a single PR's worktree.
+#[derive(Debug, Clone, Default)]
+pub struct MutationResult {
+    pub mutants_total: u64,
+    pub mutants_killed: u64,
+    pub mutation_score: Option<f64>,
+    pub duration_seconds: f64,
+    pub timed_out: bool,
+}
+
+/// Run the profile's `mutation_command` inside `repo_path /
+/// working_dir`, then read & parse the Pitest XML at
+/// `repo_path / working_dir / mutation_report_path`. Skips silently
+/// (returns `None`) when the profile has no `mutation_command`.
+///
+/// Pitest's own runner is parallel at the JVM level; we don't add a
+/// second layer. The hard process-kill timeout uses
+/// `mutation_timeout_seconds` (default 600s, an order of magnitude
+/// larger than `timeout_seconds`).
+pub fn run_mutation(repo_path: &Path, profile: &BuildProfileRe) -> Option<MutationResult> {
+    let cmd_str = profile.mutation_command.as_ref()?;
+    let cwd = repo_path.join(&profile.working_dir);
+
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c")
+        .arg(cmd_str)
+        .current_dir(&cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in &profile.env {
+        cmd.env(k, v);
+    }
+
+    let start = Instant::now();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "failed to spawn mutation command");
+            return Some(MutationResult {
+                duration_seconds: 0.0,
+                ..MutationResult::default()
+            });
+        }
+    };
+
+    let timeout = Duration::from_secs(profile.mutation_timeout_seconds);
+    let timed_out = match child.wait_timeout(timeout) {
+        Ok(Some(_status)) => false,
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            true
+        }
+        Err(e) => {
+            warn!(error = %e, "wait_timeout error during mutation run");
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let _ = child.wait_with_output();
+    let duration = (start.elapsed().as_secs_f64() * 100.0).round() / 100.0;
+
+    if timed_out {
+        info!(secs = duration, "mutation run timed out");
+        return Some(MutationResult {
+            duration_seconds: duration,
+            timed_out: true,
+            ..MutationResult::default()
+        });
+    }
+
+    let report = cwd.join(&profile.mutation_report_path);
+    if !report.exists() {
+        warn!(path = %report.display(), "Pitest report not found after run");
+        return Some(MutationResult {
+            duration_seconds: duration,
+            ..MutationResult::default()
+        });
+    }
+    match crate::pitest::parse_pitest_xml(&report) {
+        Ok(s) => Some(MutationResult {
+            mutants_total: s.mutants_total,
+            mutants_killed: s.mutants_killed,
+            mutation_score: s.score(),
+            duration_seconds: duration,
+            timed_out: false,
+        }),
+        Err(e) => {
+            warn!(path = %report.display(), error = %e, "Pitest XML read failed");
+            Some(MutationResult {
+                duration_seconds: duration,
+                ..MutationResult::default()
+            })
+        }
+    }
+}
+
 // ---- Worktree helpers ----
 
 fn have_ref(repo_path: &Path, sha: &str) -> bool {
@@ -280,6 +386,17 @@ impl Drop for WorktreeGuard {
             ])
             .output();
     }
+}
+
+/// Combined per-PR worktree result: the primary build plus, when the
+/// build passed and the profile has a `mutation_command`, the Pitest
+/// summary. `mutation` is `None` when mutation testing was skipped
+/// (build failed, or `mutation_command` is unset, or
+/// `mutation_enabled` was false at the call site).
+#[derive(Debug, Clone)]
+pub struct PrBuildOutput {
+    pub build: BuildResult,
+    pub mutation: Option<MutationResult>,
 }
 
 /// Compile a PR in an isolated worktree. Returns `None` for infrastructure
@@ -352,6 +469,87 @@ pub fn compile_pr_in_worktree(
     Some(result)
 }
 
+/// Same as [`compile_pr_in_worktree`] but, on a successful primary
+/// build, also runs the profile's `mutation_command` inside the same
+/// worktree. Mutation is skipped when:
+/// * the global `mutation_enabled` flag is false, or
+/// * the profile has no `mutation_command`, or
+/// * the primary build failed.
+///
+/// Sharing the worktree means the mutation tool sees the same compiled
+/// output the primary build produced (Pitest reads `build/classes`),
+/// avoiding an expensive recompile.
+pub fn compile_and_mutate_pr_in_worktree(
+    repo_path: &Path,
+    merge_sha: &str,
+    profile: &BuildProfileRe,
+    pr_id: &str,
+    max_output_chars: usize,
+    mutation_enabled: bool,
+) -> Option<PrBuildOutput> {
+    if !ensure_ref_available(repo_path, merge_sha) {
+        warn!(pr_id, sha = %&merge_sha[..12.min(merge_sha.len())],
+              "ref not available after fetch — skipping");
+        return None;
+    }
+
+    let prefix = format!("compile_{}_", &pr_id[..8.min(pr_id.len())]);
+    let tempdir = match tempfile::Builder::new().prefix(&prefix).tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(pr_id, error = %e, "tempdir creation failed");
+            return None;
+        }
+    };
+    let worktree_path = tempdir.path().to_path_buf();
+
+    let add = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_str().unwrap_or("."),
+            "worktree",
+            "add",
+            worktree_path.to_str().unwrap_or_default(),
+            merge_sha,
+            "--detach",
+        ])
+        .output();
+    match add {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            warn!(pr_id, stderr = %stderr, "worktree setup failed");
+            return None;
+        }
+        Err(e) => {
+            warn!(pr_id, error = %e, "git worktree add failed");
+            return None;
+        }
+    }
+
+    let _guard = WorktreeGuard {
+        repo: repo_path.to_path_buf(),
+        path: worktree_path.clone(),
+    };
+
+    let gradlew = worktree_path.join("gradlew");
+    if gradlew.exists() {
+        ensure_executable(&gradlew);
+    }
+
+    let build = run_build(&worktree_path, profile, max_output_chars);
+    let mutation = if mutation_enabled && build.compiles && profile.mutation_command.is_some() {
+        run_mutation(&worktree_path, profile)
+    } else {
+        None
+    };
+
+    drop(_guard);
+    drop(tempdir);
+
+    Some(PrBuildOutput { build, mutation })
+}
+
 // ---- Sprint-level driver ----
 
 #[derive(Debug, Clone)]
@@ -421,6 +619,7 @@ fn get_reviewer_ids(conn: &Connection, pr_id: &str) -> Vec<String> {
 
 /// Parallel sprint compilation with worktrees. Mirrors
 /// `check_sprint_compilations_parallel` in the Python reference.
+#[allow(clippy::too_many_arguments)]
 pub fn check_sprint_compilations_parallel(
     conn: &Connection,
     sprint_id: i64,
@@ -429,6 +628,7 @@ pub fn check_sprint_compilations_parallel(
     max_workers: usize,
     stderr_max_chars: usize,
     skip_tested: bool,
+    mutation_enabled: bool,
 ) -> rusqlite::Result<CompileSummary> {
     let mut prs: Vec<(String, String)> = Vec::new();
     {
@@ -579,15 +779,16 @@ pub fn check_sprint_compilations_parallel(
         .expect("rayon pool");
 
     use rayon::prelude::*;
-    let results: Vec<(PrBuildJob, Option<BuildResult>)> = pool.install(|| {
+    let results: Vec<(PrBuildJob, Option<PrBuildOutput>)> = pool.install(|| {
         jobs.par_iter()
             .map(|job| {
-                let r = compile_pr_in_worktree(
+                let r = compile_and_mutate_pr_in_worktree(
                     &job.repo_path,
                     &job.merge_sha,
                     &job.profile,
                     &job.pr_id,
                     10_000,
+                    mutation_enabled,
                 );
                 (job.clone(), r)
             })
@@ -596,14 +797,15 @@ pub fn check_sprint_compilations_parallel(
 
     let mut compiled = 0usize;
     let mut failed = 0usize;
-    for (job, result) in results {
-        let result = match result {
+    for (job, output) in results {
+        let output = match output {
             Some(r) => r,
             None => {
                 skipped += 1;
                 continue;
             }
         };
+        let result = output.build;
 
         let now = Utc::now().to_rfc3339();
         let reviewer_json = json!(job.reviewer_ids).to_string();
@@ -633,6 +835,39 @@ pub fn check_sprint_compilations_parallel(
                 now,
             ],
         )?;
+
+        if let Some(m) = output.mutation.as_ref() {
+            // Persist mutation summary alongside the compilation row.
+            // INSERT OR REPLACE keys on (pr_id, repo_name) so re-runs
+            // overwrite. NULL `mutation_score` is meaningful: report
+            // existed but every mutant was non-viable, or the run
+            // timed out / failed mid-way.
+            conn.execute(
+                "INSERT OR REPLACE INTO pr_mutation
+                 (pr_id, repo_name, sprint_id, mutants_total, mutants_killed,
+                  mutation_score, duration_seconds)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    job.pr_id,
+                    job.repo_name,
+                    job.sprint_id,
+                    m.mutants_total as i64,
+                    m.mutants_killed as i64,
+                    m.mutation_score,
+                    m.duration_seconds,
+                ],
+            )?;
+            info!(
+                pr_id = %job.pr_id,
+                repo = %job.repo_name,
+                mutants = m.mutants_total,
+                killed = m.mutants_killed,
+                score = m.mutation_score,
+                secs = m.duration_seconds,
+                timed_out = m.timed_out,
+                "PR mutation result"
+            );
+        }
 
         let status = build_status_label(&result);
         let failure_reason = build_failure_reason(&result);
@@ -699,6 +934,9 @@ mod tests {
                 timeout_seconds: 300,
                 working_dir: ".".into(),
                 env: HashMap::new(),
+                mutation_command: None,
+                mutation_timeout_seconds: 600,
+                mutation_report_path: "build/reports/pitest/mutations.xml".into(),
             },
             BuildProfileRe {
                 repo_pattern: Regex::new(r"^spring-").unwrap(),
@@ -706,6 +944,9 @@ mod tests {
                 timeout_seconds: 180,
                 working_dir: ".".into(),
                 env: HashMap::new(),
+                mutation_command: None,
+                mutation_timeout_seconds: 600,
+                mutation_report_path: "build/reports/pitest/mutations.xml".into(),
             },
         ];
         assert_eq!(

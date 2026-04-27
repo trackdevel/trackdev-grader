@@ -323,7 +323,7 @@ const FIX_KEYWORDS: &[&str] = &[
 ];
 
 fn is_stopword(s: &str) -> bool {
-    STOPWORDS.iter().any(|w| *w == s)
+    STOPWORDS.contains(&s)
 }
 
 /// Lowercase, split on non-alphanumeric, drop stopwords and `< 2`-char tokens.
@@ -337,12 +337,10 @@ pub fn tokenize(text: Option<&str>) -> Vec<String> {
     for ch in text.chars() {
         if ch.is_ascii_alphanumeric() {
             cur.push(ch.to_ascii_lowercase());
-        } else {
-            if !cur.is_empty() {
-                let tok = std::mem::take(&mut cur);
-                if tok.len() >= 2 && !is_stopword(&tok) {
-                    out.push(tok);
-                }
+        } else if !cur.is_empty() {
+            let tok = std::mem::take(&mut cur);
+            if tok.len() >= 2 && !is_stopword(&tok) {
+                out.push(tok);
             }
         }
     }

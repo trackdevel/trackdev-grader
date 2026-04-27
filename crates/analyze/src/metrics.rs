@@ -22,7 +22,10 @@ fn temporal_spread_json(early: i64, mid: i64, late: i64, cramming: i64) -> Strin
     )
 }
 
-fn compute_temporal_spread(
+/// Per-task-assignee temporal spread. A commit by user A on a PR linked to
+/// user B's task counts toward B. For per-AUTHOR temporal data (genuine
+/// timing of an individual's commits), use `student_sprint_temporal`.
+fn compute_task_temporal_spread(
     conn: &Connection,
     sprint_id: i64,
     student_id: &str,
@@ -216,7 +219,7 @@ pub fn compute_metrics_for_sprint_id(
             )
             .unwrap_or(0);
 
-        let temporal = compute_temporal_spread(
+        let temporal = compute_task_temporal_spread(
             conn,
             sprint_id,
             sid,

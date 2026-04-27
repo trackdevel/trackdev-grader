@@ -9,6 +9,9 @@ use rusqlite::params;
 use serde_json::Value;
 use tracing::{info, warn};
 
+use sprint_grader_core::attribution::{
+    merge_attribution_errors, ATTR_ERR_HTTP_FAILURE, ATTR_ERR_NULL_AUTHOR,
+};
 use sprint_grader_core::{Config, Database};
 
 use crate::github_client::{ConditionalResult, GitHubClient};
@@ -487,6 +490,33 @@ fn collect_repo_names_for_project(
 }
 
 /// True iff a PR is in a terminal state AND we already have commits for it.
+/// Append a single `{kind, detail, observed_at}` entry to
+/// `pull_requests.attribution_errors` for `pr_id` (T-P1.5). The column
+/// existed in the schema but was barely used; this helper centralises
+/// merging so the array grows monotonically rather than being overwritten.
+fn record_attribution_error(
+    db: &Database,
+    pr_id: &str,
+    kind: &str,
+    detail: &str,
+) -> Result<(), CollectError> {
+    let existing: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT attribution_errors FROM pull_requests WHERE id = ?",
+            [pr_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
+    let merged = merge_attribution_errors(existing.as_deref(), kind, detail);
+    db.conn.execute(
+        "UPDATE pull_requests SET attribution_errors = ? WHERE id = ?",
+        params![merged, pr_id],
+    )?;
+    Ok(())
+}
+
 /// Open PRs always re-fetch; merged PRs also require `merged_at` to be set
 /// (sanity check that the GitHub-side UPDATE actually ran before).
 fn pr_fully_collected(
@@ -610,10 +640,19 @@ fn collect_github_details_for_project(
                     }
                 }
             }
-            Err(e) => warn!(repo, number, error = %e, "Failed to fetch PR"),
+            Err(e) => {
+                warn!(repo, number, error = %e, "Failed to fetch PR");
+                let _ = record_attribution_error(
+                    db,
+                    &pr.id,
+                    ATTR_ERR_HTTP_FAILURE,
+                    &format!("GET /pulls/{number}: {e}"),
+                );
+            }
         }
 
         // Commits.
+        let mut null_author_count: i64 = 0;
         match gh.get_pr_commits_conditional(repo, number, commits_etag.as_deref()) {
             Ok(ConditionalResult::NotModified) => {}
             Ok(ConditionalResult::Fresh {
@@ -638,6 +677,9 @@ fn collect_github_details_for_project(
                         .and_then(|a| a.get("date"))
                         .and_then(Value::as_str)
                         .unwrap_or("");
+                    if author_login.is_none() {
+                        null_author_count += 1;
+                    }
                     let sha = c.get("sha").and_then(Value::as_str).unwrap_or("");
                     db.upsert_pr_commit(
                         &pr.id,
@@ -649,6 +691,22 @@ fn collect_github_details_for_project(
                         None,
                         None,
                     )?;
+                    // T-P1.4: shadow per-commit author into pr_pre_squash_authors
+                    // for merged PRs so AUTHOR_MISMATCH survives a later
+                    // force-push that would otherwise erase the original
+                    // history. Detection of "is this PR squash-merged" via
+                    // local-clone reachability is an optimisation deferred to
+                    // a follow-up; the always-shadow strategy is purely
+                    // additive (PK on (pr_id, sha) keeps writes idempotent).
+                    if pr.merged && !sha.is_empty() {
+                        db.upsert_pr_pre_squash_author(
+                            &pr.id,
+                            sha,
+                            author_login,
+                            author_email,
+                            &now_iso,
+                        )?;
+                    }
                 }
                 if let Some(tag) = new_etag.as_deref() {
                     if !tag.is_empty() {
@@ -656,7 +714,23 @@ fn collect_github_details_for_project(
                     }
                 }
             }
-            Err(e) => warn!(repo, number, error = %e, "Failed to fetch commits"),
+            Err(e) => {
+                warn!(repo, number, error = %e, "Failed to fetch commits");
+                let _ = record_attribution_error(
+                    db,
+                    &pr.id,
+                    ATTR_ERR_HTTP_FAILURE,
+                    &format!("GET /pulls/{number}/commits: {e}"),
+                );
+            }
+        }
+        if null_author_count > 0 {
+            let _ = record_attribution_error(
+                db,
+                &pr.id,
+                ATTR_ERR_NULL_AUTHOR,
+                &format!("{null_author_count} commit(s) returned with null author.login"),
+            );
         }
 
         // Reviews.
@@ -880,16 +954,18 @@ fn resolve_pr_authors(db: &Database) -> Result<(), CollectError> {
         }
 
         let final_id = resolved_id.clone().or(trackdev_author_id);
-        let error_json = if errors.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&errors)?)
-        };
 
+        // T-P1.5: switched from overwriting attribution_errors with this
+        // loop's String list to merging each error as a structured
+        // {kind, detail, observed_at} entry. Preserves anything already
+        // written upstream (HTTP failures, null commit authors).
         db.conn.execute(
-            "UPDATE pull_requests SET author_id = ?, attribution_errors = ? WHERE id = ?",
-            params![final_id, error_json, pr_id],
+            "UPDATE pull_requests SET author_id = ? WHERE id = ?",
+            params![final_id, pr_id],
         )?;
+        for err_detail in &errors {
+            let _ = record_attribution_error(db, &pr_id, ATTR_ERR_NULL_AUTHOR, err_detail);
+        }
 
         if resolved_id.is_some() {
             resolved_count += 1;

@@ -11,7 +11,7 @@ use rusqlite::{params, Connection};
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
-use sprint_grader_curriculum::get_allowed_concepts;
+use sprint_grader_curriculum::get_allowed_concepts_with_snapshot;
 
 // ── High-severity patterns ──────────────────────────────────────────────────
 
@@ -186,7 +186,7 @@ pub fn extract_file_concepts(content: &str) -> FileConcepts {
         }
         for m in METHOD_CALL_RE.captures_iter(line) {
             let method = &m[1];
-            if method.len() > 2 && method.chars().next().map_or(false, |c| c.is_lowercase()) {
+            if method.len() > 2 && method.chars().next().is_some_and(|c| c.is_lowercase()) {
                 out.api_calls.push(ConceptEntry {
                     value: method.into(),
                     line: line_no,
@@ -461,7 +461,9 @@ pub fn scan_repo_curriculum(
     sprint_id: i64,
     sprint_number: i64,
 ) -> rusqlite::Result<usize> {
-    let allowed = get_allowed_concepts(conn, sprint_number)?;
+    // T-P2.5: snapshot wins when present (past sprints stay frozen),
+    // otherwise fall through to the live curriculum table (active sprint).
+    let allowed = get_allowed_concepts_with_snapshot(conn, sprint_id, sprint_number)?;
     let total_allowed: usize = allowed.values().map(|v| v.len()).sum();
     info!(
         repo = repo_name,
@@ -475,7 +477,7 @@ pub fn scan_repo_curriculum(
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .map(|e| e.path().to_path_buf())
-        .filter(|p| p.extension().map_or(false, |ext| ext == "java"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "java"))
         .collect();
     java_files.sort();
 

@@ -1,0 +1,137 @@
+# Architecture conformance rules (T-P2.2).
+#
+# `severity` (default "WARNING") is applied to every emitted violation.
+# Rules are evaluated against every Java file with a `package`
+# declaration. Files with no `package` (default-package) are skipped.
+#
+# Patterns use `**` (any number of package segments) and `*` (one
+# segment). They match against package names: `com.example.domain.user`
+# splits to four segments. Slashes in patterns are segment separators
+# regardless of source — `**/domain/**` matches `domain.user` and
+# `com.x.domain`.
+#
+# Two rule kinds:
+# - `[[layers]]` defines a named layer + its allow-list of layers it may
+#   import from. An import targeting a layer outside the allow-list
+#   produces a `layer_dependency` violation.
+# - `[[forbidden]]` defines packages whose files must not import from a
+#   blacklist (typically: keep framework imports out of the domain
+#   layer). Produces a `forbidden_import` violation.
+
+severity = "WARNING"
+
+# --- Hexagonal-ish layered model for the Spring backend -----------------
+
+[[layers]]
+name = "domain"
+packages = ["**/domain/**", "**/model/**"]
+may_depend_on = []
+
+[[layers]]
+name = "application"
+packages = ["**/application/**", "**/service/**", "**/usecase/**"]
+may_depend_on = ["domain"]
+
+[[layers]]
+name = "infrastructure"
+packages = ["**/infrastructure/**", "**/repository/**", "**/persistence/**"]
+may_depend_on = ["domain", "application"]
+
+[[layers]]
+name = "presentation"
+packages = ["**/controller/**", "**/web/**", "**/api/**", "**/rest/**"]
+may_depend_on = ["application", "domain"]
+
+# --- Forbidden imports --------------------------------------------------
+
+[[forbidden]]
+name = "domain-no-spring-web"
+from = "**/domain/**"
+must_not_match = [
+    "org/springframework/web/**",
+    "org/springframework/data/**",
+    "javax/servlet/**",
+]
+
+[[forbidden]]
+name = "domain-no-jpa"
+from = "**/domain/**"
+must_not_match = [
+    "javax/persistence/**",
+    "jakarta/persistence/**",
+]
+
+# --- AST rules (T-P3.1) -------------------------------------------------
+#
+# AST rules look inside class bodies, so they catch architectural sins
+# that don't show up as cross-package imports — e.g. a controller that
+# *injects* a repository via constructor parameter where the repository
+# lives in the same root package, or a fat method on a controller.
+#
+# `class_match` is an AND of any subset of:
+#   - annotation     — class carries `@<name>` (or any qualified form ending in <name>)
+#   - extends        — class extends a class whose simple name matches
+#   - implements     — class implements an interface whose simple name matches
+#   - package_glob   — file's package matches the glob
+#
+# Five `kind`s are supported:
+#   - forbidden_field_type        (`type_regex`)
+#   - forbidden_constructor_param (`type_regex`)
+#   - forbidden_method_call       (`call_regex`, matched against `obj.method`)
+#   - forbidden_return_type       (`type_regex`)
+#   - max_method_statements       (`max`)
+
+# Spring: controllers don't hold repositories.
+[[ast_rule]]
+name = "controller-no-repository-field"
+class_match.annotation = "RestController"
+kind = "forbidden_field_type"
+type_regex = ".*Repository$"
+severity = "WARNING"
+
+# Spring: same idea via constructor injection (catches DI-by-type).
+[[ast_rule]]
+name = "controller-no-repository-ctor-param"
+class_match.annotation = "RestController"
+kind = "forbidden_constructor_param"
+type_regex = ".*Repository$"
+severity = "WARNING"
+
+# Spring: keep controllers thin (>20 statements is almost certainly business logic).
+[[ast_rule]]
+name = "controller-method-not-fat"
+class_match.annotation = "RestController"
+kind = "max_method_statements"
+max = 20
+severity = "INFO"
+
+# Android: Activities and Fragments must not hold a Retrofit/ApiService directly.
+[[ast_rule]]
+name = "activity-no-retrofit-field"
+class_match.extends = "Activity"
+kind = "forbidden_field_type"
+type_regex = "^(Retrofit|.*ApiService)$"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "fragment-no-retrofit-field"
+class_match.extends = "Fragment"
+kind = "forbidden_field_type"
+type_regex = "^(Retrofit|.*ApiService)$"
+severity = "WARNING"
+
+# Android: ViewModels must not hold a Retrofit/ApiService directly — they
+# go through a repository.
+[[ast_rule]]
+name = "viewmodel-no-retrofit-field"
+class_match.extends = "ViewModel"
+kind = "forbidden_field_type"
+type_regex = "^(Retrofit|.*ApiService)$"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "viewmodel-no-retrofit-ctor-param"
+class_match.extends = "ViewModel"
+kind = "forbidden_constructor_param"
+type_regex = "^(Retrofit|.*ApiService)$"
+severity = "WARNING"

@@ -27,6 +27,44 @@ fn parse_project_filter(projects: Option<String>) -> Option<Vec<String>> {
     })
 }
 
+/// Render the table-by-table effect of `go` / `go-quick`'s purge step
+/// without touching the DB. Exits the parent command after printing.
+/// (T-P1.6 — `--dry-run` for go/go-quick previews the purge only.)
+fn preview_go_purge(db: &Database, project_filter: Option<&[String]>) -> Result<()> {
+    let names = match project_filter {
+        Some(n) if !n.is_empty() => n,
+        _ => {
+            println!(
+                "[dry-run] go/go-quick only purges when --projects is set; \
+                 nothing would be deleted."
+            );
+            return Ok(());
+        }
+    };
+    let mut project_ids: Vec<i64> = Vec::new();
+    for name in names {
+        if let Ok(pid) = db
+            .conn
+            .query_row("SELECT id FROM projects WHERE name = ?", [name], |r| {
+                r.get::<_, i64>(0)
+            })
+        {
+            project_ids.push(pid);
+        }
+    }
+    if project_ids.is_empty() {
+        println!("[dry-run] no projects matched filter; nothing would be deleted.");
+        return Ok(());
+    }
+    let report = sprint_grader_orchestration::purge_projects(&db.conn, &project_ids, true)
+        .context("purge_projects dry-run failed")?;
+    println!("[dry-run] go/go-quick purge would affect:");
+    for (table, count) in &report {
+        println!("  {table}: {count}");
+    }
+    Ok(())
+}
+
 /// Resolve the project root used for config and `.env` loading.
 /// Defaults to the directory where the CLI is executed.
 fn default_project_root() -> PathBuf {
@@ -152,6 +190,15 @@ enum Command {
         #[arg(long)]
         rebuild: bool,
     },
+    /// Freeze the curriculum-as-taught for a specific sprint into
+    /// `curriculum_concepts_snapshot`. Idempotent: re-running for a sprint
+    /// that's already frozen is a no-op. T-P2.5.
+    FreezeCurriculum {
+        /// 1-based sprint ordinal (e.g. `--sprint 2` for the second sprint).
+        /// All projects' sprints with this ordinal are frozen.
+        #[arg(long)]
+        sprint: u32,
+    },
     /// Generate Excel (.xlsx) + Markdown (.md) multi-sprint project report.
     Report {
         #[command(flatten)]
@@ -193,6 +240,14 @@ enum Command {
         skip_llm_judge: bool,
         #[arg(long)]
         force_pr_refresh: bool,
+        /// Preview the purge step's effect and exit before any pipeline
+        /// stage runs. (T-P1.6)
+        #[arg(long)]
+        dry_run: bool,
+        /// Refuse to start if `git status --porcelain` reports a dirty
+        /// working tree.
+        #[arg(long)]
+        require_clean_tree: bool,
     },
     /// Like `go` but skips the Section-3 LLM code review.
     GoQuick {
@@ -208,6 +263,14 @@ enum Command {
         skip_llm_judge: bool,
         #[arg(long)]
         force_pr_refresh: bool,
+        /// Preview the purge step's effect and exit before any pipeline
+        /// stage runs. (T-P1.6)
+        #[arg(long)]
+        dry_run: bool,
+        /// Refuse to start if `git status --porcelain` reports a dirty
+        /// working tree.
+        #[arg(long)]
+        require_clean_tree: bool,
     },
 
     // Diagnostics
@@ -228,6 +291,22 @@ enum Command {
         compilation: bool,
         #[arg(long)]
         doc_eval: bool,
+        /// Preview the purge: print per-table row counts and exit without
+        /// modifying the DB.
+        #[arg(long)]
+        dry_run: bool,
+        /// Refuse to purge if `git status --porcelain` reports a dirty
+        /// working tree (guard against accidental purge during manual edits).
+        #[arg(long)]
+        require_clean_tree: bool,
+    },
+    /// Print the resolved architecture rubric for one stack
+    /// (`spring` or `android`) so it can be inspected without running
+    /// any LLM. Reads `config/architecture.md`. T-P3.2.
+    ArchitectureRubric {
+        /// Stack alias: `spring` / `backend`, or `android` / `mobile`.
+        #[arg(long)]
+        stack: String,
     },
     /// Diff two `grading.db` files table-by-table (dual-run verification).
     DiffDb {
@@ -340,6 +419,7 @@ fn main() -> Result<()> {
                         ord,
                         &data_dir,
                         Some(vec![*sid]),
+                        config.detector_thresholds.cosmetic_rewrite_pct_of_lat,
                     )
                     .with_context(|| format!("survive failed for sprint_id {sid}"))?;
                 }
@@ -362,6 +442,7 @@ fn main() -> Result<()> {
                         config.build.max_parallel_builds as usize,
                         config.build.stderr_max_chars as usize,
                         skip_tested,
+                        config.mutation.enabled,
                     )
                     .with_context(|| format!("compile failed for sprint_id {sid}"))?;
                     sprint_grader_compile::summarize_compilation(&db.conn, *sid)
@@ -392,7 +473,7 @@ fn main() -> Result<()> {
                 sprint_grader_analyze::compute_all_contributions(&db.conn, sid, None)
                     .with_context(|| format!("contribution failed for sprint_id {sid}"))?;
             }
-            sprint_grader_analyze::compute_all_trajectories(&db.conn)
+            sprint_grader_analyze::compute_all_trajectories(&db.conn, &config.detector_thresholds)
                 .context("trajectory failed")?;
         }
         Command::Evaluate { projects } => {
@@ -469,7 +550,7 @@ fn main() -> Result<()> {
                     if proj_dir.is_dir() {
                         if let Ok(repo_dirs) = std::fs::read_dir(&proj_dir) {
                             for entry in repo_dirs.flatten() {
-                                if !entry.file_type().map_or(false, |t| t.is_dir()) {
+                                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                                     continue;
                                 }
                                 let repo_path = entry.path();
@@ -528,6 +609,43 @@ fn main() -> Result<()> {
                 )
                 .context("curriculum rebuild failed")?;
             }
+        }
+        Command::FreezeCurriculum { sprint } => {
+            // Resolve the DB sprint_id for every project at the requested
+            // ordinal (1-based). The same ordinal can map to several
+            // sprint_id rows when multiple projects share a course.
+            let mut stmt = db.conn.prepare(
+                "SELECT sp.id FROM sprints sp
+                 WHERE (
+                     SELECT COUNT(*) FROM sprints sp2
+                     WHERE sp2.project_id = sp.project_id AND sp2.start_date <= sp.start_date
+                 ) = ?",
+            )?;
+            let sprint_ids: Vec<i64> = stmt
+                .query_map([sprint as i64], |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(stmt);
+            if sprint_ids.is_empty() {
+                anyhow::bail!(
+                    "no sprint with ordinal {} found — run `collect` first or check num_sprints",
+                    sprint
+                );
+            }
+            let mut total_written = 0usize;
+            for sid in sprint_ids {
+                let n = sprint_grader_curriculum::freeze_curriculum_for_sprint(
+                    &db.conn,
+                    sid,
+                    sprint as i64,
+                )
+                .with_context(|| format!("freeze sprint_id={sid}"))?;
+                total_written += n;
+            }
+            info!(
+                sprint = sprint,
+                rows_written = total_written,
+                "curriculum frozen"
+            );
         }
         Command::Report { projects } => {
             let filter = parse_project_filter(projects.projects);
@@ -635,11 +753,25 @@ fn main() -> Result<()> {
             skip_perplexity: _,
             skip_llm_judge: _,
             force_pr_refresh,
+            dry_run,
+            require_clean_tree,
         } => {
+            let project_filter = parse_project_filter(projects.projects);
+            if require_clean_tree {
+                if let Err(msg) = sprint_grader_orchestration::ensure_clean_tree(
+                    std::env::current_dir()?.as_path(),
+                ) {
+                    anyhow::bail!(msg);
+                }
+            }
+            if dry_run {
+                preview_go_purge(&db, project_filter.as_deref())?;
+                return Ok(());
+            }
             drop(db);
             let opts = sprint_grader_orchestration::pipeline::PipelineOptions {
                 today: today.clone(),
-                project_filter: parse_project_filter(projects.projects),
+                project_filter,
                 entregues_dir: entregues_dir.clone(),
                 config_dir: config_dir.clone(),
                 skip_github,
@@ -663,11 +795,25 @@ fn main() -> Result<()> {
             skip_perplexity: _,
             skip_llm_judge: _,
             force_pr_refresh,
+            dry_run,
+            require_clean_tree,
         } => {
+            let project_filter = parse_project_filter(projects.projects);
+            if require_clean_tree {
+                if let Err(msg) = sprint_grader_orchestration::ensure_clean_tree(
+                    std::env::current_dir()?.as_path(),
+                ) {
+                    anyhow::bail!(msg);
+                }
+            }
+            if dry_run {
+                preview_go_purge(&db, project_filter.as_deref())?;
+                return Ok(());
+            }
             drop(db);
             let opts = sprint_grader_orchestration::pipeline::PipelineOptions {
                 today: today.clone(),
-                project_filter: parse_project_filter(projects.projects),
+                project_filter,
                 entregues_dir: entregues_dir.clone(),
                 config_dir: config_dir.clone(),
                 skip_github,
@@ -700,6 +846,7 @@ fn main() -> Result<()> {
                 &data_dir,
                 &flat_sprint_ids,
                 &project_pairs,
+                config.detector_thresholds.cosmetic_rewrite_pct_of_lat,
             )
             .context("debug-pr-lines failed")?;
         }
@@ -709,6 +856,8 @@ fn main() -> Result<()> {
             survival,
             compilation,
             doc_eval,
+            dry_run,
+            require_clean_tree,
         } => {
             let targets = sprint_grader_orchestration::CacheTargets {
                 line_metrics,
@@ -720,6 +869,13 @@ fn main() -> Result<()> {
                 anyhow::bail!(
                     "pass at least one of --line-metrics, --survival, --compilation, --doc-eval"
                 );
+            }
+            if require_clean_tree {
+                if let Err(msg) = sprint_grader_orchestration::ensure_clean_tree(
+                    std::env::current_dir()?.as_path(),
+                ) {
+                    anyhow::bail!(msg);
+                }
             }
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
@@ -737,11 +893,42 @@ fn main() -> Result<()> {
                 &sprint_ids,
                 project_ids.as_deref(),
                 targets,
+                dry_run,
             )
             .context("purge-cache failed")?;
-            for (table, count) in &deleted {
-                info!(table = %table, count, "purged");
+            if dry_run {
+                println!("[dry-run] purge-cache would affect:");
+                for (table, count) in &deleted {
+                    println!("  {table}: {count}");
+                }
+            } else {
+                for (table, count) in &deleted {
+                    info!(table = %table, count, "purged");
+                }
             }
+        }
+        Command::ArchitectureRubric { stack } => {
+            let path = config_dir.join("architecture.md");
+            if !path.is_file() {
+                anyhow::bail!(
+                    "architecture rubric not found at {} — write the rubric first or pass a different --project-root",
+                    path.display()
+                );
+            }
+            let rubric = sprint_grader_architecture::rubric::load(&path)
+                .with_context(|| format!("failed to parse {}", path.display()))?;
+            let body = rubric.for_stack(&stack).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "architecture.md has no section for stack '{}' (expected 'spring' / 'android' or an alias like 'backend' / 'mobile')",
+                    stack
+                )
+            })?;
+            println!("{body}");
+            println!();
+            println!(
+                "version={} body_hash={}",
+                rubric.version, rubric.body_hash
+            );
         }
         Command::DiffDb {
             db_a,

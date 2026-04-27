@@ -13,6 +13,15 @@ use tracing::{info, warn};
 
 use crate::llm_client::{AnthropicClient, Conversation};
 
+type LlmPrRow = (
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// PR documentation rubric response shape. `total_doc_score` is optional
 /// because the model sometimes omits it; we fall back to the sum.
 #[derive(Debug, Deserialize)]
@@ -62,6 +71,16 @@ static GENERIC_TITLE: Lazy<Regex> = Lazy::new(|| {
 static TASK_ID_ONLY: Lazy<FancyRegex> =
     Lazy::new(|| FancyRegex::new(r"^(\s*[A-Za-z]+-\d+\s*[,;]?\s*)+$").expect("task id regex"));
 
+// Markdown-linked counterpart of TASK_ID_ONLY: bodies whose entire content
+// is one or more `[task-id](url)` links (e.g. `[p4d-194](https://...)`).
+// Content-free but bypasses TASK_ID_ONLY because of the bracket/paren syntax.
+// Anchor text allows alphanumeric prefixes (e.g. `p4d`) that real Trackdev
+// project keys use, not just plain letters.
+static TASK_MD_LINK_ONLY: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(\s*\[[A-Za-z][A-Za-z0-9]*-\d+\]\([^)]+\)\s*[,;]?\s*)+$")
+        .expect("task md-link regex")
+});
+
 fn heuristic_title_score(title: Option<&str>) -> i64 {
     let title = match title {
         Some(t) => t.trim(),
@@ -88,7 +107,7 @@ fn heuristic_description_score(body: Option<&str>) -> i64 {
     if body.len() < 20 {
         return 0;
     }
-    if TASK_ID_ONLY.is_match(body).unwrap_or(false) {
+    if TASK_ID_ONLY.is_match(body).unwrap_or(false) || TASK_MD_LINK_ONLY.is_match(body) {
         return 0;
     }
     if body.len() < 50 {
@@ -243,28 +262,35 @@ fn extract_json_object(s: &str) -> Option<Value> {
 
 // ---- Public entry points ----
 
-/// PR doc evaluation for a single sprint. Uses the LLM if
-/// `ANTHROPIC_API_KEY` is set; otherwise falls back to heuristics. After
+/// PR doc evaluation for a single sprint. When `use_llm` is true, uses the
+/// LLM if `ANTHROPIC_API_KEY` is set, otherwise falls back to heuristics.
+/// When `use_llm` is false, always uses the heuristic — no network. After
 /// scoring, updates `avg_doc_score` on `student_sprint_metrics`.
-pub fn run_llm_evaluation_for_sprint_id(
+pub fn run_pr_doc_evaluation_for_sprint_id(
     conn: &Connection,
     sprint_id: i64,
     config: &Config,
+    use_llm: bool,
 ) -> rusqlite::Result<usize> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     let mut count = 0usize;
 
-    if api_key.is_empty() {
-        info!("ANTHROPIC_API_KEY not set — using heuristic PR doc scoring");
+    if !use_llm {
+        info!("pr_doc_evaluation: heuristic-only path requested");
         count += evaluate_prs_heuristic(conn, sprint_id)?;
     } else {
-        let model =
-            std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-opus-4-7".to_string());
-        match AnthropicClient::new(&api_key, model) {
-            Ok(client) => count += evaluate_prs_llm(conn, sprint_id, &client)?,
-            Err(e) => {
-                warn!(error = %e, "Anthropic client init failed — heuristic fallback");
-                count += evaluate_prs_heuristic(conn, sprint_id)?;
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            info!("ANTHROPIC_API_KEY not set — using heuristic PR doc scoring");
+            count += evaluate_prs_heuristic(conn, sprint_id)?;
+        } else {
+            let model =
+                std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-opus-4-7".to_string());
+            match AnthropicClient::new(&api_key, model) {
+                Ok(client) => count += evaluate_prs_llm(conn, sprint_id, &client)?,
+                Err(e) => {
+                    warn!(error = %e, "Anthropic client init failed — heuristic fallback");
+                    count += evaluate_prs_heuristic(conn, sprint_id)?;
+                }
             }
         }
     }
@@ -272,6 +298,16 @@ pub fn run_llm_evaluation_for_sprint_id(
     update_avg_doc_score(conn, sprint_id)?;
     let _ = config; // accepted for symmetry with the Python signature
     Ok(count)
+}
+
+/// Back-compat wrapper: always tries LLM-then-heuristic. Used by the
+/// `sprint-grader evaluate` CLI subcommand.
+pub fn run_llm_evaluation_for_sprint_id(
+    conn: &Connection,
+    sprint_id: i64,
+    config: &Config,
+) -> rusqlite::Result<usize> {
+    run_pr_doc_evaluation_for_sprint_id(conn, sprint_id, config, true)
 }
 
 fn evaluate_prs_llm(
@@ -307,14 +343,7 @@ fn evaluate_prs_llm(
                AND s.team_project_id = ?
              ORDER BY pr.pr_number",
         )?;
-        let prs: Vec<(
-            String,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = stmt
+        let prs: Vec<LlmPrRow> = stmt
             .query_map(params![sprint_id, project_id], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -707,6 +736,27 @@ mod tests {
             0,
             "task-id only must score 0"
         );
+        // Markdown-linked task-id only must also score 0 (T-P0.5).
+        assert_eq!(
+            heuristic_description_score(Some(
+                "[p4d-194](https://trackdev.org/dashboard/tasks/5075)"
+            )),
+            0,
+            "single md-link to task must score 0"
+        );
+        assert_eq!(
+            heuristic_description_score(Some(
+                "[p4d-194](https://example.com), [p4d-195](https://example.com)"
+            )),
+            0,
+            "comma-separated md-links must score 0"
+        );
+        assert!(
+            heuristic_description_score(Some(
+                "[p4d-194](https://example.com) Adds the user endpoint."
+            )) > 0,
+            "md-link followed by real prose must score > 0"
+        );
         // 20..50 chars, no structure → 1
         assert_eq!(
             heuristic_description_score(Some("Added login form with basic auth")),
@@ -757,5 +807,130 @@ mod tests {
             "Here is my evaluation:\n{\"title_score\": 1, \"description_score\": 2}\nThanks.";
         let v2 = extract_json_object(prefixed).unwrap();
         assert_eq!(v2["description_score"].as_i64(), Some(2));
+    }
+
+    fn build_minimal_config() -> Config {
+        // Config::default() is not implemented; round-trip a tiny course.toml
+        // through Config::load. Use a process-unique dir under the OS temp
+        // root to avoid pulling tempfile into evaluate's dev-deps.
+        let dir = std::env::temp_dir().join(format!(
+            "sprint_grader_evaluate_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("course.toml"),
+            r#"
+[course]
+name = "test"
+num_sprints = 1
+pm_base_url = "https://example.invalid"
+github_org = "udg-pds"
+course_id = 5
+
+[thresholds]
+carrying_team_pct = 0.40
+cramming_hours = 48
+cramming_commit_pct = 0.70
+single_commit_dump_lines = 200
+micro_pr_max_lines = 10
+low_doc_score = 2
+contribution_imbalance_stddev = 1.5
+
+[build]
+max_parallel_builds = 1
+stderr_max_chars = 2000
+skip_already_tested = true
+
+[regularity]
+
+[repo_analysis]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("user_mapping.csv"),
+            "trackdev_username,github_username,enrollment_id,team_id\n",
+        )
+        .unwrap();
+        Config::load(&dir).unwrap()
+    }
+
+    #[test]
+    fn pr_doc_use_llm_false_uses_heuristic() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE students (id TEXT PRIMARY KEY, full_name TEXT,
+                github_login TEXT, team_project_id INTEGER);
+             CREATE TABLE tasks (id INTEGER PRIMARY KEY, task_key TEXT, name TEXT,
+                type TEXT, status TEXT, estimation_points INTEGER,
+                assignee_id TEXT, sprint_id INTEGER, parent_task_id INTEGER);
+             CREATE TABLE pull_requests (id TEXT PRIMARY KEY, pr_number INTEGER,
+                repo_full_name TEXT, title TEXT, body TEXT, author_id TEXT);
+             CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT,
+                PRIMARY KEY (task_id, pr_id));
+             CREATE TABLE pr_doc_evaluation (pr_id TEXT, sprint_id INTEGER,
+                title_score INTEGER, description_score INTEGER,
+                total_doc_score INTEGER, justification TEXT,
+                PRIMARY KEY (pr_id, sprint_id));
+             CREATE TABLE student_sprint_metrics (student_id TEXT, sprint_id INTEGER,
+                avg_doc_score REAL, PRIMARY KEY (student_id, sprint_id));
+             INSERT INTO students(id, full_name, team_project_id)
+                VALUES ('alice', 'Alice', 1);
+             INSERT INTO tasks(id, task_key, name, type, status, sprint_id, assignee_id)
+                VALUES (1, 'PDS-1', 'login', 'TASK', 'DONE', 10, 'alice');
+             INSERT INTO pull_requests(id, pr_number, repo_full_name, title, body, author_id)
+                VALUES ('pr-1', 7, 'org/repo',
+                        'Implement login controller with JWT',
+                        'Implement the login controller because users could not sign in. \
+                         Linked to task PDS-42; verify by running the auth test suite.',
+                        'alice');
+             INSERT INTO task_pull_requests(task_id, pr_id) VALUES (1, 'pr-1');
+             INSERT INTO student_sprint_metrics(student_id, sprint_id, avg_doc_score)
+                VALUES ('alice', 10, NULL);",
+        )
+        .unwrap();
+
+        let cfg = build_minimal_config();
+        // Set ANTHROPIC_API_KEY so we can prove use_llm=false really skips it.
+        // SAFETY: tests run in a single process; we restore afterward.
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-should-not-be-used") };
+        let count = run_pr_doc_evaluation_for_sprint_id(&conn, 10, &cfg, false).unwrap();
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+
+        assert_eq!(count, 1);
+
+        let (pr_id, total, justification): (String, i64, String) = conn
+            .query_row(
+                "SELECT pr_id, total_doc_score, justification FROM pr_doc_evaluation
+                 WHERE sprint_id = 10",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(pr_id, "pr-1");
+        assert!(
+            total > 0,
+            "heuristic should award positive score for rich PR"
+        );
+        assert!(
+            justification.contains("heuristics"),
+            "justification must mark heuristic origin"
+        );
+
+        let avg: Option<f64> = conn
+            .query_row(
+                "SELECT avg_doc_score FROM student_sprint_metrics
+                 WHERE student_id = 'alice' AND sprint_id = 10",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(avg.is_some(), "avg_doc_score must be populated");
+        assert!((avg.unwrap() - total as f64).abs() < 1e-9);
     }
 }

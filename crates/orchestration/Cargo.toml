@@ -26,6 +26,10 @@ sprint-grader-process = { path = "../process_stage" }
 sprint-grader-ai-detect = { path = "../ai_detect" }
 sprint-grader-repo-analysis = { path = "../repo_analysis" }
 sprint-grader-report = { path = "../report" }
+sprint-grader-curriculum = { path = "../curriculum" }
+sprint-grader-architecture = { path = "../architecture" }
+sprint-grader-architecture-llm = { path = "../architecture_llm" }
+sprint-grader-estimation = { path = "../estimation" }
 
 [dev-dependencies]
 tempfile.workspace = true

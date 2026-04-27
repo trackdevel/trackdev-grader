@@ -18,6 +18,8 @@ pub const TIER_FIX: &str = "Fix";
 pub const ALL_TIERS: &[&str] = &[TIER_REGULAR, TIER_LATE, TIER_CRITICAL, TIER_FIX];
 
 pub const PR_KIND_FEATURE: &str = "feature";
+
+type PrTemporalRow = (String, Option<String>, Option<String>, Option<String>);
 pub const PR_KIND_FIX: &str = "fix";
 
 pub fn classify_pr_kind(title: Option<&str>, linked_task_types: &[String]) -> &'static str {
@@ -126,7 +128,7 @@ pub fn compute_temporal_analysis(
            AND pr.merged = 1
            AND pr.merged_at IS NOT NULL",
     )?;
-    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+    let rows: Vec<PrTemporalRow> = stmt
         .query_map([sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,

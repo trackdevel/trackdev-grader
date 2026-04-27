@@ -22,10 +22,100 @@ pub struct Config {
     pub curriculum_slides_dir: Option<PathBuf>,
     pub curriculum_extra_imports: Vec<String>,
     pub curriculum_template_repos: HashMap<String, PathBuf>,
+    /// When true, the pipeline auto-freezes the curriculum snapshot
+    /// (`curriculum_concepts_snapshot`) for any sprint whose `end_date` is
+    /// already in the past. Default false. T-P2.5.
+    pub curriculum_freeze_after_sprint_end: bool,
     pub repo_analysis: RepoAnalysisConfig,
     pub build_profiles: Vec<BuildProfile>,
     pub build: BuildConfig,
     pub regularity: RegularityConfig,
+    pub detector_thresholds: DetectorThresholdsConfig,
+    pub grading: GradingConfig,
+    pub mutation: MutationConfig,
+    pub architecture: ArchitectureConfig,
+}
+
+/// Architecture-conformance LLM config (T-P3.3). The structural and AST
+/// scans (T-P2.2 / T-P3.1) always run when `architecture.toml` exists;
+/// the LLM judge is opt-in. Missing `ANTHROPIC_API_KEY` falls back to a
+/// silent skip — running without keys is a supported mode.
+#[derive(Debug, Clone)]
+pub struct ArchitectureConfig {
+    /// When true and an Anthropic key is available, the pipeline runs
+    /// the per-file LLM rubric judge (T-P3.3). Default false.
+    pub llm_review: bool,
+    pub model_id: String,
+    pub max_tokens: u32,
+    /// Path to the markdown rubric, relative to `config/`. Default
+    /// `architecture.md` (T-P3.2).
+    pub rubric_path: String,
+    /// Files matching any of these globs are skipped before the LLM
+    /// call (generated code, build outputs, R.java, etc).
+    pub llm_skip_globs: Vec<String>,
+}
+
+impl Default for ArchitectureConfig {
+    fn default() -> Self {
+        Self {
+            llm_review: false,
+            model_id: "claude-haiku-4-5-20251001".to_string(),
+            max_tokens: 1024,
+            rubric_path: "architecture.md".to_string(),
+            llm_skip_globs: vec![
+                "**/build/**".to_string(),
+                "**/generated/**".to_string(),
+                "**/R.java".to_string(),
+                "**/*$$*.java".to_string(),
+            ],
+        }
+    }
+}
+
+/// Mutation-testing config (T-P2.4). The actual mutation command lives
+/// per-profile on `BuildProfile.mutation_command`; this block holds the
+/// global on/off switch and the LOW_MUTATION_SCORE detector
+/// thresholds. Default `enabled = false` so existing courses don't
+/// accidentally pay the mutation-testing tax.
+#[derive(Debug, Clone, Copy)]
+pub struct MutationConfig {
+    pub enabled: bool,
+    /// LOW_MUTATION_SCORE fires INFO when mutation_score is below this
+    /// (default 0.50).
+    pub info_threshold: f64,
+    /// LOW_MUTATION_SCORE escalates to WARNING below this threshold
+    /// (default 0.30).
+    pub warning_threshold: f64,
+}
+
+impl Default for MutationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            info_threshold: 0.50,
+            warning_threshold: 0.30,
+        }
+    }
+}
+
+/// Anti-gaming config (T-P2.6). When `hidden_thresholds = true`, every
+/// fractional detector knob is uniformly jittered by `± jitter_pct` at
+/// pipeline start, seeded by `(today, course_id)` so the same `--today`
+/// reproduces. Default `hidden_thresholds = false` keeps the original
+/// fixed-threshold behaviour.
+#[derive(Debug, Clone, Copy)]
+pub struct GradingConfig {
+    pub hidden_thresholds: bool,
+    pub jitter_pct: f64,
+}
+
+impl Default for GradingConfig {
+    fn default() -> Self {
+        Self {
+            hidden_thresholds: false,
+            jitter_pct: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -43,7 +133,9 @@ pub struct ThresholdConfig {
     pub micro_pr_max_lines: u32,
     pub low_doc_score: u32,
     pub contribution_imbalance_stddev: f64,
+    pub contribution_imbalance_min_abs_deviation: f64,
     pub low_survival_rate_stddev: f64,
+    pub low_survival_absolute_floor: f64,
     pub raw_normalized_divergence_threshold: f64,
 }
 
@@ -97,6 +189,19 @@ pub struct BuildProfile {
     pub timeout_seconds: u64,
     pub working_dir: String,
     pub env: HashMap<String, String>,
+    /// T-P2.4: when set, run after a successful primary build to mutate
+    /// only the lines changed by the PR. Typically `./gradlew pitest
+    /// --info` for the Pitest Gradle plugin in `scmMutationCoverage`
+    /// mode. `None` (the default) skips mutation testing for this
+    /// profile silently.
+    pub mutation_command: Option<String>,
+    /// T-P2.4: hard timeout for the mutation run. Mutation testing is
+    /// substantially slower than the primary build, so this defaults
+    /// higher than `timeout_seconds`.
+    pub mutation_timeout_seconds: u64,
+    /// T-P2.4: relative path (from `working_dir`) of the Pitest XML
+    /// report. Defaults to Pitest's standard output location.
+    pub mutation_report_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +246,53 @@ impl Default for RegularityConfig {
     }
 }
 
+/// Detector tuning knobs migrated out of `flags.rs::DETECTOR_DEFAULTS` and the
+/// few remaining bare literals in `flags.rs` and `trajectory.rs`. Default
+/// values are byte-identical with the prior literals (T-P1.3).
+#[derive(Debug, Clone, Copy)]
+pub struct DetectorThresholdsConfig {
+    pub gini_warn: f64,
+    pub gini_crit: f64,
+    pub composite_warn: f64,
+    pub composite_crit: f64,
+    pub late_regularity: f64,
+    pub team_inequality_outlier_deviation: f64,
+    pub trajectory_cv_low: f64,
+    pub trajectory_cv_high: f64,
+    pub trajectory_slope_p_value: f64,
+    pub regularity_declining_delta: f64,
+    pub cosmetic_rewrite_pct_of_lat: f64,
+    pub bulk_rename_adds_dels_ratio: f64,
+    pub bulk_rename_line_floor: i64,
+    /// `ARCHITECTURE_HOTSPOT` (T-P3.1): a student fires when their summed
+    /// blame-attribution weight across the sprint's `architecture_violations`
+    /// rows is at or above this value. 1.0 ≈ "owns one full violation"; the
+    /// default 2.0 picks up students who own multiple violations or a clear
+    /// majority share of one severe span.
+    pub architecture_hotspot_min_weighted: f64,
+}
+
+impl Default for DetectorThresholdsConfig {
+    fn default() -> Self {
+        Self {
+            gini_warn: 0.35,
+            gini_crit: 0.50,
+            composite_warn: 0.20,
+            composite_crit: 0.10,
+            late_regularity: 0.20,
+            team_inequality_outlier_deviation: 0.35,
+            trajectory_cv_low: 0.20,
+            trajectory_cv_high: 0.40,
+            trajectory_slope_p_value: 0.15,
+            regularity_declining_delta: -0.30,
+            cosmetic_rewrite_pct_of_lat: 0.05,
+            bulk_rename_adds_dels_ratio: 0.8,
+            bulk_rename_line_floor: 50,
+            architecture_hotspot_min_weighted: 2.0,
+        }
+    }
+}
+
 // --- Raw TOML deserialization structs (internal) ---
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +311,46 @@ struct RawConfig {
     build: RawBuild,
     #[serde(default)]
     regularity: Option<RawRegularity>,
+    #[serde(default)]
+    detector_thresholds: RawDetectorThresholds,
+    #[serde(default)]
+    grading: RawGrading,
+    #[serde(default)]
+    mutation: RawMutation,
+    #[serde(default)]
+    architecture: RawArchitecture,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawArchitecture {
+    #[serde(default)]
+    llm_review: bool,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    rubric_path: Option<String>,
+    #[serde(default)]
+    llm_skip_globs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawGrading {
+    #[serde(default)]
+    hidden_thresholds: bool,
+    #[serde(default)]
+    jitter_pct: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawMutation {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    info_threshold: Option<f64>,
+    #[serde(default)]
+    warning_threshold: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,14 +373,24 @@ struct RawThresholds {
     micro_pr_max_lines: u32,
     low_doc_score: u32,
     contribution_imbalance_stddev: f64,
+    #[serde(default = "default_contribution_imbalance_min_abs_deviation")]
+    contribution_imbalance_min_abs_deviation: f64,
     #[serde(default = "default_low_survival_rate_stddev")]
     low_survival_rate_stddev: f64,
+    #[serde(default = "default_low_survival_absolute_floor")]
+    low_survival_absolute_floor: f64,
     #[serde(default = "default_raw_normalized_divergence_threshold")]
     raw_normalized_divergence_threshold: f64,
 }
 
 fn default_low_survival_rate_stddev() -> f64 {
     1.5
+}
+fn default_contribution_imbalance_min_abs_deviation() -> f64 {
+    0.05
+}
+fn default_low_survival_absolute_floor() -> f64 {
+    0.85
 }
 fn default_raw_normalized_divergence_threshold() -> f64 {
     0.20
@@ -215,6 +417,8 @@ struct RawCurriculum {
     extra_allowed_imports: Vec<String>,
     android_template_repo: Option<PathBuf>,
     spring_template_repo: Option<PathBuf>,
+    #[serde(default)]
+    freeze_after_sprint_end: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -251,10 +455,42 @@ struct RawBuildProfile {
     working_dir: String,
     #[serde(default)]
     env: HashMap<String, String>,
+    #[serde(default)]
+    mutation_command: Option<String>,
+    #[serde(default = "default_mutation_timeout_seconds")]
+    mutation_timeout_seconds: u64,
+    #[serde(default = "default_mutation_report_path")]
+    mutation_report_path: String,
 }
 
 fn default_working_dir() -> String {
     ".".to_string()
+}
+
+fn default_mutation_timeout_seconds() -> u64 {
+    600
+}
+
+fn default_mutation_report_path() -> String {
+    "build/reports/pitest/mutations.xml".to_string()
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawDetectorThresholds {
+    gini_warn: Option<f64>,
+    gini_crit: Option<f64>,
+    composite_warn: Option<f64>,
+    composite_crit: Option<f64>,
+    late_regularity: Option<f64>,
+    team_inequality_outlier_deviation: Option<f64>,
+    trajectory_cv_low: Option<f64>,
+    trajectory_cv_high: Option<f64>,
+    trajectory_slope_p_value: Option<f64>,
+    regularity_declining_delta: Option<f64>,
+    cosmetic_rewrite_pct_of_lat: Option<f64>,
+    bulk_rename_adds_dels_ratio: Option<f64>,
+    bulk_rename_line_floor: Option<i64>,
+    architecture_hotspot_min_weighted: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,6 +505,50 @@ struct RawRegularity {
 }
 
 impl Config {
+    /// Construct a `Config` populated with the same defaults that an empty
+    /// `course.toml` would produce. Intended for tests in dependent crates
+    /// that exercise pipeline functions taking `&Config` without wanting to
+    /// touch the filesystem.
+    pub fn test_default() -> Self {
+        Config {
+            course_name: "test-course".to_string(),
+            num_sprints: 4,
+            pm_base_url: "https://example.test".to_string(),
+            github_org: "example".to_string(),
+            course_id: 1,
+            claude_scripts_path: String::new(),
+            thresholds: ThresholdConfig {
+                carrying_team_pct: 0.40,
+                cramming_hours: 48,
+                cramming_commit_pct: 0.70,
+                single_commit_dump_lines: 200,
+                micro_pr_max_lines: 10,
+                low_doc_score: 2,
+                contribution_imbalance_stddev: 1.5,
+                contribution_imbalance_min_abs_deviation: 0.05,
+                low_survival_rate_stddev: 1.5,
+                low_survival_absolute_floor: 0.85,
+                raw_normalized_divergence_threshold: 0.20,
+            },
+            trackdev_token: String::new(),
+            github_token: String::new(),
+            sprints: HashMap::new(),
+            teams: Vec::new(),
+            curriculum_slides_dir: None,
+            curriculum_extra_imports: Vec::new(),
+            curriculum_template_repos: HashMap::new(),
+            curriculum_freeze_after_sprint_end: false,
+            repo_analysis: RepoAnalysisConfig::default(),
+            build_profiles: Vec::new(),
+            build: BuildConfig::default(),
+            regularity: RegularityConfig::default(),
+            detector_thresholds: DetectorThresholdsConfig::default(),
+            grading: GradingConfig::default(),
+            mutation: MutationConfig::default(),
+            architecture: ArchitectureConfig::default(),
+        }
+    }
+
     pub fn load(config_dir: &Path) -> Result<Self> {
         let toml_path = config_dir.join("course.toml");
         if !toml_path.exists() {
@@ -285,7 +565,11 @@ impl Config {
             micro_pr_max_lines: raw.thresholds.micro_pr_max_lines,
             low_doc_score: raw.thresholds.low_doc_score,
             contribution_imbalance_stddev: raw.thresholds.contribution_imbalance_stddev,
+            contribution_imbalance_min_abs_deviation: raw
+                .thresholds
+                .contribution_imbalance_min_abs_deviation,
             low_survival_rate_stddev: raw.thresholds.low_survival_rate_stddev,
+            low_survival_absolute_floor: raw.thresholds.low_survival_absolute_floor,
             raw_normalized_divergence_threshold: raw.thresholds.raw_normalized_divergence_threshold,
         };
 
@@ -407,6 +691,9 @@ impl Config {
                 timeout_seconds: p.timeout_seconds,
                 working_dir: p.working_dir,
                 env: p.env,
+                mutation_command: p.mutation_command,
+                mutation_timeout_seconds: p.mutation_timeout_seconds,
+                mutation_report_path: p.mutation_report_path,
             })
             .collect();
 
@@ -436,6 +723,66 @@ impl Config {
             None => regularity_defaults,
         };
 
+        let detector_defaults = DetectorThresholdsConfig::default();
+        let detector_thresholds = DetectorThresholdsConfig {
+            gini_warn: raw
+                .detector_thresholds
+                .gini_warn
+                .unwrap_or(detector_defaults.gini_warn),
+            gini_crit: raw
+                .detector_thresholds
+                .gini_crit
+                .unwrap_or(detector_defaults.gini_crit),
+            composite_warn: raw
+                .detector_thresholds
+                .composite_warn
+                .unwrap_or(detector_defaults.composite_warn),
+            composite_crit: raw
+                .detector_thresholds
+                .composite_crit
+                .unwrap_or(detector_defaults.composite_crit),
+            late_regularity: raw
+                .detector_thresholds
+                .late_regularity
+                .unwrap_or(detector_defaults.late_regularity),
+            team_inequality_outlier_deviation: raw
+                .detector_thresholds
+                .team_inequality_outlier_deviation
+                .unwrap_or(detector_defaults.team_inequality_outlier_deviation),
+            trajectory_cv_low: raw
+                .detector_thresholds
+                .trajectory_cv_low
+                .unwrap_or(detector_defaults.trajectory_cv_low),
+            trajectory_cv_high: raw
+                .detector_thresholds
+                .trajectory_cv_high
+                .unwrap_or(detector_defaults.trajectory_cv_high),
+            trajectory_slope_p_value: raw
+                .detector_thresholds
+                .trajectory_slope_p_value
+                .unwrap_or(detector_defaults.trajectory_slope_p_value),
+            regularity_declining_delta: raw
+                .detector_thresholds
+                .regularity_declining_delta
+                .unwrap_or(detector_defaults.regularity_declining_delta),
+            cosmetic_rewrite_pct_of_lat: raw
+                .detector_thresholds
+                .cosmetic_rewrite_pct_of_lat
+                .unwrap_or(detector_defaults.cosmetic_rewrite_pct_of_lat),
+            bulk_rename_adds_dels_ratio: raw
+                .detector_thresholds
+                .bulk_rename_adds_dels_ratio
+                .unwrap_or(detector_defaults.bulk_rename_adds_dels_ratio),
+            bulk_rename_line_floor: raw
+                .detector_thresholds
+                .bulk_rename_line_floor
+                .unwrap_or(detector_defaults.bulk_rename_line_floor),
+            architecture_hotspot_min_weighted: raw
+                .detector_thresholds
+                .architecture_hotspot_min_weighted
+                .unwrap_or(detector_defaults.architecture_hotspot_min_weighted),
+        };
+
         Ok(Config {
             course_name: raw.course.name,
             num_sprints: raw.course.num_sprints,
@@ -451,10 +798,147 @@ impl Config {
             curriculum_slides_dir: raw.curriculum.slides_dir,
             curriculum_extra_imports: raw.curriculum.extra_allowed_imports,
             curriculum_template_repos: template_repos,
+            curriculum_freeze_after_sprint_end: raw.curriculum.freeze_after_sprint_end,
             repo_analysis,
             build_profiles,
             build,
             regularity,
+            detector_thresholds,
+            grading: GradingConfig {
+                hidden_thresholds: raw.grading.hidden_thresholds,
+                jitter_pct: raw.grading.jitter_pct.unwrap_or(0.0),
+            },
+            mutation: MutationConfig {
+                enabled: raw.mutation.enabled,
+                info_threshold: raw
+                    .mutation
+                    .info_threshold
+                    .unwrap_or(MutationConfig::default().info_threshold),
+                warning_threshold: raw
+                    .mutation
+                    .warning_threshold
+                    .unwrap_or(MutationConfig::default().warning_threshold),
+            },
+            architecture: {
+                let arch_defaults = ArchitectureConfig::default();
+                ArchitectureConfig {
+                    llm_review: raw.architecture.llm_review,
+                    model_id: raw
+                        .architecture
+                        .model_id
+                        .unwrap_or(arch_defaults.model_id),
+                    max_tokens: raw
+                        .architecture
+                        .max_tokens
+                        .unwrap_or(arch_defaults.max_tokens),
+                    rubric_path: raw
+                        .architecture
+                        .rubric_path
+                        .unwrap_or(arch_defaults.rubric_path),
+                    llm_skip_globs: raw
+                        .architecture
+                        .llm_skip_globs
+                        .unwrap_or(arch_defaults.llm_skip_globs),
+                }
+            },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL_TOML: &str = r#"
+[course]
+name = "test-course"
+num_sprints = 4
+pm_base_url = "https://example.test"
+github_org = "example"
+course_id = 1
+
+[thresholds]
+carrying_team_pct = 0.4
+cramming_hours = 48
+cramming_commit_pct = 0.7
+single_commit_dump_lines = 200
+micro_pr_max_lines = 10
+low_doc_score = 2
+contribution_imbalance_stddev = 1.5
+"#;
+
+    fn write_config(dir: &Path, body: &str) {
+        std::fs::write(dir.join("course.toml"), body).unwrap();
+    }
+
+    #[test]
+    fn detector_thresholds_default_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_config(tmp.path(), MINIMAL_TOML);
+        let cfg = Config::load(tmp.path()).expect("load minimal config");
+        let dt = cfg.detector_thresholds;
+        let defaults = DetectorThresholdsConfig::default();
+        assert_eq!(dt.gini_warn, defaults.gini_warn);
+        assert_eq!(dt.gini_crit, defaults.gini_crit);
+        assert_eq!(dt.composite_warn, defaults.composite_warn);
+        assert_eq!(dt.composite_crit, defaults.composite_crit);
+        assert_eq!(dt.late_regularity, defaults.late_regularity);
+        assert_eq!(
+            dt.team_inequality_outlier_deviation,
+            defaults.team_inequality_outlier_deviation
+        );
+        assert_eq!(dt.trajectory_cv_low, defaults.trajectory_cv_low);
+        assert_eq!(dt.trajectory_cv_high, defaults.trajectory_cv_high);
+        assert_eq!(
+            dt.trajectory_slope_p_value,
+            defaults.trajectory_slope_p_value
+        );
+        assert_eq!(
+            dt.regularity_declining_delta,
+            defaults.regularity_declining_delta
+        );
+        assert_eq!(
+            dt.cosmetic_rewrite_pct_of_lat,
+            defaults.cosmetic_rewrite_pct_of_lat
+        );
+        assert_eq!(
+            dt.bulk_rename_adds_dels_ratio,
+            defaults.bulk_rename_adds_dels_ratio
+        );
+        assert_eq!(dt.bulk_rename_line_floor, defaults.bulk_rename_line_floor);
+    }
+
+    #[test]
+    fn curriculum_freeze_after_sprint_end_defaults_to_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_config(tmp.path(), MINIMAL_TOML);
+        let cfg = Config::load(tmp.path()).expect("load minimal config");
+        assert!(!cfg.curriculum_freeze_after_sprint_end);
+    }
+
+    #[test]
+    fn curriculum_freeze_after_sprint_end_can_be_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!("{MINIMAL_TOML}\n[curriculum]\nfreeze_after_sprint_end = true\n");
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("load with freeze flag");
+        assert!(cfg.curriculum_freeze_after_sprint_end);
+    }
+
+    #[test]
+    fn detector_thresholds_override_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_TOML}\n[detector_thresholds]\ngini_warn = 0.42\ncomposite_crit = 0.05\nbulk_rename_line_floor = 100\nregularity_declining_delta = -0.10\n"
+        );
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("load overridden config");
+        assert_eq!(cfg.detector_thresholds.gini_warn, 0.42);
+        assert_eq!(cfg.detector_thresholds.composite_crit, 0.05);
+        assert_eq!(cfg.detector_thresholds.bulk_rename_line_floor, 100);
+        assert_eq!(cfg.detector_thresholds.regularity_declining_delta, -0.10);
+        // Untouched keys keep defaults.
+        let defaults = DetectorThresholdsConfig::default();
+        assert_eq!(cfg.detector_thresholds.gini_crit, defaults.gini_crit);
     }
 }
