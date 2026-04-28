@@ -14,11 +14,60 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
+use chrono::{Datelike, TimeZone, Timelike};
+use chrono_tz::Europe::Madrid;
+use chrono_tz::OffsetName;
 use rusqlite::{params_from_iter, types::Value, Connection};
+use sprint_grader_core::time::parse_iso;
 use tracing::info;
 
 use crate::charts::{html_escape, sparkline_svg, stacked_bars_svg, StackedRow};
 use crate::flag_details::{enrich_flag_details, render_flag_details, render_flag_severity};
+
+/// Render an ISO-8601 / minute-precision timestamp as a Catalan-academic
+/// human form anchored to UDG's local time (Europe/Madrid). Falls back to
+/// the raw string when parsing fails so we never silently swallow data.
+///
+/// The DB stores TrackDev's UTC `YYYY-MM-DDThh:mmZ`; students see the
+/// sprint window in their own clock with the live tz abbreviation
+/// (CET in winter, CEST in summer) — which is what the deadlines on
+/// the platform UI used.
+fn humanize_local_dt(ts: &str) -> String {
+    let Some(utc) = parse_iso(ts) else {
+        return ts.to_string();
+    };
+    let local = utc.with_timezone(&Madrid);
+    let offset = Madrid.offset_from_utc_datetime(&local.naive_utc());
+    let abbr = offset.abbreviation();
+    let month = month_name_en(local.month());
+    format!(
+        "{day} {month} {year}, {h:02}:{m:02} {tz}",
+        day = local.day(),
+        month = month,
+        year = local.year(),
+        h = local.hour(),
+        m = local.minute(),
+        tz = abbr,
+    )
+}
+
+fn month_name_en(m: u32) -> &'static str {
+    match m {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => "",
+    }
+}
 
 type DoneTaskRow = (
     i64,
@@ -939,7 +988,12 @@ fn write_section_a(
             )
             .ok();
         if let Some((Some(s), Some(e))) = sprint_info {
-            let _ = writeln!(buf, "_Sprint window: {} → {}_\n", s, e);
+            let _ = writeln!(
+                buf,
+                "_Sprint window: {} → {}_\n",
+                humanize_local_dt(&s),
+                humanize_local_dt(&e)
+            );
         }
     }
 
@@ -1834,6 +1888,290 @@ fn write_section_c(
     Ok(())
 }
 
+/// Default TOC depth: include H2 (sections / sprint headers) and H3
+/// (students, peer groups, A/B/C subsections in multi-sprint mode). Going
+/// deeper would push student-detail subsections (e.g. Tasks/PRs) into the
+/// TOC even though they're not separate headings, and shallower would lose
+/// the per-student jump targets students actually want.
+const TOC_MAX_DEPTH: usize = 3;
+
+/// Compute a GitHub-style anchor slug for `text`, mutating `used` so repeated
+/// headings get suffixed `-1`, `-2`, … in the order they appear. Mirrors the
+/// algorithm used by GitHub/GitLab/cmark-gfm renderers: lowercase the text,
+/// drop everything that isn't alphanumeric / `-` / `_`, and turn whitespace
+/// into hyphens. Backslash-escapes (e.g. `\|` produced by `md_escape`) drop
+/// out the same way they do at render time, so the slug stays in sync.
+fn slugify_anchor(text: &str, used: &mut HashMap<String, usize>) -> String {
+    let mut s = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            for low in ch.to_lowercase() {
+                s.push(low);
+            }
+        } else if ch.is_whitespace() {
+            s.push('-');
+        } else if ch == '-' || ch == '_' {
+            s.push(ch);
+        }
+    }
+    let count = used.entry(s.clone()).or_insert(0);
+    let result = if *count == 0 {
+        s.clone()
+    } else {
+        format!("{}-{}", s, *count)
+    };
+    *count += 1;
+    result
+}
+
+/// Heading text prefix (case-insensitive) used to recognise the cumulative
+/// per-student summary section. Per-student rows under this section are
+/// suppressed in the TOC because the section already lists every student
+/// linearly — duplicating them in the index just doubles the noise.
+const CUMULATIVE_SECTION_PREFIX: &str = "d. cumulative";
+
+/// Heading text prefix (case-insensitive) used to recognise the glossary.
+/// The glossary's H3 subsections are pedagogical groupings and don't add
+/// real navigation value over the H2 entry; collapse them in the TOC.
+const GLOSSARY_SECTION_PREFIX: &str = "0. glossary";
+
+/// Heading text prefix (case-insensitive) used to recognise the per-student
+/// dashboards section. Students under this section are surfaced in the TOC
+/// regardless of nesting depth — in multi-sprint reports section B is at
+/// H3 and student names sit at H4, which would otherwise fall outside
+/// `TOC_MAX_DEPTH` and disappear from the navigation index.
+const STUDENT_SECTION_PREFIX: &str = "b. student";
+
+/// Build a Markdown table of contents from `body` by scanning every line that
+/// starts with `#`. H1 is treated as the document title and is skipped; the
+/// TOC entries cover depths 2..=`max_depth`. Indentation is two spaces per
+/// nesting level so GitHub renders a proper nested list. Returns an empty
+/// string when the body has no in-scope headings.
+///
+/// All headings (including ones we don't render in the TOC) are pushed
+/// through `slugify_anchor` so the duplicate-counter stays aligned with what
+/// the rendering engine will assign — without that, e.g. a multi-sprint
+/// report's repeated "A. Team snapshot" anchors would drift off-by-one.
+///
+/// H3 entries whose nearest H2 ancestor is the cumulative per-student
+/// summary are intentionally dropped from the TOC: the section already
+/// enumerates every student in document order, so listing them in the
+/// index too just bloats the navigation header.
+fn build_toc(body: &str, max_depth: usize) -> String {
+    if max_depth < 2 {
+        return String::new();
+    }
+    let mut entries: Vec<(usize, String, String)> = Vec::new();
+    let mut used: HashMap<String, usize> = HashMap::new();
+    let mut current_h2_text: Option<String> = None;
+    let mut current_h3_text: Option<String> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+        if hashes == 0 || hashes > 6 {
+            continue;
+        }
+        let rest = &trimmed[hashes..];
+        if !rest.starts_with(' ') && !rest.starts_with('\t') {
+            continue;
+        }
+        let text = rest.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let anchor = slugify_anchor(text, &mut used);
+        // Maintain ancestor pointers so children can interrogate them.
+        // A new H2 invalidates the H3 pointer; an H3 sets it.
+        if hashes == 2 {
+            current_h2_text = Some(text.to_string());
+            current_h3_text = None;
+        } else if hashes == 3 {
+            current_h3_text = Some(text.to_string());
+        }
+        // Section B per-student rows live at H4 in multi-sprint reports
+        // and at H3 in single-sprint reports. Surface them in the TOC
+        // either way: if the immediate H3 ancestor is "B. Student
+        // dashboards", an H4 row is allowed through even past max_depth.
+        let in_student_section_overflow = hashes == max_depth + 1
+            && current_h3_text
+                .as_deref()
+                .map(|s| s.to_lowercase().starts_with(STUDENT_SECTION_PREFIX))
+                .unwrap_or(false);
+
+        if hashes < 2 || (hashes > max_depth && !in_student_section_overflow) {
+            continue;
+        }
+        // Drop H3 rows under sections that already enumerate their
+        // children inline (the cumulative summary lists every student;
+        // the glossary's subsections are pedagogical groupings, not
+        // navigation targets).
+        if hashes > 2 {
+            if let Some(parent) = &current_h2_text {
+                let lower = parent.to_lowercase();
+                if lower.starts_with(CUMULATIVE_SECTION_PREFIX)
+                    || lower.starts_with(GLOSSARY_SECTION_PREFIX)
+                {
+                    continue;
+                }
+            }
+        }
+        entries.push((hashes, text.to_string(), anchor));
+    }
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(entries.len() * 64 + 64);
+    out.push_str("## Table of contents\n\n");
+    for (depth, text, anchor) in &entries {
+        let indent = "  ".repeat(depth - 2);
+        let _ = writeln!(out, "{}- [{}](#{})", indent, text, anchor);
+    }
+    out.push('\n');
+    out
+}
+
+/// Insert a TOC block in `buf` right before the first H2 heading. Picks up
+/// after the H1 banner (and any leading blockquote / italic line such as
+/// `_Sprint window: …_`) so the TOC sits between the title and the first
+/// real section. No-op when the body has no H2.
+fn insert_toc(buf: &mut String, max_depth: usize) {
+    let toc = build_toc(buf, max_depth);
+    if toc.is_empty() {
+        return;
+    }
+    if buf.starts_with("## ") {
+        buf.insert_str(0, &toc);
+        return;
+    }
+    if let Some(i) = buf.find("\n## ") {
+        buf.insert_str(i + 1, &toc);
+    }
+}
+
+/// Static glossary explaining every metric, signal and severity students
+/// will encounter in the rest of the report. Rendered as section "0." so
+/// it precedes A/B/C/D and shows up at the top of the TOC. Edit this
+/// string when introducing a new metric column or flag family — the
+/// glossary is the canonical student-facing reference.
+const GLOSSARY_BODY: &str = "\
+## 0. Glossary — how to read this report\n\
+\n\
+This report aggregates four kinds of evidence per sprint: **task delivery** \
+(TrackDev), **code authorship** (Git blame on merged PRs), **code quality \
+& process** (commits, reviews, build outcomes), and **architectural \
+conformance** (static analysis of the cloned repos). The terms below are \
+used throughout the tables, charts and flags.\n\
+\n\
+### Code volume\n\
+\n\
+- **LAT** — *Lines Added Total*. Raw `+` lines in the merged diff (before \
+any filtering). The most permissive measure of code volume; includes \
+formatting changes, generated code and renames.\n\
+- **LAR** — *Lines Added Real*. LAT after stripping blank lines and \
+comment-only lines. The diff line count we treat as \"actual code\" \
+without any survival or cosmetic-rewrite filter applied.\n\
+- **LD** — *Lines Deleted*. Lines removed by the PR's diff, used to \
+recognise legitimate refactor/cleanup work that LS alone would miss.\n\
+- **LS** — *Lines Surviving*. Statements introduced by the student that \
+still exist (after AST-fingerprint-aware blame) at the report's reference \
+date. This is the volume figure used in Section B and in flags. LS \
+attributes at the *statement* level, not the line level — whitespace \
+changes and identifier renames don't inflate or deflate it.\n\
+- **LS/pt** — LS divided by the task's estimation points. A density \
+measure: high values mean the task delivered more surviving code per \
+estimated point than typical; low values mean the opposite.\n\
+- **Density** *(cumulative table)* — surviving statements per estimated \
+point across the whole sprint. A code-volume signal at the student level.\n\
+- **Weighted PR Lines** — each PR's `+` and `-` lines distributed across \
+its linked tasks weighted by estimation-point share. Used in the \
+cumulative summary so multi-task PRs don't double-count.\n\
+\n\
+### Estimation calibration\n\
+\n\
+- **β_u** — per-student estimation bias in logits, derived from a \
+Bayesian Rasch-style model fit across the project's tasks. Posterior \
+mean is shown alongside a glyph: **▲** over-estimator (tasks worth less \
+than they were pointed), **▼** under-estimator (tasks worth more), **≈** \
+calibrated within ±0.5 logits. The gauge fixes the team mean β at zero, \
+so β_u is always relative to teammates.\n\
+\n\
+### PR submission timing\n\
+\n\
+The horizontal stacked bar in section A classifies each merged PR by \
+when it landed relative to the sprint deadline:\n\
+\n\
+- **Regular** — submitted with at least a working day of runway.\n\
+- **Late** — close to the deadline but not at the wire.\n\
+- **Critical / Cramming** — pushed in the final hours; correlates with \
+weak review and rushed integration.\n\
+- **Fix** — explicit fix-up PR (title or linked task type).\n\
+\n\
+### Code ownership\n\
+\n\
+- **Truck factor** — the smallest number of authors whose combined \
+ownership covers ≥ 50 % of the team's surviving code. Higher is better \
+(less concentrated). The owners list shows top contributors by share.\n\
+\n\
+### Architecture conformance\n\
+\n\
+The cloned repos are scanned against the project rubric \
+(`config/architecture.toml`). Every offending Java file produces a \
+**violation** with three pieces of metadata:\n\
+\n\
+- **Rule** — what was violated. Layered rules read as `<from>` *must \
+not depend on* `<to>` (e.g. *presentation must not depend on \
+infrastructure*); AST rules document a structural constraint such as \
+\"fragments must not hold Retrofit fields\".\n\
+- **Severity** — *CRITICAL*, *WARNING* or *INFO*, set by the rule itself.\n\
+- **Attribution** — the dominant author of the offending file (by \
+surviving statements). That author owns the violation in section B.\n\
+\n\
+### Flags\n\
+\n\
+Flags are signal triggers: each one fires when a specific evidence \
+threshold is crossed. They appear under **Flags** in each student \
+dashboard with a severity tag:\n\
+\n\
+- **CRITICAL** — strong evidence of an issue that warrants direct \
+discussion (e.g. *Ghost contributor*, *PR does not compile*).\n\
+- **WARNING** — meaningful concern that the student should be aware of \
+(e.g. *Low survival rate*, *Cramming*, *Architecture drift*).\n\
+- **INFO** — informational signal, often paired contextually with a \
+warning elsewhere (e.g. the *Cosmetic rewrite — victim* row pairs with \
+the *actor* row).\n\
+\n\
+The **⚠** glyph next to a PR number means the data pipeline recorded an \
+attribution error (base-SHA fallback, missing author, GitHub HTTP \
+hiccup). It is observability metadata, never a grading penalty.\n\
+\n\
+### Doc-score signals\n\
+\n\
+- **Avg Doc Score** — quality of PR descriptions and titles, scored on \
+0–4. Computed by an LLM rubric when an Anthropic key is configured, \
+otherwise by deterministic heuristics (empty body / generic title).\n\
+\n\
+### Peer-group analysis (section C)\n\
+\n\
+Tasks are bucketed into peer groups by **stack × layer × action** (e.g. \
+*spring · controller · create*). Within each group, tasks whose \
+points / LS / LS-per-point fall outside a MAD-based band are marked as \
+**outliers**. An outlier is a discussion seed, not a verdict.\n\
+\n";
+
+/// Inject the static glossary at the top of `buf`, just after the H1
+/// banner (and any leading blockquote / italic line). The function is a
+/// no-op when there is no H2 heading to anchor before — the glossary is
+/// only useful in the context of a full report.
+fn insert_glossary(buf: &mut String) {
+    if buf.starts_with("## ") {
+        buf.insert_str(0, GLOSSARY_BODY);
+        return;
+    }
+    if let Some(i) = buf.find("\n## ") {
+        buf.insert_str(i + 1, GLOSSARY_BODY);
+    }
+}
+
 pub fn generate_markdown_report(
     conn: &Connection,
     sprint_id: i64,
@@ -1902,6 +2240,10 @@ pub fn generate_markdown_report_to_path_ex(
             write_cumulative_summary(&mut buf, conn, project_id, sids, 2)?;
         }
     }
+    // Glossary must land before the TOC builder runs so its heading is
+    // surfaced as the first TOC entry.
+    insert_glossary(&mut buf);
+    insert_toc(&mut buf, TOC_MAX_DEPTH);
 
     std::fs::write(output_path, buf)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -1972,7 +2314,11 @@ pub fn generate_markdown_report_multi_to_path(
         let window = if start.is_empty() && end.is_empty() {
             String::new()
         } else {
-            format!(" ({} — {})", start, end)
+            format!(
+                " ({} — {})",
+                humanize_local_dt(&start),
+                humanize_local_dt(&end)
+            )
         };
         let heading = if sprint_name.is_empty() || sprint_name == banner_num {
             banner_num
@@ -1997,6 +2343,8 @@ pub fn generate_markdown_report_multi_to_path(
     if !sprint_ids_ordered.is_empty() {
         write_cumulative_summary(&mut buf, conn, project_id, sprint_ids_ordered, 2)?;
     }
+    insert_glossary(&mut buf);
+    insert_toc(&mut buf, TOC_MAX_DEPTH);
 
     std::fs::write(output_path, &buf)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -2393,6 +2741,214 @@ mod tests {
         assert!(body.contains("https://github.com/udg-pds/spring-foo/pull/42"));
         // Flag bullet
         assert!(body.contains("LOW_DOC_SCORE"));
+    }
+
+    #[test]
+    fn markdown_report_emits_table_of_contents_before_first_section() {
+        let conn = mk_conn();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let toc_idx = body
+            .find("## Table of contents")
+            .expect("TOC heading missing");
+        let section_a = body.find("## A. Team snapshot").expect("section A missing");
+        assert!(
+            toc_idx < section_a,
+            "TOC must precede section A so it acts as the document index"
+        );
+        // TOC entries link to section anchors students will jump to.
+        assert!(body.contains("[A. Team snapshot](#a-team-snapshot)"));
+        assert!(body.contains("[B. Student dashboards](#b-student-dashboards)"));
+        assert!(body.contains("[C. Peer-group analysis](#c-peer-group-analysis)"));
+        // Student-level entry is nested one level beyond section B.
+        assert!(body.contains("  - [Alice Bob](#alice-bob)"));
+    }
+
+    #[test]
+    fn humanize_local_dt_renders_winter_and_summer_with_local_abbrev() {
+        // March 1 23:00 UTC lands at 00:00 CET on March 2 in Madrid.
+        // The student-facing string must show local clock + tz abbrev.
+        assert_eq!(
+            humanize_local_dt("2026-03-01T23:00Z"),
+            "2 March 2026, 00:00 CET"
+        );
+        // June 5 21:59 UTC is during DST, so Madrid reads 23:59 CEST.
+        assert_eq!(
+            humanize_local_dt("2026-06-05T21:59Z"),
+            "5 June 2026, 23:59 CEST"
+        );
+        // Garbage input is passed through verbatim — never silently dropped.
+        assert_eq!(humanize_local_dt("not a date"), "not a date");
+    }
+
+    #[test]
+    fn markdown_report_includes_glossary_before_section_a_with_toc_link() {
+        let conn = mk_conn();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let glossary_idx = body
+            .find("## 0. Glossary")
+            .expect("glossary heading missing");
+        let section_a = body.find("## A. Team snapshot").expect("section A missing");
+        assert!(
+            glossary_idx < section_a,
+            "Glossary must precede section A so it acts as the report preface"
+        );
+        // Glossary is reachable from the TOC under its own anchor.
+        assert!(
+            body.contains(
+                "[0. Glossary — how to read this report](#0-glossary--how-to-read-this-report)"
+            ),
+            "TOC must link to the glossary heading: {body}"
+        );
+        // A few canonical glossary terms students will look up.
+        for term in [
+            "**LAT**",
+            "**LAR**",
+            "**LS**",
+            "**β_u**",
+            "Truck factor",
+            "Severity",
+        ] {
+            assert!(
+                body.contains(term),
+                "glossary missing required term {term}: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_toc_surfaces_student_dashboards_children_in_multi_sprint_mode() {
+        // Multi-sprint structure: A/B/C live at H3 under '## Sprint K',
+        // students under section B sit at H4. They must still appear in
+        // the TOC, indented one level deeper than section B itself, even
+        // though H4 is past the default depth-3 cutoff.
+        let body = "# Project report\n\
+                    \n\
+                    ## Sprint 1\n\
+                    \n\
+                    ### A. Team snapshot\n\
+                    \n\
+                    ### B. Student dashboards\n\
+                    \n\
+                    #### Alice Bob\n\
+                    \n\
+                    #### Carol Dee\n\
+                    \n\
+                    ### C. Peer-group analysis\n\
+                    \n\
+                    #### group-1\n";
+        let toc = build_toc(body, 3);
+        // Students under B are present, and indented two levels (4 spaces)
+        // because they live at H4 under H3 section B.
+        assert!(
+            toc.contains("    - [Alice Bob](#alice-bob)"),
+            "section B students must appear indented under section B in multi-sprint TOC: {toc}"
+        );
+        assert!(
+            toc.contains("    - [Carol Dee](#carol-dee)"),
+            "all section B students must appear: {toc}"
+        );
+        // Section C children stay collapsed — only section B got the
+        // depth-overflow exception.
+        assert!(
+            !toc.contains("[group-1]"),
+            "non-section-B H4 entries must remain hidden: {toc}"
+        );
+    }
+
+    #[test]
+    fn build_toc_collapses_glossary_subsections() {
+        // Glossary H3 subsections are pedagogical groupings, not navigation
+        // anchors — the TOC should list the H2 entry and stop.
+        let body = "# Sprint report\n\
+                    \n\
+                    ## 0. Glossary — how to read this report\n\
+                    \n\
+                    ### Code volume\n\
+                    \n\
+                    ### Flags\n\
+                    \n\
+                    ## A. Team snapshot\n";
+        let toc = build_toc(body, 3);
+        assert!(toc.contains("[0. Glossary"));
+        assert!(
+            !toc.contains("[Code volume]"),
+            "glossary subsection leaked into TOC: {toc}"
+        );
+        assert!(
+            !toc.contains("[Flags]"),
+            "glossary subsection leaked into TOC: {toc}"
+        );
+        assert!(toc.contains("[A. Team snapshot](#a-team-snapshot)"));
+    }
+
+    #[test]
+    fn build_toc_keeps_section_b_students_but_drops_cumulative_students() {
+        // Section B students must remain navigable; the cumulative summary
+        // already lists every student linearly, so its H3 rows are dropped
+        // from the TOC. The H2 cumulative heading itself still appears.
+        let body = "# Sprint report\n\
+                    \n\
+                    ## B. Student dashboards\n\
+                    \n\
+                    ### Alice Bob\n\
+                    \n\
+                    ### Carol Dee\n\
+                    \n\
+                    ## D. Cumulative per-student summary\n\
+                    \n\
+                    ### Alice Bob\n\
+                    \n\
+                    ### Carol Dee\n";
+        let toc = build_toc(body, 3);
+        assert!(toc.contains("[B. Student dashboards](#b-student-dashboards)"));
+        assert!(toc.contains("  - [Alice Bob](#alice-bob)"));
+        assert!(toc.contains("  - [Carol Dee](#carol-dee)"));
+        assert!(
+            toc.contains("[D. Cumulative per-student summary](#d-cumulative-per-student-summary)")
+        );
+        // The collision-suffixed slugs (alice-bob-1, carol-dee-1) belong to
+        // students rendered under the cumulative section — they must not
+        // surface as their own TOC rows.
+        assert!(
+            !toc.contains("(#alice-bob-1)"),
+            "cumulative-section per-student row leaked into TOC: {toc}"
+        );
+        assert!(
+            !toc.contains("(#carol-dee-1)"),
+            "cumulative-section per-student row leaked into TOC: {toc}"
+        );
+    }
+
+    #[test]
+    fn build_toc_disambiguates_repeated_headings_with_numeric_suffix() {
+        let body = "# Project\n\n## Sprint 1\n\n### A. Team snapshot\n\n## Sprint 2\n\n### A. Team snapshot\n";
+        let toc = build_toc(body, 3);
+        // First "A. Team snapshot" gets the bare slug; the second collides
+        // and earns the GitHub-style `-1` suffix.
+        assert!(toc.contains("[A. Team snapshot](#a-team-snapshot)"));
+        assert!(toc.contains("[A. Team snapshot](#a-team-snapshot-1)"));
+    }
+
+    #[test]
+    fn build_toc_skips_h1_and_returns_empty_when_no_h2_headings() {
+        // H1-only body has no in-scope entries; we should not emit a stub TOC.
+        assert_eq!(build_toc("# Title only\n", 3), "");
+    }
+
+    #[test]
+    fn slugify_anchor_lowercases_unicode_and_drops_punctuation() {
+        let mut used = HashMap::new();
+        // Accented letters are alphanumeric — they survive lowercasing.
+        // Punctuation (period, parens, em-dash) is stripped; whitespace
+        // becomes a hyphen.
+        assert_eq!(
+            slugify_anchor("José Núñez (Sprint 1)", &mut used),
+            "josé-núñez-sprint-1"
+        );
     }
 
     #[test]
