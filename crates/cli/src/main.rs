@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 use sprint_grader_collect::{run_collection, CollectOpts};
 use sprint_grader_core::{Config, Database};
-use sprint_grader_orchestration::android_repo_root;
+use sprint_grader_orchestration::{android_repo_root, publish_report_updates, repo_has_report_changes};
 use sprint_grader_orchestration::pipeline::resolve_all_sprint_tuples;
 
 fn parse_project_filter(projects: Option<String>) -> Option<Vec<String>> {
@@ -203,6 +203,9 @@ enum Command {
     Report {
         #[command(flatten)]
         projects: ProjectsArg,
+        /// Commit and push updated report files directly to `main`
+        #[arg(long)]
+        push: bool,
     },
     /// Refresh reports for every sprint up to `today` and publish them to the
     /// Android repo clones.
@@ -658,7 +661,7 @@ fn main() -> Result<()> {
                 "curriculum frozen"
             );
         }
-        Command::Report { projects } => {
+        Command::Report { projects, push } => {
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
             if groups.is_empty() {
@@ -686,6 +689,8 @@ fn main() -> Result<()> {
 
             // Markdown: one multi-sprint REPORT.md per Android repository,
             // at `{entregues_dir}/{project}/android-*/REPORT.md`.
+            let mut repo_reports: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> =
+                std::collections::BTreeMap::new();
             for g in &groups {
                 let Some(repo_root) = android_repo_root(&entregues_dir, &g.name) else {
                     warn!(
@@ -703,7 +708,28 @@ fn main() -> Result<()> {
                     &report_path,
                 )
                 .with_context(|| format!("Markdown report failed for {}", report_path.display()))?;
+                repo_reports
+                    .entry(repo_root)
+                    .or_default()
+                    .push(report_path);
             }
+
+            if push {
+                let mut published_repos = 0usize;
+                for (repo_root, report_paths) in &repo_reports {
+                    if !repo_has_report_changes(repo_root, report_paths)
+                        .with_context(|| format!("git status failed for {}", repo_root.display()))?
+                    {
+                        continue;
+                    }
+                    publish_report_updates(repo_root, report_paths).with_context(|| {
+                        format!("publish failed for {}", repo_root.display())
+                    })?;
+                    published_repos += 1;
+                }
+                info!(published_repos, "reports pushed");
+            }
+
             info!(
                 output = %entregues_dir.display(),
                 projects = groups.len(),
