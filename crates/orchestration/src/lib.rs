@@ -19,5 +19,6 @@ pub use purge::{
     ensure_clean_tree, purge_cache, purge_projects, CacheTargets, PurgeCacheResult, PurgeReport,
 };
 pub use report_sync::{
-    android_repo_root, sync_reports_through_sprint, SyncReportsOptions, SyncReportsResult,
+    android_repo_root, publish_report_updates, repo_has_report_changes,
+    sync_reports_through_sprint, SyncReportsOptions, SyncReportsResult,
 };
