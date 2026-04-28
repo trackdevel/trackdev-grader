@@ -175,7 +175,7 @@ fn is_android_repo_name(repo_name: &str) -> bool {
     lower.starts_with("android") || lower.contains("-android")
 }
 
-fn repo_has_report_changes(repo_root: &Path, report_paths: &[PathBuf]) -> Result<bool> {
+pub fn repo_has_report_changes(repo_root: &Path, report_paths: &[PathBuf]) -> Result<bool> {
     let rels = relative_report_paths(repo_root, report_paths)?;
     if rels.is_empty() {
         return Ok(false);
@@ -198,7 +198,7 @@ fn repo_has_report_changes(repo_root: &Path, report_paths: &[PathBuf]) -> Result
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
-fn publish_report_updates(repo_root: &Path, report_paths: &[PathBuf]) -> Result<()> {
+pub fn publish_report_updates(repo_root: &Path, report_paths: &[PathBuf]) -> Result<()> {
     ensure_command_available("git", repo_root)?;
     let rels = relative_report_paths(repo_root, report_paths)?;
     if rels.is_empty() {
