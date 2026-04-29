@@ -132,6 +132,9 @@ enum Command {
         /// Re-test PRs already in the database
         #[arg(long)]
         force: bool,
+        /// Compile only PRs with this number (repeat for multiple; matches across all repos)
+        #[arg(long, value_name = "NUMBER")]
+        pr: Vec<i64>,
     },
     /// Stage 2: survival analysis (parse, normalize, fingerprint, blame, rates).
     Survive {
@@ -140,6 +143,12 @@ enum Command {
     },
     /// Stage 3: per-student metrics and flag detection.
     Analyze {
+        #[command(flatten)]
+        projects: ProjectsArg,
+    },
+    /// Re-run flag detection only (skips metrics, survival, and all other stages).
+    /// Use this after tweaking thresholds in course.toml or after `compile --force`.
+    Flags {
         #[command(flatten)]
         projects: ProjectsArg,
     },
@@ -428,7 +437,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Compile { projects, force } => {
+        Command::Compile { projects, force, pr } => {
             // Stale gradle daemons or worktrees from a prior crashed run
             // tie up the per-version daemon registry; new builds wait
             // forever on a busy/dead daemon. Always sweep at compile start.
@@ -440,6 +449,7 @@ fn main() -> Result<()> {
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
             let skip_tested = config.build.skip_already_tested && !force;
+            let pr_filter: Option<&[i64]> = if pr.is_empty() { None } else { Some(&pr) };
             // Single combined batch across every sprint of every project in
             // scope: one rayon pool, one watchdog stream, one cold-start
             // amortisation for the per-worker GRADLE_USER_HOME warm-up.
@@ -448,6 +458,38 @@ fn main() -> Result<()> {
                 .flat_map(|g| g.sprint_ids.iter().copied())
                 .collect();
             if !all_sprint_ids.is_empty() {
+                // --force without --pr: purge existing compilation rows for
+                // the whole sprint scope before recompiling. Without this,
+                // PRs that can no longer be reached (missing repo, no commits,
+                // no matching profile) keep stale rows from prior runs, giving
+                // the false impression that the DB was not updated. The purge
+                // is intentionally scoped to "no --pr" so that a targeted
+                // `--force --pr 42` only touches that single PR and leaves
+                // other rows intact.
+                if force && pr.is_empty() {
+                    let phs = all_sprint_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    db.conn
+                        .execute(
+                            &format!("DELETE FROM pr_compilation WHERE sprint_id IN ({phs})"),
+                            rusqlite::params_from_iter(all_sprint_ids.iter()),
+                        )
+                        .context("failed to purge pr_compilation for --force")?;
+                    db.conn
+                        .execute(
+                            &format!("DELETE FROM pr_mutation WHERE sprint_id IN ({phs})"),
+                            rusqlite::params_from_iter(all_sprint_ids.iter()),
+                        )
+                        .context("failed to purge pr_mutation for --force")?;
+                    db.conn
+                        .execute(
+                            &format!(
+                                "DELETE FROM compilation_failure_summary WHERE sprint_id IN ({phs})"
+                            ),
+                            rusqlite::params_from_iter(all_sprint_ids.iter()),
+                        )
+                        .context("failed to purge compilation_failure_summary for --force")?;
+                    info!(sprints = all_sprint_ids.len(), "purged stale compilation rows for --force recompile");
+                }
                 sprint_grader_compile::check_compilations_parallel(
                     &db.conn,
                     &all_sprint_ids,
@@ -457,6 +499,7 @@ fn main() -> Result<()> {
                     config.build.stderr_max_chars as usize,
                     skip_tested,
                     config.mutation.enabled,
+                    pr_filter,
                 )
                 .context("compile failed")?;
                 // Compilation summary is sprint-scoped; run it for each.
@@ -464,6 +507,23 @@ fn main() -> Result<()> {
                     sprint_grader_compile::summarize_compilation(&db.conn, *sid)
                         .with_context(|| format!("compile summary failed for sprint_id {sid}"))?;
                 }
+                // Recompute compile-dependent flags so that PRs that now
+                // pass (or newly fail) are reflected immediately without
+                // requiring a full `analyze` re-run.
+                if force {
+                    for sid in &all_sprint_ids {
+                        sprint_grader_analyze::redetect_compile_flags_for_sprint_id(
+                            &db.conn,
+                            *sid,
+                        )
+                        .with_context(|| {
+                            format!("compile flag redetection failed for sprint_id {sid}")
+                        })?;
+                    }
+                }
+                // Kill gradle daemons spawned during this run. The pre-run sweep
+                // handles daemons from prior runs; this handles ones started now.
+                sprint_grader_orchestration::pipeline::sweep_pre_compile_state(&entregues_dir);
             }
         }
         Command::Analyze { projects } => {
@@ -478,6 +538,16 @@ fn main() -> Result<()> {
                 .with_context(|| format!("metrics failed for sprint_id {sid}"))?;
                 sprint_grader_analyze::flags::detect_flags_for_sprint_id(&db.conn, sid, &config)
                     .with_context(|| format!("flags failed for sprint_id {sid}"))?;
+            }
+        }
+        Command::Flags { projects } => {
+            let filter = parse_project_filter(projects.projects);
+            let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
+            for sid in groups.iter().flat_map(|g| g.sprint_ids.iter().copied()) {
+                let n =
+                    sprint_grader_analyze::flags::detect_flags_for_sprint_id(&db.conn, sid, &config)
+                        .with_context(|| format!("flags failed for sprint_id {sid}"))?;
+                info!(sprint_id = sid, flags = n, "flags recomputed");
             }
         }
         Command::Inequality { projects } => {

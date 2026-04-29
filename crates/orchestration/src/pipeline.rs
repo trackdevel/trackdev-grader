@@ -253,6 +253,7 @@ fn run_project_stage_block(
                     stderr_cap,
                     skip_tested,
                     mutation_enabled,
+                    None,
                 )?;
                 sprint_grader_compile::summarize_compilation(&conn, sid)?;
                 Ok(())
@@ -903,6 +904,14 @@ pub fn run_pipeline(
             );
         }
     }
+
+    // Kill any gradle daemons spawned during this run. The pre-run sweep
+    // handled daemons from *prior* runs; this one handles daemons that were
+    // started during the compile stage just completed and are now idle.
+    // Daemons setsid() into their own session so the build-time group-kill
+    // only fires on timeout; clean builds leave the daemon alive otherwise.
+    kill_stale_gradle_daemons();
+    purge_gradle_daemon_registry();
 
     // Re-open the master DB for the tail (AI detection + trajectory + reports).
     let db = Database::open(db_path).context("reopening grading DB")?;

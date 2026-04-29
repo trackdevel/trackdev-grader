@@ -357,14 +357,15 @@ pub fn run_build_tagged(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Belt-and-suspenders: tell gradle to never use the rich/interactive
-    // console renderer regardless of TERM/tty heuristics. Append a
-    // CLI-level env var that gradle inspects.
+    // console renderer regardless of TERM/tty heuristics. Also cap the
+    // daemon idle timeout to 2 minutes so orphaned daemons don't linger
+    // for the default 3 hours after the pipeline finishes.
     cmd.env("GRADLE_OPTS", {
         let prev = profile.env.get("GRADLE_OPTS").cloned().unwrap_or_default();
         if prev.is_empty() {
-            "-Dorg.gradle.console=plain".to_string()
+            "-Dorg.gradle.console=plain -Dorg.gradle.daemon.idletimeout=120000".to_string()
         } else {
-            format!("{prev} -Dorg.gradle.console=plain")
+            format!("{prev} -Dorg.gradle.console=plain -Dorg.gradle.daemon.idletimeout=120000")
         }
     });
     for (k, v) in &profile.env {
@@ -510,9 +511,9 @@ pub fn run_mutation_tagged(
     cmd.env("GRADLE_OPTS", {
         let prev = profile.env.get("GRADLE_OPTS").cloned().unwrap_or_default();
         if prev.is_empty() {
-            "-Dorg.gradle.console=plain".to_string()
+            "-Dorg.gradle.console=plain -Dorg.gradle.daemon.idletimeout=120000".to_string()
         } else {
-            format!("{prev} -Dorg.gradle.console=plain")
+            format!("{prev} -Dorg.gradle.console=plain -Dorg.gradle.daemon.idletimeout=120000")
         }
     });
     for (k, v) in &profile.env {
@@ -1001,6 +1002,7 @@ pub fn check_sprint_compilations_parallel(
     stderr_max_chars: usize,
     skip_tested: bool,
     mutation_enabled: bool,
+    pr_number_filter: Option<&[i64]>,
 ) -> rusqlite::Result<CompileSummary> {
     check_compilations_parallel(
         conn,
@@ -1011,6 +1013,7 @@ pub fn check_sprint_compilations_parallel(
         stderr_max_chars,
         skip_tested,
         mutation_enabled,
+        pr_number_filter,
     )
 }
 
@@ -1019,6 +1022,9 @@ pub fn check_sprint_compilations_parallel(
 /// them through a single rayon pool of `max_workers` workers — so the
 /// per-worker GRADLE_USER_HOME warm-up cost is paid once for the whole
 /// project, not once per sprint.
+///
+/// `pr_number_filter`: when `Some`, only PRs whose `pr_number` is in the
+/// slice are compiled. Pass `None` to compile all PRs (normal operation).
 #[allow(clippy::too_many_arguments)]
 pub fn check_compilations_parallel(
     conn: &Connection,
@@ -1029,25 +1035,41 @@ pub fn check_compilations_parallel(
     stderr_max_chars: usize,
     skip_tested: bool,
     mutation_enabled: bool,
+    pr_number_filter: Option<&[i64]>,
 ) -> rusqlite::Result<CompileSummary> {
     if sprint_ids.is_empty() {
         return Ok(CompileSummary::default());
     }
     let mut prs: Vec<(String, String)> = Vec::new();
     {
-        let placeholders = std::iter::repeat("?")
+        let sprint_phs = std::iter::repeat("?")
             .take(sprint_ids.len())
             .collect::<Vec<_>>()
             .join(",");
+        let pr_number_clause = match pr_number_filter {
+            Some(nums) if !nums.is_empty() => {
+                let phs = std::iter::repeat("?")
+                    .take(nums.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(" AND pr.pr_number IN ({phs})")
+            }
+            _ => String::new(),
+        };
         let sql = format!(
             "SELECT DISTINCT pr.id, pr.repo_full_name
              FROM pull_requests pr
              JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
              JOIN tasks t ON t.id = tpr.task_id
-             WHERE t.sprint_id IN ({placeholders}) AND t.type != 'USER_STORY'",
+             WHERE t.sprint_id IN ({sprint_phs}) AND t.type != 'USER_STORY'{pr_number_clause}",
         );
+        let combined: Vec<i64> = sprint_ids
+            .iter()
+            .copied()
+            .chain(pr_number_filter.unwrap_or(&[]).iter().copied())
+            .collect();
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(sprint_ids.iter()), |r| {
+        let rows = stmt.query_map(rusqlite::params_from_iter(combined.iter()), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?.unwrap_or_default(),
