@@ -119,29 +119,39 @@ pub fn compute_metrics_for_sprint_id(
     let sprint_start = sprint_start.unwrap_or_default();
     let sprint_end = sprint_end.unwrap_or_default();
 
+    // Wrap the wipe + per-student inserts in a single transaction so the
+    // sprint's rows are atomically replaced. Without this, a mid-loop failure
+    // (e.g. SQLITE_BUSY under heavy parallel contention) commits the DELETE
+    // but leaves no inserted rows, and the report renders 0 silently because
+    // the LEFT JOIN + COALESCE in `current_student_summary` cannot
+    // distinguish missing rows from real zeros. `unchecked_transaction`
+    // keeps the signature `&Connection` so the caller (orchestration) can
+    // continue to share the connection across other stage closures.
+    let tx = conn.unchecked_transaction()?;
+
     // student_sprint_metrics has no PRIMARY KEY declared in the schema, so
     // `INSERT OR REPLACE` degrades to plain INSERT and re-runs accumulate
     // duplicates. Mirror `flags.py`'s pattern and wipe the sprint's rows
     // before re-populating so the stage stays idempotent.
-    conn.execute(
+    tx.execute(
         "DELETE FROM student_sprint_metrics WHERE sprint_id = ?",
         [sprint_id],
     )?;
 
     // Weighted PR metrics: task_id → total weighted lines (additions + deletions).
-    let weighted = distribute_pr_weights_for_sprint(conn, sprint_id)?;
+    let weighted = distribute_pr_weights_for_sprint(&tx, sprint_id)?;
     let mut task_weighted_lines: HashMap<i64, f64> = HashMap::new();
     for w in &weighted {
         *task_weighted_lines.entry(w.task_id).or_insert(0.0) += w.additions + w.deletions;
     }
 
-    let mut stmt = conn.prepare("SELECT id FROM students WHERE team_project_id = ?")?;
+    let mut stmt = tx.prepare("SELECT id FROM students WHERE team_project_id = ?")?;
     let student_ids: Vec<String> = stmt
         .query_map([project_id], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
-    let team_total_pts: i64 = conn
+    let team_total_pts: i64 = tx
         .query_row(
             "SELECT COALESCE(SUM(estimation_points), 0) FROM tasks
              WHERE sprint_id = ? AND status = 'DONE' AND type != 'USER_STORY'",
@@ -151,7 +161,7 @@ pub fn compute_metrics_for_sprint_id(
         .unwrap_or(0);
 
     for sid in &student_ids {
-        let points: i64 = conn
+        let points: i64 = tx
             .query_row(
                 "SELECT COALESCE(SUM(estimation_points), 0) FROM tasks
                  WHERE sprint_id = ? AND assignee_id = ? AND status = 'DONE'
@@ -167,7 +177,7 @@ pub fn compute_metrics_for_sprint_id(
         };
 
         // Weighted PR lines = sum of task_weighted_lines for this student's tasks.
-        let mut task_stmt = conn.prepare(
+        let mut task_stmt = tx.prepare(
             "SELECT id FROM tasks WHERE sprint_id = ? AND assignee_id = ? AND type != 'USER_STORY'",
         )?;
         let task_ids: Vec<i64> = task_stmt
@@ -179,7 +189,7 @@ pub fn compute_metrics_for_sprint_id(
             .map(|tid| task_weighted_lines.get(tid).copied().unwrap_or(0.0))
             .sum();
 
-        let commit_count: i64 = conn
+        let commit_count: i64 = tx
             .query_row(
                 "SELECT COUNT(DISTINCT pc.sha)
                  FROM pr_commits pc
@@ -192,7 +202,7 @@ pub fn compute_metrics_for_sprint_id(
             )
             .unwrap_or(0);
 
-        let files_touched: i64 = conn
+        let files_touched: i64 = tx
             .query_row(
                 "SELECT COALESCE(SUM(pr.changed_files), 0)
                  FROM pull_requests pr
@@ -204,7 +214,7 @@ pub fn compute_metrics_for_sprint_id(
             )
             .unwrap_or(0);
 
-        let reviews_given: i64 = conn
+        let reviews_given: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM pr_reviews r
                  JOIN students s ON LOWER(s.github_login) = LOWER(r.reviewer_login)
@@ -220,7 +230,7 @@ pub fn compute_metrics_for_sprint_id(
             .unwrap_or(0);
 
         let temporal = compute_task_temporal_spread(
-            conn,
+            &tx,
             sprint_id,
             sid,
             &sprint_start,
@@ -228,7 +238,7 @@ pub fn compute_metrics_for_sprint_id(
             cramming_hours,
         );
 
-        let avg_doc_score: Option<f64> = conn
+        let avg_doc_score: Option<f64> = tx
             .query_row(
                 "SELECT AVG(total_doc_score) FROM pr_doc_evaluation pde
                  JOIN pull_requests pr ON pr.id = pde.pr_id
@@ -241,7 +251,7 @@ pub fn compute_metrics_for_sprint_id(
             .ok()
             .flatten();
 
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO student_sprint_metrics
              (student_id, sprint_id, points_delivered, points_share,
               weighted_pr_lines, commit_count, files_touched,
@@ -262,6 +272,7 @@ pub fn compute_metrics_for_sprint_id(
         )?;
     }
 
+    tx.commit()?;
     info!(sprint_id, students = student_ids.len(), "metrics computed");
     Ok(())
 }
