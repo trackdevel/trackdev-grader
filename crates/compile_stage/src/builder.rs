@@ -9,9 +9,12 @@
 //! * Output is truncated to the last `max_output_chars` bytes, same as Python's
 //!   `result.stdout[-max_output_chars:]`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -35,6 +38,15 @@ pub struct BuildProfileRe {
     pub mutation_command: Option<String>,
     pub mutation_timeout_seconds: u64,
     pub mutation_report_path: String,
+    /// Untracked files to copy from the source repo into every fresh
+    /// worktree before the build runs. See `core::config::OverlayFile`.
+    pub overlay_files: Vec<OverlayFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OverlayFile {
+    pub src: String,
+    pub dest: String,
 }
 
 pub fn load_build_profiles_from_config(
@@ -56,6 +68,14 @@ pub fn load_build_profiles_from_config(
             mutation_command: p.mutation_command.clone(),
             mutation_timeout_seconds: p.mutation_timeout_seconds,
             mutation_report_path: p.mutation_report_path.clone(),
+            overlay_files: p
+                .overlay_files
+                .iter()
+                .map(|o| OverlayFile {
+                    src: o.src.clone(),
+                    dest: o.dest.clone(),
+                })
+                .collect(),
         });
     }
     Ok(out)
@@ -79,6 +99,181 @@ pub struct BuildResult {
     pub build_command: String,
     pub working_dir: String,
     pub merge_sha: String,
+}
+
+/// Make the spawned child the leader of a new process group, so a group
+/// kill takes down gradle / pitest *and* every helper it spawns. Without
+/// this, killing the `/bin/sh -c "..."` parent orphans the underlying
+/// `gradle` (or `sleep`, in tests), which then keeps stdout/stderr pipe
+/// writers open and stalls our drain readers.
+#[cfg(unix)]
+fn spawn_in_own_process_group(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn spawn_in_own_process_group(_cmd: &mut Command) {}
+
+/// Send SIGKILL to the entire process group led by `pid`.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    // Negative PID targets the process group with that PGID. We made the
+    // child its own group leader, so its PID is the PGID.
+    let pgid = pid as i32;
+    if pgid > 0 {
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
+
+/// Walk `/proc` for every descendant of `root_pid` (transitively, via
+/// `Status: PPid:` lines) and SIGKILL each one. Necessary because the
+/// gradle daemon `setsid()`s into its own session right after fork, so
+/// `kill(-pgid, SIGKILL)` does not reach it; without this, every
+/// timeout would leak a 2–4 GB daemon JVM. This is best-effort: missing
+/// /proc entries or read errors are silently skipped.
+#[cfg(unix)]
+fn kill_descendant_tree(root_pid: u32) {
+    use std::collections::HashMap;
+    let mut ppid_of: HashMap<i32, i32> = HashMap::new();
+    let proc_dir = match std::fs::read_dir("/proc") {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    for entry in proc_dir.flatten() {
+        let name = entry.file_name();
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let pid: i32 = match name_str.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let status_path = entry.path().join("status");
+        let status = match std::fs::read_to_string(&status_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if let Some(line) = status.lines().find(|l| l.starts_with("PPid:")) {
+            if let Some(ppid_str) = line.split_whitespace().nth(1) {
+                if let Ok(ppid) = ppid_str.parse::<i32>() {
+                    ppid_of.insert(pid, ppid);
+                }
+            }
+        }
+    }
+    // BFS from root_pid through ppid edges.
+    let root = root_pid as i32;
+    let mut to_kill: Vec<i32> = Vec::new();
+    let mut frontier: Vec<i32> = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for (&child, &p) in &ppid_of {
+            if p == parent && !to_kill.contains(&child) && child != root {
+                to_kill.push(child);
+                frontier.push(child);
+            }
+        }
+    }
+    // Kill leaves first (innermost descendants) so a daemon that wants
+    // to reap children sees them gone before we kill it.
+    for pid in to_kill.iter().rev() {
+        unsafe {
+            libc::kill(*pid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_descendant_tree(_root_pid: u32) {}
+
+/// Spawn a reader thread that streams bytes from `pipe` into a tail buffer
+/// of at most `max_bytes`. Returning a join handle that yields the kept
+/// bytes lets the main thread drain on its schedule, while the reader
+/// thread keeps the OS pipe from filling up — without this, a verbose
+/// build (gradle, pitest) blocks on `write()` after ~64 KB of output and
+/// we report a spurious timeout.
+#[cfg(test)]
+fn spawn_tail_reader<R: Read + Send + 'static>(
+    pipe: R,
+    max_bytes: usize,
+) -> JoinHandle<Vec<u8>> {
+    spawn_tail_reader_tagged::<R>(None, pipe, max_bytes)
+}
+
+fn spawn_tail_reader_tagged<R: Read + Send + 'static>(
+    tag: Option<(String, &'static str)>,
+    mut pipe: R,
+    max_bytes: usize,
+) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut tail: VecDeque<u8> = VecDeque::with_capacity(max_bytes.min(64 * 1024));
+        let mut line_buf: Vec<u8> = Vec::with_capacity(512);
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Some((ref pr_short, stream)) = tag {
+                        for &b in &chunk[..n] {
+                            if b == b'\n' {
+                                if !line_buf.is_empty() {
+                                    let line = String::from_utf8_lossy(&line_buf);
+                                    let trimmed = line.trim_end();
+                                    if !trimmed.is_empty() {
+                                        tracing::debug!(
+                                            pr_id = %pr_short,
+                                            stream,
+                                            "{}",
+                                            trimmed
+                                        );
+                                    }
+                                    line_buf.clear();
+                                }
+                            } else if line_buf.len() < 4096 {
+                                line_buf.push(b);
+                            }
+                        }
+                    }
+                    if max_bytes == 0 {
+                        continue;
+                    }
+                    if n >= max_bytes {
+                        tail.clear();
+                        tail.extend(&chunk[n - max_bytes..n]);
+                    } else {
+                        let overflow = (tail.len() + n).saturating_sub(max_bytes);
+                        if overflow > 0 {
+                            tail.drain(..overflow);
+                        }
+                        tail.extend(&chunk[..n]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if let Some((pr_short, stream)) = tag {
+            if !line_buf.is_empty() {
+                let line = String::from_utf8_lossy(&line_buf);
+                let trimmed = line.trim_end();
+                if !trimmed.is_empty() {
+                    tracing::debug!(pr_id = %pr_short, stream, "{}", trimmed);
+                }
+            }
+        }
+        Vec::from(tail)
+    })
+}
+
+/// Wait for a drain reader, salvaging an empty Vec on poison/panic so
+/// build bookkeeping never aborts on a reader thread issue.
+fn join_reader(handle: JoinHandle<Vec<u8>>) -> Vec<u8> {
+    handle.join().unwrap_or_default()
 }
 
 /// Keep only the trailing `max_chars` bytes (Python: `text[-max_output_chars:]`).
@@ -128,6 +323,18 @@ pub fn run_build(
     profile: &BuildProfileRe,
     max_output_chars: usize,
 ) -> BuildResult {
+    run_build_tagged(repo_path, profile, max_output_chars, "")
+}
+
+/// Same as `run_build` but tags every line of streamed stdout/stderr
+/// with `pr_short` at debug level, so a `RUST_LOG=sprint_grader_compile=debug`
+/// run shows live gradle task progress per PR. Pass `""` to disable.
+pub fn run_build_tagged(
+    repo_path: &Path,
+    profile: &BuildProfileRe,
+    max_output_chars: usize,
+    pr_short: &str,
+) -> BuildResult {
     let cwd = repo_path.join(&profile.working_dir);
     let merge_sha = rev_parse_head(repo_path);
 
@@ -140,11 +347,33 @@ pub fn run_build(
     cmd.arg("-c")
         .arg(&profile.command)
         .current_dir(&cwd)
+        // /dev/null on stdin: the child runs in its own process group
+        // (see `spawn_in_own_process_group`), so it is NOT the
+        // foreground pgrp of our controlling tty. Any read it does on
+        // stdin from a tty triggers SIGTTIN, which by POSIX default
+        // STOPS the process. Gradle's wrapper / AGP / kotlinc each
+        // probe stdin in some path and used to wedge entire builds.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Belt-and-suspenders: tell gradle to never use the rich/interactive
+    // console renderer regardless of TERM/tty heuristics. Append a
+    // CLI-level env var that gradle inspects.
+    cmd.env("GRADLE_OPTS", {
+        let prev = profile.env.get("GRADLE_OPTS").cloned().unwrap_or_default();
+        if prev.is_empty() {
+            "-Dorg.gradle.console=plain".to_string()
+        } else {
+            format!("{prev} -Dorg.gradle.console=plain")
+        }
+    });
     for (k, v) in &profile.env {
+        if k == "GRADLE_OPTS" {
+            continue; // already merged above
+        }
         cmd.env(k, v);
     }
+    spawn_in_own_process_group(&mut cmd);
 
     let start = Instant::now();
     let mut child = match cmd.spawn() {
@@ -164,62 +393,79 @@ pub fn run_build(
         }
     };
 
+    // Drain stdout/stderr concurrently into ring buffers so the child never
+    // blocks on a full pipe (caused spurious timeouts on chatty gradle
+    // builds) and we keep at most `max_output_chars` bytes per stream
+    // resident in memory.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let tag_stdout = if pr_short.is_empty() {
+        None
+    } else {
+        Some((pr_short.to_string(), "stdout"))
+    };
+    let tag_stderr = if pr_short.is_empty() {
+        None
+    } else {
+        Some((pr_short.to_string(), "stderr"))
+    };
+    let stdout_handle =
+        stdout_pipe.map(|p| spawn_tail_reader_tagged(tag_stdout, p, max_output_chars));
+    let stderr_handle =
+        stderr_pipe.map(|p| spawn_tail_reader_tagged(tag_stderr, p, max_output_chars));
+
+    let pid = child.id();
     let timeout = Duration::from_secs(profile.timeout_seconds);
-    match child.wait_timeout(timeout) {
-        Ok(Some(status)) => {
-            let duration = start.elapsed().as_secs_f64();
-            let output = child.wait_with_output();
-            let (stdout, stderr) = match output {
-                Ok(o) => (
-                    String::from_utf8_lossy(&o.stdout).into_owned(),
-                    String::from_utf8_lossy(&o.stderr).into_owned(),
-                ),
-                Err(_) => (String::new(), String::new()),
-            };
-            BuildResult {
-                compiles: status.success(),
-                exit_code: status.code().unwrap_or(-1),
-                stdout_text: tail(&stdout, max_output_chars),
-                stderr_text: tail(&stderr, max_output_chars),
-                duration_seconds: (duration * 100.0).round() / 100.0,
-                timed_out: false,
-                build_command: profile.command.clone(),
-                working_dir: cwd.to_string_lossy().into_owned(),
-                merge_sha,
-            }
-        }
+    let wait_result = child.wait_timeout(timeout);
+    let (status_opt, timed_out, wait_err) = match wait_result {
+        Ok(Some(status)) => (Some(status), false, None),
         Ok(None) => {
-            // Hard kill — timeout exceeded.
+            // Reach the gradle daemon: it `setsid()`s into its own
+            // session, so the process-group kill alone misses it.
+            kill_descendant_tree(pid);
+            kill_process_group(pid);
             let _ = child.kill();
             let _ = child.wait();
-            let duration = start.elapsed().as_secs_f64();
-            BuildResult {
-                compiles: false,
-                exit_code: -1,
-                stdout_text: String::new(),
-                stderr_text: format!("Build timed out after {}s", profile.timeout_seconds),
-                duration_seconds: (duration * 100.0).round() / 100.0,
-                timed_out: true,
-                build_command: profile.command.clone(),
-                working_dir: cwd.to_string_lossy().into_owned(),
-                merge_sha,
-            }
+            (None, true, None)
         }
         Err(e) => {
+            kill_descendant_tree(pid);
+            kill_process_group(pid);
             let _ = child.kill();
             let _ = child.wait();
-            BuildResult {
-                compiles: false,
-                exit_code: -1,
-                stdout_text: String::new(),
-                stderr_text: format!("wait_timeout error: {e}"),
-                duration_seconds: start.elapsed().as_secs_f64(),
-                timed_out: false,
-                build_command: profile.command.clone(),
-                working_dir: cwd.to_string_lossy().into_owned(),
-                merge_sha,
-            }
+            (None, false, Some(e.to_string()))
         }
+    };
+    let duration = start.elapsed().as_secs_f64();
+
+    let stdout_bytes = stdout_handle.map(join_reader).unwrap_or_default();
+    let stderr_bytes = stderr_handle.map(join_reader).unwrap_or_default();
+    let stdout_text = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let mut stderr_text = String::from_utf8_lossy(&stderr_bytes).into_owned();
+
+    if timed_out {
+        let note = format!("\n[Build timed out after {}s]", profile.timeout_seconds);
+        stderr_text.push_str(&note);
+    }
+    if let Some(msg) = wait_err.as_ref() {
+        stderr_text.push_str(&format!("\n[wait_timeout error: {msg}]"));
+    }
+
+    let (compiles, exit_code) = match status_opt {
+        Some(s) => (s.success(), s.code().unwrap_or(-1)),
+        None => (false, -1),
+    };
+
+    BuildResult {
+        compiles,
+        exit_code,
+        stdout_text: tail(&stdout_text, max_output_chars),
+        stderr_text: tail(&stderr_text, max_output_chars),
+        duration_seconds: (duration * 100.0).round() / 100.0,
+        timed_out,
+        build_command: profile.command.clone(),
+        working_dir: cwd.to_string_lossy().into_owned(),
+        merge_sha,
     }
 }
 
@@ -243,6 +489,14 @@ pub struct MutationResult {
 /// `mutation_timeout_seconds` (default 600s, an order of magnitude
 /// larger than `timeout_seconds`).
 pub fn run_mutation(repo_path: &Path, profile: &BuildProfileRe) -> Option<MutationResult> {
+    run_mutation_tagged(repo_path, profile, "")
+}
+
+pub fn run_mutation_tagged(
+    repo_path: &Path,
+    profile: &BuildProfileRe,
+    pr_short: &str,
+) -> Option<MutationResult> {
     let cmd_str = profile.mutation_command.as_ref()?;
     let cwd = repo_path.join(&profile.working_dir);
 
@@ -250,11 +504,24 @@ pub fn run_mutation(repo_path: &Path, profile: &BuildProfileRe) -> Option<Mutati
     cmd.arg("-c")
         .arg(cmd_str)
         .current_dir(&cwd)
+        .stdin(Stdio::null()) // see SIGTTIN comment in run_build
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    cmd.env("GRADLE_OPTS", {
+        let prev = profile.env.get("GRADLE_OPTS").cloned().unwrap_or_default();
+        if prev.is_empty() {
+            "-Dorg.gradle.console=plain".to_string()
+        } else {
+            format!("{prev} -Dorg.gradle.console=plain")
+        }
+    });
     for (k, v) in &profile.env {
+        if k == "GRADLE_OPTS" {
+            continue;
+        }
         cmd.env(k, v);
     }
+    spawn_in_own_process_group(&mut cmd);
 
     let start = Instant::now();
     let mut child = match cmd.spawn() {
@@ -268,22 +535,59 @@ pub fn run_mutation(repo_path: &Path, profile: &BuildProfileRe) -> Option<Mutati
         }
     };
 
+    // Pitest is even more verbose than gradle assemble; drain into bounded
+    // ring buffers (output is discarded, but draining is what stops the
+    // child from blocking on a full pipe).
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    const MUTATION_TAIL_BYTES: usize = 4 * 1024;
+    let tag_stdout = if pr_short.is_empty() {
+        None
+    } else {
+        Some((pr_short.to_string(), "mutation:stdout"))
+    };
+    let tag_stderr = if pr_short.is_empty() {
+        None
+    } else {
+        Some((pr_short.to_string(), "mutation:stderr"))
+    };
+    let stdout_handle =
+        stdout_pipe.map(|p| spawn_tail_reader_tagged(tag_stdout, p, MUTATION_TAIL_BYTES));
+    let stderr_handle =
+        stderr_pipe.map(|p| spawn_tail_reader_tagged(tag_stderr, p, MUTATION_TAIL_BYTES));
+
+    let pid = child.id();
     let timeout = Duration::from_secs(profile.mutation_timeout_seconds);
     let timed_out = match child.wait_timeout(timeout) {
         Ok(Some(_status)) => false,
         Ok(None) => {
+            kill_descendant_tree(pid);
+            kill_process_group(pid);
             let _ = child.kill();
             let _ = child.wait();
             true
         }
         Err(e) => {
             warn!(error = %e, "wait_timeout error during mutation run");
+            kill_descendant_tree(pid);
+            kill_process_group(pid);
             let _ = child.kill();
             let _ = child.wait();
+            if let Some(h) = stdout_handle {
+                let _ = join_reader(h);
+            }
+            if let Some(h) = stderr_handle {
+                let _ = join_reader(h);
+            }
             return None;
         }
     };
-    let _ = child.wait_with_output();
+    if let Some(h) = stdout_handle {
+        let _ = join_reader(h);
+    }
+    if let Some(h) = stderr_handle {
+        let _ = join_reader(h);
+    }
     let duration = (start.elapsed().as_secs_f64() * 100.0).round() / 100.0;
 
     if timed_out {
@@ -364,6 +668,67 @@ fn ensure_ref_available(repo_path: &Path, sha: &str) -> bool {
         ])
         .output();
     have_ref(repo_path, sha)
+}
+
+/// Copy each `overlay_files[i].src` from the source repo's working
+/// tree into the freshly-created worktree at `overlay_files[i].dest`.
+/// This is how we get per-team build secrets (e.g.
+/// `app/google-services.json`) — which are NOT committed to git, so a
+/// `git worktree add <sha>` checkout doesn't carry them — into the
+/// worktree before `./gradlew` runs.
+///
+/// Missing source → `warn!` and continue. Don't fail the build before
+/// gradle has had a chance to either succeed without it or report a
+/// clearer error. Path safety has already been enforced at config-load
+/// time (`is_unsafe_overlay_path`), so we trust the components here.
+fn apply_overlay_files(
+    repo_path: &Path,
+    worktree_path: &Path,
+    overlays: &[OverlayFile],
+    pr_id: &str,
+) {
+    if overlays.is_empty() {
+        return;
+    }
+    for o in overlays {
+        let src = repo_path.join(&o.src);
+        let dest = worktree_path.join(&o.dest);
+        if !src.exists() {
+            warn!(
+                pr_id,
+                src = %src.display(),
+                dest = %o.dest,
+                "overlay source missing — build may fail unless the file is optional"
+            );
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(
+                    pr_id,
+                    parent = %parent.display(),
+                    error = %e,
+                    "could not create parent dir for overlay dest — skipping"
+                );
+                continue;
+            }
+        }
+        match std::fs::copy(&src, &dest) {
+            Ok(_) => info!(
+                pr_id,
+                src = %o.src,
+                dest = %o.dest,
+                "overlay file copied into worktree"
+            ),
+            Err(e) => warn!(
+                pr_id,
+                src = %src.display(),
+                dest = %dest.display(),
+                error = %e,
+                "overlay copy failed — continuing"
+            ),
+        }
+    }
 }
 
 /// RAII guard that unregisters a git worktree on drop — including on panic —
@@ -461,7 +826,10 @@ pub fn compile_pr_in_worktree(
         ensure_executable(&gradlew);
     }
 
-    let result = run_build(&worktree_path, profile, max_output_chars);
+    apply_overlay_files(repo_path, &worktree_path, &profile.overlay_files, pr_id);
+
+    let pr_short = &pr_id[..8.min(pr_id.len())];
+    let result = run_build_tagged(&worktree_path, profile, max_output_chars, pr_short);
 
     drop(_guard);
     drop(tempdir);
@@ -537,9 +905,12 @@ pub fn compile_and_mutate_pr_in_worktree(
         ensure_executable(&gradlew);
     }
 
-    let build = run_build(&worktree_path, profile, max_output_chars);
+    apply_overlay_files(repo_path, &worktree_path, &profile.overlay_files, pr_id);
+
+    let pr_short = &pr_id[..8.min(pr_id.len())];
+    let build = run_build_tagged(&worktree_path, profile, max_output_chars, pr_short);
     let mutation = if mutation_enabled && build.compiles && profile.mutation_command.is_some() {
-        run_mutation(&worktree_path, profile)
+        run_mutation_tagged(&worktree_path, profile, pr_short)
     } else {
         None
     };
@@ -617,8 +988,9 @@ fn get_reviewer_ids(conn: &Connection, pr_id: &str) -> Vec<String> {
     rows.filter_map(Result::ok).collect()
 }
 
-/// Parallel sprint compilation with worktrees. Mirrors
-/// `check_sprint_compilations_parallel` in the Python reference.
+/// Single-sprint convenience wrapper. Most callers should prefer
+/// [`check_compilations_parallel`] which takes `&[sprint_id]` and
+/// batches every PR across every sprint into one rayon pool.
 #[allow(clippy::too_many_arguments)]
 pub fn check_sprint_compilations_parallel(
     conn: &Connection,
@@ -630,16 +1002,52 @@ pub fn check_sprint_compilations_parallel(
     skip_tested: bool,
     mutation_enabled: bool,
 ) -> rusqlite::Result<CompileSummary> {
+    check_compilations_parallel(
+        conn,
+        &[sprint_id],
+        entregues_dir,
+        profiles,
+        max_workers,
+        stderr_max_chars,
+        skip_tested,
+        mutation_enabled,
+    )
+}
+
+/// Parallel multi-sprint PR compilation with worktrees. Collects every
+/// PR across every sprint in `sprint_ids` into one job list, then runs
+/// them through a single rayon pool of `max_workers` workers — so the
+/// per-worker GRADLE_USER_HOME warm-up cost is paid once for the whole
+/// project, not once per sprint.
+#[allow(clippy::too_many_arguments)]
+pub fn check_compilations_parallel(
+    conn: &Connection,
+    sprint_ids: &[i64],
+    entregues_dir: &Path,
+    profiles: &[BuildProfileRe],
+    max_workers: usize,
+    stderr_max_chars: usize,
+    skip_tested: bool,
+    mutation_enabled: bool,
+) -> rusqlite::Result<CompileSummary> {
+    if sprint_ids.is_empty() {
+        return Ok(CompileSummary::default());
+    }
     let mut prs: Vec<(String, String)> = Vec::new();
     {
-        let mut stmt = conn.prepare(
+        let placeholders = std::iter::repeat("?")
+            .take(sprint_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
             "SELECT DISTINCT pr.id, pr.repo_full_name
              FROM pull_requests pr
              JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
              JOIN tasks t ON t.id = tpr.task_id
-             WHERE t.sprint_id = ? AND t.type != 'USER_STORY'",
-        )?;
-        let rows = stmt.query_map([sprint_id], |r| {
+             WHERE t.sprint_id IN ({placeholders}) AND t.type != 'USER_STORY'",
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(sprint_ids.iter()), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -649,6 +1057,9 @@ pub fn check_sprint_compilations_parallel(
             prs.push(r?);
         }
     }
+    // Fallback sprint id used when a PR has no task→sprint join (rare).
+    // Pick the first sprint deterministically.
+    let fallback_sprint_id = sprint_ids[0];
 
     let total = prs.len();
     let mut skipped = 0usize;
@@ -740,7 +1151,7 @@ pub fn check_sprint_compilations_parallel(
                 [pr_id],
                 |r| r.get::<_, i64>(0),
             )
-            .unwrap_or(sprint_id);
+            .unwrap_or(fallback_sprint_id);
 
         jobs.push(PrBuildJob {
             pr_id: pr_id.clone(),
@@ -767,8 +1178,27 @@ pub fn check_sprint_compilations_parallel(
 
     info!(
         jobs = jobs.len(),
-        max_workers, "Compiling PRs (worktree mode)"
+        max_workers,
+        "Compiling PRs (worktree mode, per-worker GRADLE_USER_HOME so daemons don't share registry)"
     );
+
+    // Per-worker isolated GRADLE_USER_HOME. With a shared ~/.gradle,
+    // every concurrent ./gradlew invocation contends on a single
+    // ~/.gradle/daemon/<ver>/registry.bin file lock; with 5 in flight
+    // and a few mid-run daemon SIGKILLs leaving stale entries, the
+    // remaining CLIs deadlock-queue forever (observed: first 1-5 PRs
+    // pass, all subsequent stall to 300s timeout). Giving each rayon
+    // worker its own home → its own daemon, its own registry, zero
+    // cross-worker contention. Workers reuse their home across PRs so
+    // dep cache + warm daemons stay in scope.
+    let gradle_homes_root: PathBuf = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".gradle-grader-workers");
+    if let Err(e) = std::fs::create_dir_all(&gradle_homes_root) {
+        warn!(path = %gradle_homes_root.display(), error = %e,
+              "could not create per-worker gradle home root; builds will share ~/.gradle");
+    }
 
     // Run the actual builds off the SQLite connection (Connection is not Send),
     // then re-enter the main thread to write results. We use `rayon::join` on a
@@ -778,22 +1208,151 @@ pub fn check_sprint_compilations_parallel(
         .build()
         .expect("rayon pool");
 
+    // Live progress: each worker reports start/finish, and a watchdog
+    // thread emits a snapshot every 30s of which PRs are still in flight
+    // and how long they've been running. The watchdog stops when
+    // `done.load() == jobs.len()`.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let total_jobs = jobs.len();
+    type InFlightMap = HashMap<String, (String, i64, Instant)>;
+    let in_flight: Arc<Mutex<InFlightMap>> = Arc::new(Mutex::new(HashMap::new()));
+    let started_count = Arc::new(AtomicUsize::new(0));
+    let finished_count = Arc::new(AtomicUsize::new(0));
+    let watchdog_stop = Arc::new(AtomicUsize::new(0));
+
+    let watchdog = {
+        let in_flight = Arc::clone(&in_flight);
+        let started_count = Arc::clone(&started_count);
+        let finished_count = Arc::clone(&finished_count);
+        let watchdog_stop = Arc::clone(&watchdog_stop);
+        thread::spawn(move || {
+            let tick = Duration::from_secs(30);
+            let started_at = Instant::now();
+            loop {
+                thread::sleep(tick);
+                if watchdog_stop.load(Ordering::SeqCst) == 1 {
+                    return;
+                }
+                let started = started_count.load(Ordering::SeqCst);
+                let finished = finished_count.load(Ordering::SeqCst);
+                let snapshot: Vec<(String, String, i64, u64)> = {
+                    let guard = in_flight.lock().unwrap();
+                    guard
+                        .iter()
+                        .map(|(pr_id, (repo, num, t))| {
+                            (
+                                pr_id.clone(),
+                                repo.clone(),
+                                *num,
+                                t.elapsed().as_secs(),
+                            )
+                        })
+                        .collect()
+                };
+                let mut sorted = snapshot;
+                sorted.sort_by_key(|(_, _, _, secs)| std::cmp::Reverse(*secs));
+                let preview: Vec<String> = sorted
+                    .iter()
+                    .take(8)
+                    .map(|(pr, repo, num, secs)| {
+                        format!("{repo}#{num}({}…) {secs}s", &pr[..8.min(pr.len())])
+                    })
+                    .collect();
+                info!(
+                    elapsed_s = started_at.elapsed().as_secs(),
+                    started,
+                    finished,
+                    in_flight = sorted.len(),
+                    pending = total_jobs.saturating_sub(started),
+                    longest = ?preview,
+                    "compile progress"
+                );
+            }
+        })
+    };
+
     use rayon::prelude::*;
     let results: Vec<(PrBuildJob, Option<PrBuildOutput>)> = pool.install(|| {
         jobs.par_iter()
             .map(|job| {
+                let pr_short = &job.pr_id[..8.min(job.pr_id.len())];
+                let started = Instant::now();
+                {
+                    let mut guard = in_flight.lock().unwrap();
+                    guard.insert(
+                        job.pr_id.clone(),
+                        (job.repo_name.clone(), job.pr_number.unwrap_or(0), started),
+                    );
+                }
+                let n_started = started_count.fetch_add(1, Ordering::SeqCst) + 1;
+                info!(
+                    pr_id = pr_short,
+                    repo = %job.repo_name,
+                    pr_number = job.pr_number,
+                    started = n_started,
+                    finished = finished_count.load(Ordering::SeqCst),
+                    pending = total_jobs.saturating_sub(n_started),
+                    "compile start"
+                );
+
+                // Stamp this worker's GRADLE_USER_HOME into the
+                // per-job profile env. rayon::current_thread_index is
+                // None when a closure runs outside any pool (impossible
+                // here, but fall back to 0 defensively).
+                let worker_idx = rayon::current_thread_index().unwrap_or(0);
+                let mut profile_for_job = job.profile.clone();
+                let worker_home = gradle_homes_root.join(format!("w{worker_idx}"));
+                if let Err(e) = std::fs::create_dir_all(&worker_home) {
+                    warn!(
+                        path = %worker_home.display(),
+                        worker = worker_idx,
+                        error = %e,
+                        "could not create per-worker gradle home; falling back to default"
+                    );
+                } else {
+                    profile_for_job
+                        .env
+                        .insert("GRADLE_USER_HOME".to_string(), worker_home.to_string_lossy().into_owned());
+                }
+
                 let r = compile_and_mutate_pr_in_worktree(
                     &job.repo_path,
                     &job.merge_sha,
-                    &job.profile,
+                    &profile_for_job,
                     &job.pr_id,
                     10_000,
                     mutation_enabled,
+                );
+
+                let dur = started.elapsed().as_secs_f64();
+                let outcome = match r.as_ref() {
+                    None => "skipped",
+                    Some(o) if o.build.timed_out => "TIMEOUT",
+                    Some(o) if o.build.compiles => "PASS",
+                    Some(_) => "FAIL",
+                };
+                {
+                    let mut guard = in_flight.lock().unwrap();
+                    guard.remove(&job.pr_id);
+                }
+                let n_finished = finished_count.fetch_add(1, Ordering::SeqCst) + 1;
+                info!(
+                    pr_id = pr_short,
+                    repo = %job.repo_name,
+                    pr_number = job.pr_number,
+                    secs = format!("{:.1}", dur),
+                    outcome,
+                    finished = n_finished,
+                    pending = total_jobs.saturating_sub(n_finished),
+                    "compile end"
                 );
                 (job.clone(), r)
             })
             .collect()
     });
+
+    watchdog_stop.store(1, Ordering::SeqCst);
+    let _ = watchdog.join();
 
     let mut compiled = 0usize;
     let mut failed = 0usize;
@@ -910,9 +1469,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tail_reader_caps_output_to_last_max_bytes() {
+        use std::io::Cursor;
+        let payload = (0u8..200).cycle().take(64 * 1024).collect::<Vec<_>>();
+        let cursor = Cursor::new(payload.clone());
+        let handle = spawn_tail_reader(cursor, 4096);
+        let got = handle.join().unwrap();
+        assert_eq!(got.len(), 4096);
+        assert_eq!(got.as_slice(), &payload[payload.len() - 4096..]);
+    }
+
+    #[test]
+    fn tail_reader_returns_full_output_when_under_cap() {
+        use std::io::Cursor;
+        let payload = b"short build output".to_vec();
+        let cursor = Cursor::new(payload.clone());
+        let handle = spawn_tail_reader(cursor, 4096);
+        assert_eq!(handle.join().unwrap(), payload);
+    }
+
+    #[test]
     fn tail_keeps_trailing_bytes() {
         assert_eq!(tail("0123456789", 4), "6789");
         assert_eq!(tail("short", 100), "short");
+    }
+
+    #[test]
+    fn apply_overlay_files_missing_source_only_warns_and_does_not_panic() {
+        // Single overlay entry whose source does not exist. Compile must
+        // proceed unchanged: no panic, no error returned (function is
+        // infallible), no dest file created.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let overlays = vec![OverlayFile {
+            src: "app/google-services.json".into(),
+            dest: "app/google-services.json".into(),
+        }];
+        // `apply_overlay_files` returns (); calling it is the assertion
+        // that it does not panic on a missing source.
+        apply_overlay_files(&repo, &worktree, &overlays, "ff8081...");
+
+        // No partial state was written.
+        assert!(!worktree.join("app/google-services.json").exists());
+        assert!(
+            !worktree.join("app").exists(),
+            "missing source must not auto-create the dest parent dir either"
+        );
+    }
+
+    #[test]
+    fn apply_overlay_files_copies_present_sources_and_creates_dest_parents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(repo.join("app")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(repo.join("app/google-services.json"), b"{ \"team\": 4 }").unwrap();
+        std::fs::write(repo.join("local.properties"), b"sdk.dir=/opt/android").unwrap();
+
+        let overlays = vec![
+            OverlayFile {
+                src: "app/google-services.json".into(),
+                dest: "app/google-services.json".into(),
+            },
+            OverlayFile {
+                src: "local.properties".into(),
+                dest: "local.properties".into(),
+            },
+            OverlayFile {
+                src: "missing.json".into(),
+                dest: "app/missing.json".into(),
+            },
+        ];
+        apply_overlay_files(&repo, &worktree, &overlays, "ff8081...");
+
+        let copied = std::fs::read(worktree.join("app/google-services.json")).unwrap();
+        assert_eq!(copied, b"{ \"team\": 4 }");
+        assert!(worktree.join("local.properties").exists());
+        // Missing source skipped without panicking, and we did NOT create
+        // a dest file from thin air.
+        assert!(!worktree.join("app/missing.json").exists());
     }
 
     #[test]
@@ -937,6 +1577,7 @@ mod tests {
                 mutation_command: None,
                 mutation_timeout_seconds: 600,
                 mutation_report_path: "build/reports/pitest/mutations.xml".into(),
+                overlay_files: vec![],
             },
             BuildProfileRe {
                 repo_pattern: Regex::new(r"^spring-").unwrap(),
@@ -947,6 +1588,7 @@ mod tests {
                 mutation_command: None,
                 mutation_timeout_seconds: 600,
                 mutation_report_path: "build/reports/pitest/mutations.xml".into(),
+                overlay_files: vec![],
             },
         ];
         assert_eq!(

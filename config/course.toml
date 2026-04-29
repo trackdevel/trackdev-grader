@@ -35,12 +35,34 @@ low_survival_absolute_floor = 0.85
 raw_normalized_divergence_threshold = 0.20
 
 # Build commands per repo type. Key is regex matched against repo directory name.
+#
+# Daemon mode is on (gradle's default) so warm JVMs and the kotlinc
+# daemon stay alive across PRs — without that, each build pays a 60-120s
+# cold-start tax. The compile_stage walks /proc descendants of the shell
+# on timeout to actually kill the daemon (it `setsid()`s into its own
+# session so a process-group kill alone does not reach it), and
+# orchestration::run_pipeline sweeps any orphan daemon left over from a
+# prior crashed run before the new pipeline starts. Heap caps are set
+# in ~/.gradle/gradle.properties via org.gradle.jvmargs if needed.
 [[build.profiles]]
 repo_pattern = "^android-"
 command = "./gradlew assembleDebug"
 timeout_seconds = 300
 working_dir = "."
 env = {}
+# Untracked per-team build secrets the AGP / Firebase plugins require
+# but students don't (and shouldn't) commit. `src` is resolved
+# relative to the cloned source repo
+# (data/entregues/<project>/<repo>/<src>); each team contributes
+# their own file at that path. `dest` is relative to the worktree
+# root. Missing source → warn and continue (some teams may not need
+# Firebase). Add `app/google-services.json` and `local.properties`
+# to each cloned repo's `.git/info/exclude` so they survive across
+# fetches.
+overlay_files = [
+    { src = "app/google-services.json", dest = "app/google-services.json" },
+    { src = "local.properties",         dest = "local.properties" },
+]
 
 [[build.profiles]]
 repo_pattern = "^spring-"
@@ -48,6 +70,15 @@ command = "./gradlew bootJar"
 timeout_seconds = 180
 working_dir = "."
 env = {}
+# Files copied into every worktree before the build runs.
+# `src` is resolved relative to the cloned source repo
+# (data/entregues/<project>/<repo>/<src>) — so each team's own
+# secrets file is found automatically. `dest` is relative to the
+# worktree root.
+overlay_files = [
+    { src = "app/google-services.json", dest = "app/google-services.json" },
+    { src = "local.properties",         dest = "local.properties" },
+]
 
 [build]
 max_parallel_builds = 5

@@ -550,12 +550,186 @@ pub fn rerun_post_collection_for_sprint_ids(
     Ok(())
 }
 
+/// SIGKILL every gradle daemon JVM owned by the current user. Stale
+/// daemons accumulate from prior runs that timed out — gradle's daemon
+/// `setsid()`s into its own session right after fork, so the
+/// compile-stage's group-kill on timeout cannot reach it. A 2–4 GB
+/// orphan daemon per leaked run starves the host of RAM and tilts the
+/// next run toward OOM-kills mid-build, which manifest as gradle CLI
+/// hangs (the dead daemon never sends the build-complete socket ack).
+///
+/// Pure-Rust `/proc` walk so we don't depend on `pkill`. Best-effort:
+/// errors are logged at debug level only.
+/// Public entry point: kill any leaked gradle daemons + worktrees from
+/// prior crashed runs and clear the daemon registry. Safe to call from
+/// any compile-related subcommand at start. Logs `swept_*` counts.
+pub fn sweep_pre_compile_state(entregues_dir: &Path) {
+    kill_stale_gradle_daemons();
+    purge_gradle_daemon_registry();
+    sweep_stale_worktrees(entregues_dir);
+}
+
+fn kill_stale_gradle_daemons() {
+    #[cfg(unix)]
+    {
+        let me = unsafe { libc::geteuid() };
+        let proc_dir = match std::fs::read_dir("/proc") {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut killed = 0usize;
+        for entry in proc_dir.flatten() {
+            let name = entry.file_name();
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => continue,
+            };
+            let pid: i32 = match name_str.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            // Owner must match the current uid; otherwise skip.
+            let stat_path = entry.path().join("status");
+            let owner_ok = std::fs::read_to_string(&stat_path)
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("Uid:"))
+                        .and_then(|l| l.split_whitespace().nth(1).map(|v| v.parse::<u32>().ok()))
+                        .flatten()
+                })
+                .map(|uid| uid == me)
+                .unwrap_or(false);
+            if !owner_ok {
+                continue;
+            }
+            // Match GradleDaemon bootstrap class in cmdline (NUL-separated argv).
+            let cmdline_path = entry.path().join("cmdline");
+            let cmdline = match std::fs::read(&cmdline_path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let is_daemon = cmdline
+                .split(|b| *b == 0)
+                .any(|arg| arg == b"org.gradle.launcher.daemon.bootstrap.GradleDaemon");
+            if !is_daemon {
+                continue;
+            }
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+            killed += 1;
+        }
+        if killed > 0 {
+            info!(killed, "swept stale gradle daemons before pipeline start");
+        }
+    }
+}
+
+/// Best-effort cache invalidation: gradle's daemon registry remembers
+/// daemons we just SIGKILLed. Subsequent runs would log "could not be
+/// reused" noise and try to handshake with the dead PIDs first. We
+/// remove the per-version registry binary; gradle re-creates it.
+fn purge_gradle_daemon_registry() {
+    let home = match std::env::var_os("HOME") {
+        Some(h) => PathBuf::from(h),
+        None => return,
+    };
+    purge_registry_under(&home.join(".gradle").join("daemon"));
+
+    // Per-worker GRADLE_USER_HOMEs (compile_stage uses
+    // $HOME/.gradle-grader-workers/w<N>/) keep their own daemon
+    // registries. We must clear theirs too, otherwise a leftover dead-PID
+    // entry in worker-N's registry will block worker-N's first new build.
+    let workers_root = home.join(".gradle-grader-workers");
+    if let Ok(workers) = std::fs::read_dir(&workers_root) {
+        for w in workers.flatten() {
+            purge_registry_under(&w.path().join("daemon"));
+        }
+    }
+}
+
+fn purge_registry_under(daemon_root: &Path) {
+    let versions = match std::fs::read_dir(daemon_root) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    for entry in versions.flatten() {
+        let registry = entry.path().join("registry.bin");
+        if registry.exists() {
+            let _ = std::fs::remove_file(&registry);
+        }
+    }
+}
+
+/// Each PR build runs in a `tempfile::tempdir()` named `compile_<sha8>_…`
+/// under `$TMPDIR` (typically `/tmp`). The `WorktreeGuard` Drop runs
+/// `git worktree remove --force` on the registered worktree, but the
+/// directory itself is only `unlink`'d when `TempDir::Drop` runs — which
+/// it does NOT when our process is hard-killed. Result: hundreds of
+/// `/tmp/compile_*` leftovers from prior crashed runs accumulate (1.6 GB
+/// observed). We sweep them on next start.
+///
+/// Also `git worktree prune` the source repos so the `.git/worktrees/`
+/// registry doesn't keep stale entries that confuse subsequent
+/// `git worktree add` calls.
+fn sweep_stale_worktrees(entregues_dir: &Path) {
+    let tmp = std::env::temp_dir();
+    let entries = match std::fs::read_dir(&tmp) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("compile_") {
+            continue;
+        }
+        if std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        info!(removed, "swept stale /tmp/compile_* worktree directories");
+    }
+
+    // Prune git worktrees in each entregues subdir so a fresh
+    // `git worktree add` doesn't trip over forgotten registrations.
+    let projects = match std::fs::read_dir(entregues_dir) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    for project in projects.flatten() {
+        let pdir = match std::fs::read_dir(project.path()) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        for repo in pdir.flatten() {
+            let dot_git = repo.path().join(".git");
+            if !dot_git.exists() {
+                continue;
+            }
+            let _ = std::process::Command::new("git")
+                .args([
+                    "-C",
+                    repo.path().to_str().unwrap_or("."),
+                    "worktree",
+                    "prune",
+                ])
+                .output();
+        }
+    }
+}
+
 pub fn run_pipeline(
     config: &Config,
     db_path: &Path,
     variant: PipelineVariant,
     opts: &PipelineOptions,
 ) -> Result<()> {
+    sweep_pre_compile_state(&opts.entregues_dir);
+
     let total_stages = if variant.ai_detection() { 6 } else { 5 };
     info!(
         variant = variant.name(),

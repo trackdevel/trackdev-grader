@@ -429,25 +429,38 @@ fn main() -> Result<()> {
             }
         }
         Command::Compile { projects, force } => {
+            // Stale gradle daemons or worktrees from a prior crashed run
+            // tie up the per-version daemon registry; new builds wait
+            // forever on a busy/dead daemon. Always sweep at compile start.
+            sprint_grader_orchestration::pipeline::sweep_pre_compile_state(&entregues_dir);
+
             let profiles =
                 sprint_grader_compile::load_build_profiles_from_config(&config.build_profiles)
                     .map_err(|e| anyhow::anyhow!(e))?;
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
             let skip_tested = config.build.skip_already_tested && !force;
-            for g in &groups {
-                for sid in &g.sprint_ids {
-                    sprint_grader_compile::check_sprint_compilations_parallel(
-                        &db.conn,
-                        *sid,
-                        &entregues_dir,
-                        &profiles,
-                        config.build.max_parallel_builds as usize,
-                        config.build.stderr_max_chars as usize,
-                        skip_tested,
-                        config.mutation.enabled,
-                    )
-                    .with_context(|| format!("compile failed for sprint_id {sid}"))?;
+            // Single combined batch across every sprint of every project in
+            // scope: one rayon pool, one watchdog stream, one cold-start
+            // amortisation for the per-worker GRADLE_USER_HOME warm-up.
+            let all_sprint_ids: Vec<i64> = groups
+                .iter()
+                .flat_map(|g| g.sprint_ids.iter().copied())
+                .collect();
+            if !all_sprint_ids.is_empty() {
+                sprint_grader_compile::check_compilations_parallel(
+                    &db.conn,
+                    &all_sprint_ids,
+                    &entregues_dir,
+                    &profiles,
+                    config.build.max_parallel_builds as usize,
+                    config.build.stderr_max_chars as usize,
+                    skip_tested,
+                    config.mutation.enabled,
+                )
+                .context("compile failed")?;
+                // Compilation summary is sprint-scoped; run it for each.
+                for sid in &all_sprint_ids {
                     sprint_grader_compile::summarize_compilation(&db.conn, *sid)
                         .with_context(|| format!("compile summary failed for sprint_id {sid}"))?;
                 }

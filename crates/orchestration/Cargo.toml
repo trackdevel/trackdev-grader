@@ -31,5 +31,8 @@ sprint-grader-architecture = { path = "../architecture" }
 sprint-grader-architecture-llm = { path = "../architecture_llm" }
 sprint-grader-estimation = { path = "../estimation" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile.workspace = true

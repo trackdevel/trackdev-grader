@@ -1741,6 +1741,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "libc",
  "once_cell",
  "rayon",
  "regex",
@@ -1820,6 +1821,7 @@ name = "sprint-grader-orchestration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rayon",
  "rusqlite",
  "sha2",
