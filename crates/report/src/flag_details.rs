@@ -26,6 +26,7 @@ pub(crate) fn render_flag_details(flag_type: &str, details: Option<&str>) -> Ren
         ("GHOST_CONTRIBUTOR", Some(v)) => render_ghost_contributor(v),
         ("LOW_COMPOSITE_SCORE", Some(v)) => render_low_composite_score(v),
         ("LOW_SURVIVAL_RATE", Some(v)) => render_low_survival_rate(v),
+        ("SINGLE_COMMIT_DUMP", Some(v)) => render_single_commit_dump(v),
         ("PR_DOES_NOT_COMPILE", Some(v)) => render_pr_reference("Does not compile", v, false),
         ("APPROVED_BROKEN_PR", Some(v)) => render_pr_reference("Approved broken PR", v, false),
         ("LAST_MINUTE_PR", Some(v)) => render_last_minute_pr(v),
@@ -58,11 +59,41 @@ pub(crate) fn enrich_flag_details(
     flag_type: &str,
     details: Option<&str>,
 ) -> Option<String> {
-    if flag_type != "TEAM_INEQUALITY" {
+    match flag_type {
+        "TEAM_INEQUALITY" => {
+            enrich_team_inequality_details(conn, sprint_id, student_id, details?)
+                .and_then(|v| serde_json::to_string(&v).ok())
+        }
+        "APPROVED_BROKEN_PR" => enrich_approved_broken_pr_details(conn, details?)
+            .and_then(|v| serde_json::to_string(&v).ok()),
+        _ => None,
+    }
+}
+
+fn enrich_approved_broken_pr_details(conn: &Connection, details: &str) -> Option<Value> {
+    let mut parsed = serde_json::from_str::<Value>(details).ok()?;
+    if string_field(&parsed, "pr_url")
+        .filter(|u| u.starts_with("http"))
+        .is_some()
+    {
         return None;
     }
-    enrich_team_inequality_details(conn, sprint_id, student_id, details?)
-        .and_then(|v| serde_json::to_string(&v).ok())
+    let pr_id = string_field(&parsed, "pr_id")?;
+    let (url, repo): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT url, repo_full_name FROM pull_requests WHERE id = ? LIMIT 1",
+            [&pr_id],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .ok()?;
+    let obj = parsed.as_object_mut()?;
+    if let Some(u) = url.filter(|u| u.starts_with("http")) {
+        obj.insert("pr_url".into(), json!(u));
+    }
+    if let Some(r) = repo.filter(|r| !r.is_empty()) {
+        obj.insert("repo_full_name".into(), json!(r));
+    }
+    Some(parsed)
 }
 
 fn enrich_team_inequality_details(
@@ -340,6 +371,20 @@ fn render_pr_reference(prefix: &str, v: &Value, include_repo: bool) -> RenderedF
     let (plain_pr, md_pr, url) = pr_reference(v, include_repo);
     let plain = format!("{prefix}: {plain_pr}.");
     let markdown = format!("{}: {}.", md_escape(prefix), md_pr);
+    RenderedFlagDetails::new(plain, markdown, url)
+}
+
+fn render_single_commit_dump(v: &Value) -> RenderedFlagDetails {
+    let (plain_pr, md_pr, url) = pr_reference(v, true);
+    let total_lines = number_field(v, "total_lines");
+    let plain = match total_lines {
+        Some(n) => format!("Single-commit dump: {plain_pr} ({} total lines).", fmt_num(n)),
+        None => format!("Single-commit dump: {plain_pr}."),
+    };
+    let markdown = match total_lines {
+        Some(n) => format!("Single-commit dump: {md_pr} ({} total lines).", fmt_num(n)),
+        None => format!("Single-commit dump: {md_pr}."),
+    };
     RenderedFlagDetails::new(plain, markdown, url)
 }
 
@@ -686,7 +731,17 @@ fn pr_reference(v: &Value, include_repo: bool) -> (String, String, Option<String
     let number = number_field(v, "pr_number").or_else(|| number_field(v, "number"));
     let title = string_field(v, "pr_title").or_else(|| string_field(v, "title"));
     let repo = string_field(v, "repo").or_else(|| string_field(v, "repo_full_name"));
-    let url = string_field(v, "pr_url").or_else(|| string_field(v, "url"));
+    let url = string_field(v, "pr_url")
+        .or_else(|| string_field(v, "url"))
+        .or_else(|| {
+            // Construct GitHub URL from repo + pr_number for rows that pre-date pr_url storage.
+            match (repo.as_deref(), number) {
+                (Some(r), Some(n)) if r.contains('/') => {
+                    Some(format!("https://github.com/{r}/pull/{}", n.round() as i64))
+                }
+                _ => None,
+            }
+        });
     let mut label = match (number, title.as_deref()) {
         (Some(n), Some(t)) if !t.is_empty() => format!("PR #{}: {t}", fmt_num(n)),
         (Some(n), _) => format!("PR #{}", fmt_num(n)),
@@ -998,6 +1053,78 @@ mod tests {
         assert!(!rendered.plain.contains("raw-123"));
         assert!(!rendered.plain.contains("student-1"));
         assert!(!rendered.plain.contains("threshold"));
+    }
+
+    #[test]
+    fn approved_broken_pr_embeds_url_when_present() {
+        let details = r#"{"pr_id":"raw-123","pr_number":31,"author":"alice","pr_url":"https://github.com/org/repo/pull/31"}"#;
+        let rendered = render_flag_details("APPROVED_BROKEN_PR", Some(details));
+        assert_eq!(rendered.plain, "Approved broken PR: PR #31.");
+        assert_eq!(
+            rendered.markdown,
+            "Approved broken PR: [PR #31](https://github.com/org/repo/pull/31)."
+        );
+        assert_eq!(
+            rendered.url.as_deref(),
+            Some("https://github.com/org/repo/pull/31")
+        );
+    }
+
+    #[test]
+    fn single_commit_dump_formats_with_url_and_repo() {
+        let details = r#"{"pr_number":10,"repo":"udg-pds/android-pds26_4c","total_lines":352,"threshold":200,"pr_url":"https://github.com/udg-pds/android-pds26_4c/pull/10"}"#;
+        let rendered = render_flag_details("SINGLE_COMMIT_DUMP", Some(details));
+        assert_eq!(
+            rendered.plain,
+            "Single-commit dump: udg-pds/android-pds26_4c PR #10 (352 total lines)."
+        );
+        assert!(rendered.markdown.contains("[udg-pds/android-pds26_4c PR"));
+        assert!(rendered.markdown.contains("(352 total lines)"));
+        assert_eq!(
+            rendered.url.as_deref(),
+            Some("https://github.com/udg-pds/android-pds26_4c/pull/10")
+        );
+        assert!(!rendered.plain.contains("threshold"));
+    }
+
+    #[test]
+    fn single_commit_dump_constructs_url_from_repo_when_pr_url_absent() {
+        // Old DB rows have repo in <org>/<repo> format but no pr_url.
+        let details = r#"{"pr_number":2,"repo":"udg-pds/android-pds26_3b","total_lines":666,"threshold":200}"#;
+        let rendered = render_flag_details("SINGLE_COMMIT_DUMP", Some(details));
+        assert_eq!(
+            rendered.plain,
+            "Single-commit dump: udg-pds/android-pds26_3b PR #2 (666 total lines)."
+        );
+        assert!(rendered
+            .markdown
+            .contains("https://github.com/udg-pds/android-pds26_3b/pull/2"));
+        assert_eq!(
+            rendered.url.as_deref(),
+            Some("https://github.com/udg-pds/android-pds26_3b/pull/2")
+        );
+    }
+
+    #[test]
+    fn approved_broken_pr_enrichment_adds_url_from_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pull_requests (id TEXT PRIMARY KEY, url TEXT, repo_full_name TEXT);
+             INSERT INTO pull_requests VALUES ('pr-uuid-1', 'https://github.com/org/repo/pull/31', 'org/repo');",
+        )
+        .unwrap();
+        let details = r#"{"pr_id":"pr-uuid-1","pr_number":31,"author":"alice"}"#;
+        let enriched =
+            super::enrich_flag_details(&conn, 1, "alice", "APPROVED_BROKEN_PR", Some(details));
+        let rendered = render_flag_details("APPROVED_BROKEN_PR", enriched.as_deref());
+        assert_eq!(
+            rendered.markdown,
+            "Approved broken PR: [PR #31](https://github.com/org/repo/pull/31)."
+        );
+        assert_eq!(
+            rendered.url.as_deref(),
+            Some("https://github.com/org/repo/pull/31")
+        );
     }
 
     #[test]
