@@ -263,6 +263,21 @@ pub struct BuildProfile {
     /// T-P2.4: relative path (from `working_dir`) of the Pitest XML
     /// report. Defaults to Pitest's standard output location.
     pub mutation_report_path: String,
+    /// Untracked files copied from the source repo into every
+    /// freshly-created worktree before the build runs. Designed for
+    /// per-team build secrets like `app/google-services.json` that are
+    /// not committed to git but the build needs to succeed. `src` is
+    /// resolved relative to the cloned source repo
+    /// (`<entregues_dir>/<project>/<repo>/<src>`), so a single profile
+    /// entry serves every team — each team's own file is found by
+    /// convention. `dest` is relative to the worktree root.
+    pub overlay_files: Vec<OverlayFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OverlayFile {
+    pub src: String,
+    pub dest: String,
 }
 
 #[derive(Debug, Clone)]
@@ -546,6 +561,14 @@ struct RawBuildProfile {
     mutation_timeout_seconds: u64,
     #[serde(default = "default_mutation_report_path")]
     mutation_report_path: String,
+    #[serde(default)]
+    overlay_files: Vec<RawOverlayFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawOverlayFile {
+    src: String,
+    dest: String,
 }
 
 fn default_working_dir() -> String {
@@ -558,6 +581,18 @@ fn default_mutation_timeout_seconds() -> u64 {
 
 fn default_mutation_report_path() -> String {
     "build/reports/pitest/mutations.xml".to_string()
+}
+
+/// Reject overlay paths that are absolute or contain a `..` segment.
+/// `src` is resolved against the source repo root and `dest` against
+/// the worktree root; both must stay inside their respective trees.
+fn is_unsafe_overlay_path(p: &str) -> bool {
+    let path = std::path::Path::new(p);
+    if path.is_absolute() {
+        return true;
+    }
+    path.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -767,19 +802,43 @@ impl Config {
                 .unwrap_or(build_defaults.skip_already_tested),
         };
 
-        let build_profiles = raw
+        let build_profiles: Vec<BuildProfile> = raw
             .build
             .profiles
             .into_iter()
-            .map(|p| BuildProfile {
-                repo_pattern: p.repo_pattern,
-                command: p.command,
-                timeout_seconds: p.timeout_seconds,
-                working_dir: p.working_dir,
-                env: p.env,
-                mutation_command: p.mutation_command,
-                mutation_timeout_seconds: p.mutation_timeout_seconds,
-                mutation_report_path: p.mutation_report_path,
+            .map(|p| {
+                let overlay_files = p
+                    .overlay_files
+                    .into_iter()
+                    .filter_map(|o| {
+                        // Reject path escapes at config-load time so a typo in
+                        // course.toml can't read or write outside the worktree.
+                        if is_unsafe_overlay_path(&o.src) || is_unsafe_overlay_path(&o.dest) {
+                            tracing::warn!(
+                                src = %o.src,
+                                dest = %o.dest,
+                                "rejecting overlay_files entry with absolute or .. path",
+                            );
+                            None
+                        } else {
+                            Some(OverlayFile {
+                                src: o.src,
+                                dest: o.dest,
+                            })
+                        }
+                    })
+                    .collect();
+                BuildProfile {
+                    repo_pattern: p.repo_pattern,
+                    command: p.command,
+                    timeout_seconds: p.timeout_seconds,
+                    working_dir: p.working_dir,
+                    env: p.env,
+                    mutation_command: p.mutation_command,
+                    mutation_timeout_seconds: p.mutation_timeout_seconds,
+                    mutation_report_path: p.mutation_report_path,
+                    overlay_files,
+                }
             })
             .collect();
 
@@ -1040,6 +1099,33 @@ contribution_imbalance_stddev = 1.5
         write_config(tmp.path(), &body);
         let cfg = Config::load(tmp.path()).expect("load with freeze flag");
         assert!(cfg.curriculum_freeze_after_sprint_end);
+    }
+
+    #[test]
+    fn build_profile_overlay_files_round_trip_and_path_safety() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_TOML}\n\
+             [[build.profiles]]\n\
+             repo_pattern = \"^android-\"\n\
+             command = \"./gradlew assembleDebug\"\n\
+             timeout_seconds = 300\n\
+             overlay_files = [\n  \
+                 {{ src = \"app/google-services.json\", dest = \"app/google-services.json\" }},\n  \
+                 {{ src = \"local.properties\",         dest = \"local.properties\" }},\n  \
+                 {{ src = \"../escape\",                dest = \"app/x\" }},\n  \
+                 {{ src = \"app/y\",                    dest = \"/etc/passwd\" }},\n\
+             ]\n",
+        );
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("load with overlay_files");
+        let android = &cfg.build_profiles[0];
+        // Two safe entries kept; the two unsafe entries (parent escape,
+        // absolute dest) are dropped at config-load.
+        assert_eq!(android.overlay_files.len(), 2);
+        assert_eq!(android.overlay_files[0].src, "app/google-services.json");
+        assert_eq!(android.overlay_files[0].dest, "app/google-services.json");
+        assert_eq!(android.overlay_files[1].src, "local.properties");
     }
 
     #[test]
