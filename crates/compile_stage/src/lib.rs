@@ -9,8 +9,8 @@ pub mod failure_analysis;
 pub mod pitest;
 
 pub use builder::{
-    check_sprint_compilations_parallel, load_build_profiles_from_config, match_profile,
-    BuildProfileRe, BuildResult,
+    check_compilations_parallel, check_sprint_compilations_parallel, load_build_profiles_from_config,
+    match_profile, BuildProfileRe, BuildResult,
 };
 pub use failure_analysis::{classify_errors, summarize_compilation};
 pub use pitest::{parse_pitest_xml, parse_pitest_xml_str, PitestSummary};
