@@ -12,7 +12,14 @@ use sprint_grader_core::stats::{median_upper, percentile_pos, round_half_even, s
 
 #[allow(clippy::type_complexity)]
 mod row_aliases {
-    pub type PrAuthorRepoLines = (String, Option<i64>, Option<String>, Option<String>, i64);
+    pub type PrAuthorRepoLines = (
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<String>,
+    );
     pub type PrAuthorRepoLogin = (
         String,
         Option<i64>,
@@ -98,7 +105,7 @@ mod row_aliases {
         Option<String>,
         Option<String>,
     );
-    pub type ApprovedBrokenRow = (String, Option<String>, Option<String>, Option<i64>);
+    pub type ApprovedBrokenRow = (String, Option<String>, Option<String>, Option<i64>, Option<String>);
     pub type SuspectFastTaskRow = (
         Option<i64>,
         Option<String>,
@@ -480,7 +487,8 @@ fn single_commit_dump(
 ) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT pr.id, pr.pr_number, pr.repo_full_name, pr.author_id,
-                COALESCE(pr.additions, 0) + COALESCE(pr.deletions, 0) as total_lines
+                COALESCE(pr.additions, 0) + COALESCE(pr.deletions, 0) as total_lines,
+                pr.url
          FROM pull_requests pr
          JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
          JOIN tasks t ON t.id = tpr.task_id
@@ -494,12 +502,13 @@ fn single_commit_dump(
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                r.get::<_, Option<String>>(5)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
     let mut flags = Vec::new();
-    for (pr_id, pr_number, repo, author_id, total_lines) in rows {
+    for (pr_id, pr_number, repo, author_id, total_lines, pr_url) in rows {
         let commit_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pr_commits WHERE pr_id = ?",
@@ -529,6 +538,7 @@ fn single_commit_dump(
                         "repo": repo,
                         "total_lines": total_lines,
                         "threshold": thresh.single_commit_dump_lines,
+                        "pr_url": pr_url,
                     }),
                 });
             }
@@ -1888,8 +1898,9 @@ fn pr_does_not_compile(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Ve
 
 fn approved_broken_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(
-        "SELECT pc.pr_id, pc.reviewer_ids, pc.author_id, pc.pr_number
+        "SELECT pc.pr_id, pc.reviewer_ids, pc.author_id, pc.pr_number, pr.url
          FROM pr_compilation pc
+         LEFT JOIN pull_requests pr ON pr.id = pc.pr_id
          WHERE pc.sprint_id = ? AND pc.compiles = 0",
     )?;
     let rows: Vec<ApprovedBrokenRow> = stmt
@@ -1899,12 +1910,13 @@ fn approved_broken_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec
                 r.get::<_, Option<String>>(1)?,
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<i64>>(3)?,
+                r.get::<_, Option<String>>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
     let mut flags = Vec::new();
-    for (pr_id, reviewer_json, author_id, pr_number) in rows {
+    for (pr_id, reviewer_json, author_id, pr_number, pr_url) in rows {
         let reviewers: Vec<String> =
             serde_json::from_str(&reviewer_json.unwrap_or_default()).unwrap_or_default();
         for rid in reviewers {
@@ -1925,6 +1937,7 @@ fn approved_broken_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec
                         "pr_id": pr_id,
                         "pr_number": pr_number,
                         "author": author_id,
+                        "pr_url": pr_url,
                     }),
                 });
             }
@@ -2454,6 +2467,40 @@ fn persist_flags(conn: &Connection, sprint_id: i64, flags: &[Flag]) -> rusqlite:
         )?;
     }
     Ok(())
+}
+
+/// Delete and re-run the three compile-dependent detectors for one sprint.
+///
+/// Used after `compile --force` so that stale `PR_DOES_NOT_COMPILE`,
+/// `APPROVED_BROKEN_PR`, and `HIGH_COMPILE_FAILURE_RATE` flags are replaced
+/// without touching the rest of the flags table.
+pub fn redetect_compile_flags_for_sprint_id(
+    conn: &Connection,
+    sprint_id: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM flags WHERE sprint_id = ? AND flag_type IN \
+         ('PR_DOES_NOT_COMPILE', 'APPROVED_BROKEN_PR', 'HIGH_COMPILE_FAILURE_RATE')",
+        [sprint_id],
+    )?;
+    let detectors: [rusqlite::Result<Vec<Flag>>; 3] = [
+        pr_does_not_compile(conn, sprint_id),
+        approved_broken_pr(conn, sprint_id),
+        high_compile_failure_rate(conn, sprint_id),
+    ];
+    let mut total = 0usize;
+    for result in detectors {
+        match result {
+            Ok(v) => {
+                total += v.len();
+                persist_flags(conn, sprint_id, &v)?;
+            }
+            Err(e) => {
+                warn!(error = %e, sprint_id, "compile flag re-detection failed");
+            }
+        }
+    }
+    Ok(total)
 }
 
 /// Run every flag detector for one sprint. Mirrors `flags._detect_for_sprint_id`.
