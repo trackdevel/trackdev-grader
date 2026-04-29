@@ -61,6 +61,7 @@ fn worktree_build_succeeds() {
         mutation_command: None,
         mutation_timeout_seconds: 600,
         mutation_report_path: "build/reports/pitest/mutations.xml".into(),
+        overlay_files: vec![],
     };
     let r = compile_pr_in_worktree(&repo, &sha, &profile, "pr_test_1234", 10_000)
         .expect("build returned None");
@@ -108,6 +109,7 @@ fn worktree_build_timeout_kills_hard() {
         mutation_command: None,
         mutation_timeout_seconds: 600,
         mutation_report_path: "build/reports/pitest/mutations.xml".into(),
+        overlay_files: vec![],
     };
     let start = std::time::Instant::now();
     let r = compile_pr_in_worktree(&repo, &sha, &profile, "pr_slow_0001", 10_000).unwrap();
