@@ -155,7 +155,6 @@ fn open_worker_conn(db_path: &Path) -> rusqlite::Result<Connection> {
 fn run_parallel_project_block(
     db_path: &Path,
     config: &Config,
-    entregues_dir: &Path,
     sprint_ids: &[i64],
     max_workers: usize,
     use_llm_pr_docs: bool,
@@ -180,9 +179,7 @@ fn run_parallel_project_block(
         sprint_ids
             .par_iter()
             .copied()
-            .map(|sid| {
-                run_project_stage_block(db_path, config, entregues_dir, sid, use_llm_pr_docs)
-            })
+            .map(|sid| run_project_stage_block(db_path, config, sid, use_llm_pr_docs))
             .collect()
     });
 
@@ -199,7 +196,6 @@ pub struct ProjectResult {
 fn run_project_stage_block(
     db_path: &Path,
     config: &Config,
-    entregues_dir: &Path,
     sprint_id: i64,
     use_llm_pr_docs: bool,
 ) -> ProjectResult {
@@ -225,41 +221,16 @@ fn run_project_stage_block(
         }
     };
 
-    // compile
-    {
-        let profiles =
-            match sprint_grader_compile::load_build_profiles_from_config(&config.build_profiles) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!(sprint_id, error = %e, "build profile load failed; skipping compile");
-                    Vec::new()
-                }
-            };
-        if !profiles.is_empty() {
-            let sid = sprint_id;
-            let prof = profiles.clone();
-            let e_dir = entregues_dir.to_path_buf();
-            let max_parallel = config.build.max_parallel_builds as usize;
-            let stderr_cap = config.build.stderr_max_chars as usize;
-            let skip_tested = config.build.skip_already_tested;
-            let mutation_enabled = config.mutation.enabled;
-            stage("compile", &mut || {
-                sprint_grader_compile::check_sprint_compilations_parallel(
-                    &conn,
-                    sid,
-                    &e_dir,
-                    &prof,
-                    max_parallel,
-                    stderr_cap,
-                    skip_tested,
-                    mutation_enabled,
-                    None,
-                )?;
-                sprint_grader_compile::summarize_compilation(&conn, sid)?;
-                Ok(())
-            });
-        }
-    }
+    // PR compilation has been hoisted out of the per-sprint parallel block
+    // (see `run_pipeline`): compiling per-sprint here meant the outer rayon
+    // pool of N sprints × the inner pool of `max_parallel_builds` produced
+    // N×M concurrent gradle processes (e.g. 4×5 = 20 with the default 5).
+    // The hoisted call uses a single rayon pool sized exactly to
+    // `config.build.max_parallel_builds`. We still run the cheap per-sprint
+    // `summarize_compilation` here so flag detection sees fresh aggregates.
+    stage("summarize_compilation", &mut || {
+        sprint_grader_compile::summarize_compilation(&conn, sprint_id)
+    });
 
     // Stage order matters: several flag detectors read derived tables.
     //   team_inequality      reads team_sprint_inequality      (← inequality)
@@ -512,7 +483,7 @@ pub fn rerun_post_collection_for_sprint_ids(
 
     let workers = max_workers.unwrap_or(sprint_ids.len());
     let results =
-        run_parallel_project_block(db_path, config, entregues_dir, sprint_ids, workers, true)?;
+        run_parallel_project_block(db_path, config, sprint_ids, workers, true)?;
     for r in &results {
         if !r.stage_errors.is_empty() {
             let failed: Vec<&str> = r.stage_errors.iter().map(|(k, _)| k.as_str()).collect();
@@ -866,6 +837,41 @@ pub fn run_pipeline(
         }
     }
 
+    // PR compilation: ONE rayon pool sized to `max_parallel_builds`, sweeping
+    // every PR across every sprint. Hoisted out of the per-sprint parallel
+    // block to avoid N(sprints) × M(builds) concurrent gradle processes —
+    // observed as 20 in flight with the default M=5 and 4 sprints.
+    {
+        let profiles =
+            match sprint_grader_compile::load_build_profiles_from_config(&config.build_profiles) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "build profile load failed; skipping compile");
+                    Vec::new()
+                }
+            };
+        if !profiles.is_empty() {
+            let max_parallel = config.build.max_parallel_builds as usize;
+            let stderr_cap = config.build.stderr_max_chars as usize;
+            let skip_tested = config.build.skip_already_tested;
+            let mutation_enabled = config.mutation.enabled;
+            if let Err(e) = sprint_grader_compile::check_compilations_parallel(
+                &db.conn,
+                &flat_sprint_ids,
+                &opts.entregues_dir,
+                &profiles,
+                max_parallel,
+                stderr_cap,
+                skip_tested,
+                mutation_enabled,
+                None,
+                None,
+            ) {
+                warn!(error = %e, "compile sweep failed");
+            }
+        }
+    }
+
     // Close the master DB before rayon workers open their own connections.
     // Keep the schema already applied; workers just call `Connection::open`.
     drop(db);
@@ -881,7 +887,6 @@ pub fn run_pipeline(
     let results = run_parallel_project_block(
         db_path,
         config,
-        &opts.entregues_dir,
         &flat_sprint_ids,
         max_workers,
         !matches!(variant, PipelineVariant::GoQuick),
