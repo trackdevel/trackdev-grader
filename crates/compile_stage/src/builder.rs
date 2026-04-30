@@ -25,6 +25,7 @@ use tracing::{error, info, warn};
 use wait_timeout::ChildExt;
 
 use sprint_grader_core::config::BuildProfile as ConfigBuildProfile;
+use sprint_grader_core::time::parse_iso;
 
 #[derive(Debug, Clone)]
 pub struct BuildProfileRe {
@@ -1003,6 +1004,7 @@ pub fn check_sprint_compilations_parallel(
     skip_tested: bool,
     mutation_enabled: bool,
     pr_number_filter: Option<&[i64]>,
+    skip_recent_within: Option<chrono::Duration>,
 ) -> rusqlite::Result<CompileSummary> {
     check_compilations_parallel(
         conn,
@@ -1014,6 +1016,7 @@ pub fn check_sprint_compilations_parallel(
         skip_tested,
         mutation_enabled,
         pr_number_filter,
+        skip_recent_within,
     )
 }
 
@@ -1025,6 +1028,11 @@ pub fn check_sprint_compilations_parallel(
 ///
 /// `pr_number_filter`: when `Some`, only PRs whose `pr_number` is in the
 /// slice are compiled. Pass `None` to compile all PRs (normal operation).
+///
+/// `skip_recent_within`: when `Some(d)`, any PR whose existing
+/// `pr_compilation.tested_at` is within `d` of `now` is skipped. This check
+/// runs regardless of `skip_tested` so `--force --skip-delay 1h` recompiles
+/// everything except PRs already tested in the last hour.
 #[allow(clippy::too_many_arguments)]
 pub fn check_compilations_parallel(
     conn: &Connection,
@@ -1036,6 +1044,7 @@ pub fn check_compilations_parallel(
     skip_tested: bool,
     mutation_enabled: bool,
     pr_number_filter: Option<&[i64]>,
+    skip_recent_within: Option<chrono::Duration>,
 ) -> rusqlite::Result<CompileSummary> {
     if sprint_ids.is_empty() {
         return Ok(CompileSummary::default());
@@ -1128,6 +1137,27 @@ pub fn check_compilations_parallel(
             if matches!(existing, Some(ref sha) if sha == &merge_sha) {
                 skipped += 1;
                 continue;
+            }
+        }
+
+        // Skip PRs whose last test landed within `skip_recent_within` ago,
+        // even when --force is set. Lets users repeatedly run `compile
+        // --force --skip-delay 1h` during iteration without re-paying for
+        // anything already built in the last hour.
+        if let Some(window) = skip_recent_within {
+            let tested_at: Option<String> = conn
+                .query_row(
+                    "SELECT tested_at FROM pr_compilation WHERE pr_id = ? AND repo_name = ?",
+                    params![pr_id, repo_name],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten();
+            if let Some(ts) = tested_at.as_deref().and_then(parse_iso) {
+                if Utc::now().signed_duration_since(ts) < window {
+                    skipped += 1;
+                    continue;
+                }
             }
         }
 
