@@ -44,12 +44,19 @@ pub struct Config {
 /// uses the direct Anthropic SDK and requires `ANTHROPIC_API_KEY`.
 /// Missing prerequisites for the selected backend fall back to the
 /// deterministic heuristic so a missing CLI binary doesn't hard-fail.
+///
+/// `model_id` is REQUIRED in `course.toml` — there is no default. This
+/// is a deliberate guard against the historical bug where the CLI judge
+/// silently fell back to whatever model the user's Claude session
+/// pointed at (Opus on Max plans), draining quota.
 #[derive(Debug, Clone)]
 pub struct EvaluateConfig {
     /// Backend selector. Either `"claude-cli"` (default) or
     /// `"anthropic-api"`.
     pub judge: String,
-    /// Reported model id — used for cache/telemetry only.
+    /// Pinned model id (e.g. `claude-haiku-4-5-20251001`). REQUIRED in
+    /// course.toml; passed verbatim to the CLI via `--model` and to the
+    /// API as the `model` field. Also part of the cache key.
     pub model_id: String,
     /// Number of concurrent CLI / API invocations. Each `claude-cli`
     /// worker spawns a process, so be conservative on the user's
@@ -62,11 +69,17 @@ pub struct EvaluateConfig {
     pub claude_cli_path: String,
 }
 
+/// Sentinel returned by [`EvaluateConfig::default`]. It deliberately
+/// holds an empty `model_id`; callers MUST either populate `model_id`
+/// from `course.toml` (the production path in `Config::load`) or set it
+/// explicitly. Any code that ships `EvaluateConfig::default()` straight
+/// to a Claude invocation without overriding `model_id` will fail at
+/// the build_argv-style assertions or be rejected by the API.
 impl Default for EvaluateConfig {
     fn default() -> Self {
         Self {
             judge: "claude-cli".to_string(),
-            model_id: "claude-haiku-4-5-20251001".to_string(),
+            model_id: String::new(),
             judge_workers: 4,
             judge_timeout_seconds: 180,
             claude_cli_path: "claude".to_string(),
@@ -112,12 +125,17 @@ pub struct ArchitectureConfig {
     pub claude_cli_path: String,
 }
 
+/// Sentinel returned by [`ArchitectureConfig::default`]. It deliberately
+/// holds an empty `model_id`; callers MUST either populate `model_id`
+/// from `course.toml [architecture]` (the production path in
+/// `Config::load`) or set it explicitly. There is no "default model" to
+/// fall back to — see the comment on `EvaluateConfig::default`.
 impl Default for ArchitectureConfig {
     fn default() -> Self {
         Self {
             llm_review: false,
             judge: "claude-cli".to_string(),
-            model_id: "claude-haiku-4-5-20251001".to_string(),
+            model_id: String::new(),
             max_tokens: 1024,
             rubric_path: "architecture.md".to_string(),
             llm_skip_globs: vec![
@@ -665,8 +683,14 @@ impl Config {
             detector_thresholds: DetectorThresholdsConfig::default(),
             grading: GradingConfig::default(),
             mutation: MutationConfig::default(),
-            architecture: ArchitectureConfig::default(),
-            evaluate: EvaluateConfig::default(),
+            architecture: ArchitectureConfig {
+                model_id: "claude-haiku-4-5-20251001".to_string(),
+                ..ArchitectureConfig::default()
+            },
+            evaluate: EvaluateConfig {
+                model_id: "claude-haiku-4-5-20251001".to_string(),
+                ..EvaluateConfig::default()
+            },
         }
     }
 
@@ -966,10 +990,24 @@ impl Config {
             },
             architecture: {
                 let arch_defaults = ArchitectureConfig::default();
+                let arch_model_id = raw.architecture.model_id.ok_or_else(|| {
+                    Error::ConfigInvalid(
+                        "[architecture] model_id is required in course.toml — pin to a \
+                         specific id (e.g. \"claude-haiku-4-5-20251001\"). There is no \
+                         default to prevent silently falling back to the user's Claude \
+                         session model (Opus on Max plans)."
+                            .to_string(),
+                    )
+                })?;
+                if arch_model_id.trim().is_empty() {
+                    return Err(Error::ConfigInvalid(
+                        "[architecture] model_id must not be empty".to_string(),
+                    ));
+                }
                 ArchitectureConfig {
                     llm_review: raw.architecture.llm_review,
                     judge: raw.architecture.judge.unwrap_or(arch_defaults.judge),
-                    model_id: raw.architecture.model_id.unwrap_or(arch_defaults.model_id),
+                    model_id: arch_model_id,
                     max_tokens: raw
                         .architecture
                         .max_tokens
@@ -999,9 +1037,23 @@ impl Config {
             },
             evaluate: {
                 let eval_defaults = EvaluateConfig::default();
+                let eval_model_id = raw.evaluate.model_id.ok_or_else(|| {
+                    Error::ConfigInvalid(
+                        "[evaluate] model_id is required in course.toml — pin to a \
+                         specific id (e.g. \"claude-haiku-4-5-20251001\"). There is no \
+                         default to prevent silently falling back to the user's Claude \
+                         session model (Opus on Max plans)."
+                            .to_string(),
+                    )
+                })?;
+                if eval_model_id.trim().is_empty() {
+                    return Err(Error::ConfigInvalid(
+                        "[evaluate] model_id must not be empty".to_string(),
+                    ));
+                }
                 EvaluateConfig {
                     judge: raw.evaluate.judge.unwrap_or(eval_defaults.judge),
-                    model_id: raw.evaluate.model_id.unwrap_or(eval_defaults.model_id),
+                    model_id: eval_model_id,
                     judge_workers: raw
                         .evaluate
                         .judge_workers
@@ -1041,6 +1093,12 @@ single_commit_dump_lines = 200
 micro_pr_max_lines = 10
 low_doc_score = 2
 contribution_imbalance_stddev = 1.5
+
+[architecture]
+model_id = "claude-haiku-4-5-20251001"
+
+[evaluate]
+model_id = "claude-haiku-4-5-20251001"
 "#;
 
     fn write_config(dir: &Path, body: &str) {
@@ -1126,6 +1184,79 @@ contribution_imbalance_stddev = 1.5
         assert_eq!(android.overlay_files[0].src, "app/google-services.json");
         assert_eq!(android.overlay_files[0].dest, "app/google-services.json");
         assert_eq!(android.overlay_files[1].src, "local.properties");
+    }
+
+    /// `course.toml` MUST pin both judges' `model_id`. There is no
+    /// silent fall-back to a default — the historical bug that draining
+    /// Opus quota came from exactly such a fall-back. These four tests
+    /// lock that contract in.
+    const MINIMAL_NO_LLM_BLOCKS: &str = r#"
+[course]
+name = "test-course"
+num_sprints = 4
+pm_base_url = "https://example.test"
+github_org = "example"
+course_id = 1
+
+[thresholds]
+carrying_team_pct = 0.4
+cramming_hours = 48
+cramming_commit_pct = 0.7
+single_commit_dump_lines = 200
+micro_pr_max_lines = 10
+low_doc_score = 2
+contribution_imbalance_stddev = 1.5
+"#;
+
+    #[test]
+    fn missing_architecture_model_id_rejects_with_clear_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Has [evaluate] model_id but no [architecture] block at all.
+        let body = format!("{MINIMAL_NO_LLM_BLOCKS}\n[evaluate]\nmodel_id = \"x\"\n");
+        write_config(tmp.path(), &body);
+        let err = Config::load(tmp.path()).expect_err("must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[architecture] model_id is required"),
+            "error must name the missing field: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_evaluate_model_id_rejects_with_clear_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Has [architecture] model_id but no [evaluate] block at all.
+        let body =
+            format!("{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nmodel_id = \"x\"\n");
+        write_config(tmp.path(), &body);
+        let err = Config::load(tmp.path()).expect_err("must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[evaluate] model_id is required"),
+            "error must name the missing field: {msg}"
+        );
+    }
+
+    #[test]
+    fn empty_architecture_model_id_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nmodel_id = \"\"\n[evaluate]\nmodel_id = \"x\"\n"
+        );
+        write_config(tmp.path(), &body);
+        let err = Config::load(tmp.path()).expect_err("must reject empty");
+        assert!(err.to_string().contains("[architecture] model_id must not be empty"));
+    }
+
+    #[test]
+    fn empty_evaluate_model_id_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nmodel_id = \"x\"\n[evaluate]\nmodel_id = \"\"\n"
+        );
+        write_config(tmp.path(), &body);
+        let err = Config::load(tmp.path()).expect_err("must reject empty");
+        assert!(err.to_string().contains("[evaluate] model_id must not be empty"));
     }
 
     #[test]

@@ -54,6 +54,12 @@ env = {}
 max_parallel_builds = 2
 stderr_max_chars = 2000
 skip_already_tested = true
+
+[architecture]
+model_id = "claude-haiku-4-5-20251001"
+
+[evaluate]
+model_id = "claude-haiku-4-5-20251001"
 "#;
 
 #[derive(Debug, Clone)]

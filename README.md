@@ -146,8 +146,8 @@ Create a `.env` file in the project root:
 ```dotenv
 TRACKDEV_TOKEN=...
 GITHUB_TOKEN=ghp_...
-ANTHROPIC_API_KEY=sk-ant-...      # optional
-ANTHROPIC_MODEL=claude-opus-4-7   # optional, default
+ANTHROPIC_API_KEY=sk-ant-...               # optional
+ANTHROPIC_MODEL=claude-haiku-4-5-20251001  # optional; overrides [evaluate].model_id
 ```
 
 Edit [`config/course.toml`](config/course.toml) — the most important keys:
@@ -439,7 +439,7 @@ Global flags accepted by every command:
 | `TRACKDEV_TOKEN` | `collect` | TrackDev API auth. |
 | `GITHUB_TOKEN` | `collect` | GitHub PAT with read access to the course org. |
 | `ANTHROPIC_API_KEY` | `evaluate`, `ai-detect` | Optional. Without it, `evaluate` runs heuristic-only and the LLM-judge AI signal is skipped. |
-| `ANTHROPIC_MODEL` | `evaluate` | Defaults to `claude-opus-4-7`. |
+| `ANTHROPIC_MODEL` | `evaluate` (anthropic-api backend) | Overrides `[evaluate].model_id`. Pipeline default is `claude-haiku-4-5-20251001`; do not set this to an Opus id unless you want to burn Max quota. |
 | `SURVIVAL_RESTRICT_TO_PR_FILES` | `survive` | If set, restricts fingerprinting to files touched by PRs (40–70% faster, default off). |
 | `RUST_LOG` | all | Standard `tracing-subscriber` filter; overrides the `--verbose` shorthand. |
 

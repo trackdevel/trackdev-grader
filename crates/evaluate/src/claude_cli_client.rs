@@ -67,18 +67,31 @@ impl ClaudeCliClient {
         &self.model
     }
 
+    /// Build the argv vector for the `claude` subprocess. Pulled out as
+    /// a pure function so we can assert in tests that `--model` is
+    /// always passed, locking down the contract that the configured
+    /// model id (e.g. Haiku) cannot silently fall back to the user's
+    /// default Claude session model (e.g. Opus on Max plans).
+    fn build_argv(&self, system: &str) -> Vec<String> {
+        vec![
+            "--print".to_string(),
+            "--output-format".to_string(),
+            "text".to_string(),
+            "--model".to_string(),
+            self.model.clone(),
+            "--append-system-prompt".to_string(),
+            system.to_string(),
+            "--allowedTools".to_string(),
+            String::new(),
+        ]
+    }
+
     /// Run a single non-interactive request: `system` is appended to
     /// the CLI's system prompt; `user_prompt` is fed on stdin. Returns
     /// the raw stdout (the caller parses JSON from it).
     pub fn complete(&self, system: &str, user_prompt: &str) -> Result<String, ClaudeCliError> {
         let mut child = Command::new(&self.cli_path)
-            .arg("--print")
-            .arg("--output-format")
-            .arg("text")
-            .arg("--append-system-prompt")
-            .arg(system)
-            .arg("--allowedTools")
-            .arg("")
+            .args(self.build_argv(system))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -134,6 +147,52 @@ impl ClaudeCliClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_argv_always_passes_explicit_model() {
+        // Locks the contract that the CLI judge can never silently fall
+        // back to the user's default Claude session model (Opus on Max
+        // plans). If `--model <model_id>` ever drops out of the argv,
+        // grading runs would silently start consuming Opus quota again.
+        let client = ClaudeCliClient::new(
+            "claude".to_string(),
+            "claude-haiku-4-5-20251001".to_string(),
+            180,
+        );
+        let argv = client.build_argv("system prompt body");
+        let model_idx = argv
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model must always be present in argv");
+        assert_eq!(
+            argv.get(model_idx + 1).map(String::as_str),
+            Some("claude-haiku-4-5-20251001"),
+            "--model must be followed by the configured model id"
+        );
+        assert!(
+            argv.iter().any(|a| a == "--print"),
+            "--print mode is required for non-interactive runs"
+        );
+        assert!(
+            argv.iter().any(|a| a == "--allowedTools"),
+            "--allowedTools must be set so prompt injection cannot trigger tool use"
+        );
+    }
+
+    #[test]
+    fn build_argv_propagates_caller_supplied_model_verbatim() {
+        // Use a distinct, pinned id (not Haiku) to prove the propagation
+        // contract is independent of the production default — any string
+        // the caller hands us must reach the CLI unchanged.
+        let client = ClaudeCliClient::new(
+            "claude".to_string(),
+            "claude-sonnet-4-6-20250101".to_string(),
+            180,
+        );
+        let argv = client.build_argv("");
+        let i = argv.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(argv[i + 1], "claude-sonnet-4-6-20250101");
+    }
 
     #[test]
     fn is_available_returns_false_for_missing_binary() {

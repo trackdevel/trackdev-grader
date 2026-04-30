@@ -26,8 +26,10 @@ const DEFAULT_MAX_TOKENS: u32 = 1024;
 const MAX_RETRIES: u32 = 3;
 const BACKOFF_BASE_SECS: u64 = 2;
 
-/// Whichever Claude model id the caller wants. `claude-opus-4-7` matches
-/// the migration plan; any string the API accepts works.
+/// Whichever Claude model id the caller wants. The pipeline default is
+/// `claude-haiku-4-5-20251001` (set in `EvaluateConfig::default()`); any
+/// string the API accepts works. Do NOT default to Opus — the per-PR
+/// rubric is small and Opus burns Max quota disproportionately.
 pub type ModelId = String;
 
 #[derive(Debug, thiserror::Error)]
