@@ -186,7 +186,11 @@ jitter_pct = 0.05
 # `architecture_llm_cache`, so re-runs only re-pay for files whose
 # content changed. Default off.
 [architecture]
-llm_review = false
+llm_review = true
+# REQUIRED. No default — empty/missing causes Config::load to fail. This
+# is a deliberate guard: the CLI judge would otherwise silently fall
+# back to whatever model the user's Claude session points at (Opus on
+# Max plans), draining quota.
 model_id = "claude-haiku-4-5-20251001"
 max_tokens = 1024
 rubric_path = "architecture.md"
@@ -196,6 +200,12 @@ llm_skip_globs = [
     "**/R.java",
     "**/*$$*.java",
 ]
+
+# PR / task documentation evaluation. `model_id` is REQUIRED for the
+# same reason as [architecture] — there is no default; missing/empty
+# causes Config::load to fail. `judge` defaults to "claude-cli".
+[evaluate]
+model_id = "claude-haiku-4-5-20251001"
 
 # Mutation testing (T-P2.4). When `enabled = true` and a build profile
 # sets `mutation_command` (typically `./gradlew pitest --info` for the
