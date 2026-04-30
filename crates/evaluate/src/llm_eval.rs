@@ -1217,6 +1217,12 @@ skip_already_tested = true
 [regularity]
 
 [repo_analysis]
+
+[architecture]
+model_id = "claude-haiku-4-5-20251001"
+
+[evaluate]
+model_id = "claude-haiku-4-5-20251001"
 "#,
         )
         .unwrap();
