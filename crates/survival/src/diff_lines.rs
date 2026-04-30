@@ -346,6 +346,23 @@ fn find_base_sha(
         for line in rev_text.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 && parts[2..].contains(&last_sha) {
+                // `parts[1]` is "main at the moment of the merge", not the
+                // PR's branch point. Diffing against it would treat every
+                // change main accumulated between branch and merge as a
+                // deletion. Recurse one merge-base call to get the actual
+                // common ancestor of the two parents — the genuine base.
+                let mb = Command::new("git")
+                    .args(["merge-base", parts[1], last_sha])
+                    .current_dir(repo_path)
+                    .output();
+                if let Ok(o) = mb {
+                    if o.status.success() {
+                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if !s.is_empty() {
+                            return Some(s);
+                        }
+                    }
+                }
                 return Some(parts[1].to_string());
             }
         }
