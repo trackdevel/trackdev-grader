@@ -341,6 +341,101 @@ fn pr_ls_for_team(
     Ok(out)
 }
 
+/// Per-task weighted surviving normalised statements for the team in this
+/// sprint. Mirrors `task_ls_for_team` but reads `pr_survival` instead of
+/// `pr_line_metrics`, so the value is the AST-normalised statement count
+/// (the numerator of the estimation-density signal). PR-level totals are
+/// distributed across linked tasks proportionally to task points (falling
+/// back to even split when total points are zero).
+fn task_stmts_for_team(
+    conn: &Connection,
+    sprint_id: i64,
+    project_id: i64,
+) -> rusqlite::Result<HashMap<i64, f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id AS task_id,
+                tpr.pr_id,
+                COALESCE(t.estimation_points, 0) AS task_points,
+                ps.statements_surviving_normalized AS surv
+         FROM task_pull_requests tpr
+         JOIN tasks t ON t.id = tpr.task_id
+         JOIN pr_survival ps ON ps.pr_id = tpr.pr_id AND ps.sprint_id = t.sprint_id
+         JOIN students s ON s.id = t.assignee_id
+         WHERE t.sprint_id = ?
+           AND t.type != 'USER_STORY' AND t.status = 'DONE'
+           AND s.team_project_id = ?",
+    )?;
+    struct Row {
+        task_id: i64,
+        pr_id: String,
+        task_points: f64,
+        surv: f64,
+    }
+    let rows: Vec<Row> = stmt
+        .query_map(rusqlite::params![sprint_id, project_id], |r| {
+            Ok(Row {
+                task_id: r.get::<_, i64>(0)?,
+                pr_id: r.get::<_, String>(1)?,
+                task_points: r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                surv: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let mut pr_totals: HashMap<String, (f64, i64)> = HashMap::new();
+    for r in &rows {
+        let e = pr_totals.entry(r.pr_id.clone()).or_insert((0.0, 0));
+        e.0 += r.task_points;
+        e.1 += 1;
+    }
+    let mut out: HashMap<i64, f64> = HashMap::new();
+    for r in &rows {
+        let (tot_pts, count) = pr_totals[&r.pr_id];
+        let weight = if tot_pts > 0.0 {
+            r.task_points / tot_pts
+        } else if count > 0 {
+            1.0 / count as f64
+        } else {
+            0.0
+        };
+        *out.entry(r.task_id).or_insert(0.0) += r.surv * weight;
+    }
+    Ok(out)
+}
+
+/// Per-PR raw surviving normalised statements for the team in this sprint.
+/// Pulls directly from `pr_survival` for PRs linked to at least one DONE
+/// task assigned to a team member.
+fn pr_stmts_for_team(
+    conn: &Connection,
+    sprint_id: i64,
+    project_id: i64,
+) -> rusqlite::Result<HashMap<String, f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT ps.pr_id,
+                COALESCE(ps.statements_surviving_normalized, 0) AS surv
+         FROM pr_survival ps
+         JOIN task_pull_requests tpr ON tpr.pr_id = ps.pr_id
+         JOIN tasks t ON t.id = tpr.task_id
+         JOIN students s ON s.id = t.assignee_id
+         WHERE ps.sprint_id = ?
+           AND t.sprint_id = ?
+           AND t.type != 'USER_STORY' AND t.status = 'DONE'
+           AND s.team_project_id = ?",
+    )?;
+    let rows: Vec<(String, f64)> = stmt
+        .query_map(rusqlite::params![sprint_id, sprint_id, project_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    Ok(rows.into_iter().collect())
+}
+
 // Reporting convention: every task-centric query filters with
 // `t.type != 'USER_STORY' AND t.status = 'DONE'`. User stories are
 // container rows that never carry estimation work, and not-yet-DONE items
@@ -497,10 +592,10 @@ struct StudentSummaryRow {
     surv_norm: f64,
     density: f64,
     flag_count: i64,
-    /// T-P2.1: per-student estimation bias (β_u). Only populated by
-    /// `cumulative_student_summary`; per-sprint rows leave it `None`
-    /// because bias is fitted across all sprints (the posterior wants
-    /// the full per-student history).
+    /// T-P2.1: per-student estimation bias (β_u). Populated for every
+    /// summary row (per-sprint and cumulative) — β_u is project-level
+    /// (fitted once across all sprints in `student_estimation_bias`),
+    /// so the same value surfaces in every sprint's summary table.
     estimation_bias: Option<EstimationBiasCell>,
 }
 
@@ -511,6 +606,47 @@ struct EstimationBiasCell {
     /// directional symbol: when the CrI excludes 0 by more than the
     /// detector's 0.5-logit margin we render ▲/▼; otherwise ≈.
     half_width: f64,
+}
+
+/// Load `student_estimation_bias` rows for `project_id` into a map keyed
+/// by `student_id`. β_u is project-level (one row per student per
+/// project), so callers in section A and section B can share this lookup
+/// to avoid N point-queries inside the per-student loop.
+fn bias_for_project(
+    conn: &Connection,
+    project_id: i64,
+) -> rusqlite::Result<HashMap<String, EstimationBiasCell>> {
+    // Silently return an empty map when the table doesn't exist — this
+    // matches the prior point-query behaviour (`.ok()` swallowed the
+    // missing-table error) and keeps minimal test fixtures working.
+    let mut stmt = match conn.prepare(
+        "SELECT student_id, beta_mean, beta_lower95, beta_upper95
+         FROM student_estimation_bias
+         WHERE project_id = ?",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(HashMap::new()),
+    };
+    let rows = stmt.query_map([project_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, f64>(1)?,
+            r.get::<_, f64>(2)?,
+            r.get::<_, f64>(3)?,
+        ))
+    })?;
+    let mut out = HashMap::new();
+    for r in rows {
+        let (sid, mean, lo, hi) = r?;
+        out.insert(
+            sid,
+            EstimationBiasCell {
+                beta_mean: mean,
+                half_width: (hi - lo) / 2.0,
+            },
+        );
+    }
+    Ok(out)
 }
 
 fn student_summary_headers(include_bias: bool) -> Vec<&'static str> {
@@ -555,7 +691,7 @@ fn fmt_bias_cell(bias: Option<EstimationBiasCell>) -> String {
 }
 
 fn write_student_summary_table(buf: &mut String, students: &[StudentSummaryRow]) {
-    write_student_summary_table_inner(buf, students, false);
+    write_student_summary_table_inner(buf, students, true);
 }
 
 fn write_cumulative_student_summary_table(buf: &mut String, students: &[StudentSummaryRow]) {
@@ -614,6 +750,7 @@ fn current_student_summary(
     project_id: i64,
 ) -> rusqlite::Result<Vec<StudentSummaryRow>> {
     let ls_per_student = student_ls_totals(conn, sprint_id, project_id)?;
+    let bias_per_student = bias_for_project(conn, project_id)?;
 
     let mut stmt = conn.prepare(
         "SELECT s.id, s.full_name, s.github_login,
@@ -639,6 +776,7 @@ fn current_student_summary(
             |r| {
                 let id = r.get::<_, String>(0)?;
                 let stats = ls_per_student.get(&id).copied().unwrap_or_default();
+                let bias = bias_per_student.get(&id).copied();
                 Ok(StudentSummaryRow {
                     id,
                     full_name: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -653,7 +791,7 @@ fn current_student_summary(
                     ls: stats.ls,
                     ld: stats.ld,
                     ls_per_pt: stats.ls_per_pt,
-                    estimation_bias: None,
+                    estimation_bias: bias,
                 })
             },
         )?
@@ -676,6 +814,7 @@ fn cumulative_student_summary(
 
     let placeholders = sprint_placeholders(sprint_ids);
     let ls_per_student = cumulative_student_ls_totals(conn, sprint_ids, project_id)?;
+    let bias_per_student = bias_for_project(conn, project_id)?;
 
     let team_total_points: f64 = conn
         .query_row(
@@ -786,28 +925,8 @@ fn cumulative_student_summary(
 
         // T-P2.1: pull the per-student bias posterior for this project.
         // Falls back to None when the row is missing (project skipped or
-        // student never had any estimated tasks). The half-width is
-        // `(upper95 - lower95) / 2`, which equals 1.96 · σ_post for the
-        // Gaussian posterior we fit.
-        let bias: Option<EstimationBiasCell> = conn
-            .query_row(
-                "SELECT beta_mean, beta_lower95, beta_upper95
-                 FROM student_estimation_bias
-                 WHERE student_id = ? AND project_id = ?",
-                rusqlite::params![id, project_id],
-                |r| {
-                    Ok((
-                        r.get::<_, f64>(0)?,
-                        r.get::<_, f64>(1)?,
-                        r.get::<_, f64>(2)?,
-                    ))
-                },
-            )
-            .ok()
-            .map(|(mean, lo, hi)| EstimationBiasCell {
-                beta_mean: mean,
-                half_width: (hi - lo) / 2.0,
-            });
+        // student never had any estimated tasks).
+        let bias = bias_per_student.get(&id).copied();
 
         rows.push(StudentSummaryRow {
             id,
@@ -1430,6 +1549,35 @@ fn github_file_url(repo_full_qualified: &str, file_path: &str) -> Option<String>
     ))
 }
 
+/// MAD-based deviation of a density (stmts/points) from the project's
+/// typical density. Matches `repo_analysis::task_similarity::mad_z`'s
+/// convention `(value − median) / mad`. Returns `None` when MAD is zero
+/// (density is constant across the project — no normalization possible)
+/// or when the input value is unavailable.
+fn density_mad_z(value: Option<f64>, median: f64, mad: f64) -> Option<f64> {
+    let v = value?;
+    if mad <= 0.0 {
+        return None;
+    }
+    Some((v - median) / mad)
+}
+
+/// Render a density-deviation cell with the same glyph vocabulary as
+/// `fmt_bias_cell` so the report's symbol set stays consistent: ▲ above
+/// typical density (more statements per point than the project median),
+/// ▼ below typical, ≈ within ±1 MAD-z.
+fn fmt_density_dev(z: Option<f64>) -> String {
+    let Some(z) = z else { return String::new() };
+    let symbol = if z > 1.0 {
+        "▲"
+    } else if z < -1.0 {
+        "▼"
+    } else {
+        "≈"
+    };
+    format!("{symbol} {:+.2}", z)
+}
+
 fn write_section_b(
     buf: &mut String,
     conn: &Connection,
@@ -1443,7 +1591,50 @@ fn write_section_b(
 
     let task_ls = task_ls_for_team(conn, sprint_id, project_id)?;
     let pr_ls = pr_ls_for_team(conn, sprint_id, project_id)?;
+    let task_stmts = task_stmts_for_team(conn, sprint_id, project_id)?;
+    let pr_stmts = pr_stmts_for_team(conn, sprint_id, project_id)?;
     let arch_per_student = architecture_violations_per_student(conn, sprint_id, project_id)?;
+
+    // Project-wide density baselines for the per-task and per-PR
+    // "density Δ" columns. Density = stmts/points; we use median + MAD
+    // (matching `task_similarity::mad_z`) so a single mass-edited PR
+    // doesn't blow the gauge. Both are computed across this team for
+    // this sprint — the same scope as Section B's tables.
+    let mut task_densities: Vec<f64> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT t.id, COALESCE(t.estimation_points, 0)
+             FROM tasks t JOIN students s ON s.id = t.assignee_id
+             WHERE t.sprint_id = ? AND s.team_project_id = ?
+               AND t.type != 'USER_STORY' AND t.status = 'DONE'",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![sprint_id, project_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (tid, pts) = row?;
+            if pts <= 0.0 {
+                continue;
+            }
+            let stmts = task_stmts.get(&tid).copied().unwrap_or(0.0);
+            task_densities.push(stmts / pts);
+        }
+    }
+    let task_density_median = sprint_grader_core::stats::median(&task_densities);
+    let task_density_mad = sprint_grader_core::stats::mad(&task_densities);
+
+    let pr_densities: Vec<f64> = pr_ls
+        .iter()
+        .filter_map(|(pr_id, (_ls, _ld, linked_pts))| {
+            if *linked_pts <= 0.0 {
+                return None;
+            }
+            let stmts = pr_stmts.get(pr_id).copied().unwrap_or(0.0);
+            Some(stmts / linked_pts)
+        })
+        .collect();
+    let pr_density_median = sprint_grader_core::stats::median(&pr_densities);
+    let pr_density_mad = sprint_grader_core::stats::mad(&pr_densities);
 
     let mut stmt = conn.prepare(
         "SELECT id, full_name, github_login FROM students
@@ -1474,6 +1665,11 @@ fn write_section_b(
         } else {
             buf.push('\n');
         }
+        // β_u is project-level (one value per student) and lives in the
+        // Section A summary table, where it has row-level meaning. It's
+        // intentionally NOT repeated per-row in the per-student tables
+        // below; instead each task/PR row carries its own "density Δ"
+        // (stmts/points relative to the project median, MAD-normalised).
 
         // Trajectory sparkline across sprints (composite_score from
         // student_trajectory; renders as a minimalist 120×28 SVG).
@@ -1526,7 +1722,18 @@ fn write_section_b(
             buf.push_str("**Tasks**\n\n");
             push_table_header(
                 buf,
-                &["Key", "Name", "Points", "LS", "LD", "LS/pt", "Status"],
+                &[
+                    "Key",
+                    "Name",
+                    "Points",
+                    "LS",
+                    "LD",
+                    "LS/pt",
+                    "Stmts",
+                    "Stmts/pt",
+                    "Density Δ",
+                    "Status",
+                ],
             );
             for (task_id, key, name, pts, status) in tasks {
                 let key_str = key.unwrap_or_default();
@@ -1536,19 +1743,34 @@ fn write_section_b(
                     md_link(&key_str, &trackdev_task_url(task_id))
                 };
                 let (ls, ld) = task_ls.get(&task_id).copied().unwrap_or((0.0, 0.0));
+                let stmts = task_stmts.get(&task_id).copied().unwrap_or(0.0);
                 let pts_val = pts.unwrap_or(0.0);
                 let ls_per_pt = if pts_val > 0.0 { ls / pts_val } else { 0.0 };
+                let stmts_per_pt = if pts_val > 0.0 { stmts / pts_val } else { 0.0 };
+                let density = if pts_val > 0.0 {
+                    Some(stmts / pts_val)
+                } else {
+                    None
+                };
+                let density_cell = fmt_density_dev(density_mad_z(
+                    density,
+                    task_density_median,
+                    task_density_mad,
+                ));
                 // push_table_row escapes pipes, so write by hand to keep the
                 // [label](url) link intact.
                 let _ = writeln!(
                     buf,
-                    "| {} | {} | {} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                     key_cell,
                     md_escape(&name.unwrap_or_default()),
                     pts.map(fmt_f1).unwrap_or_default(),
                     fmt_f1(ls),
                     fmt_f1(ld),
                     fmt_f2(ls_per_pt),
+                    fmt_f1(stmts),
+                    fmt_f2(stmts_per_pt),
+                    density_cell,
                     md_escape(&status.unwrap_or_default()),
                 );
             }
@@ -1594,6 +1816,9 @@ fn write_section_b(
                     "LS",
                     "LD",
                     "LS/pt",
+                    "Stmts",
+                    "Stmts/pt",
+                    "Density Δ",
                 ],
             );
             for (pr_id, num, repo, title, url, adds, dels, attr_errors) in prs {
@@ -1616,16 +1841,32 @@ fn write_section_b(
                     format!("{num_cell} {attr_glyph}")
                 };
                 let (ls, ld, linked_pts) = pr_ls.get(&pr_id).copied().unwrap_or((0.0, 0.0, 0.0));
+                let stmts = pr_stmts.get(&pr_id).copied().unwrap_or(0.0);
                 let ls_per_pt = if linked_pts > 0.0 {
                     ls / linked_pts
                 } else {
                     0.0
                 };
+                let stmts_per_pt = if linked_pts > 0.0 {
+                    stmts / linked_pts
+                } else {
+                    0.0
+                };
+                let pr_density = if linked_pts > 0.0 {
+                    Some(stmts / linked_pts)
+                } else {
+                    None
+                };
+                let density_cell = fmt_density_dev(density_mad_z(
+                    pr_density,
+                    pr_density_median,
+                    pr_density_mad,
+                ));
                 // push_table_row escapes pipes, but we want the link to stay
                 // intact — emit by hand for this row.
                 let _ = writeln!(
                     buf,
-                    "| {} | {} | {} | +{} / -{} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | +{} / -{} | {} | {} | {} | {} | {} | {} | {} |",
                     num_cell_with_glyph,
                     md_escape(&repo_short),
                     linked_title.replace('|', "\\|"),
@@ -1635,6 +1876,9 @@ fn write_section_b(
                     fmt_f1(ls),
                     fmt_f1(ld),
                     fmt_f2(ls_per_pt),
+                    fmt_f1(stmts),
+                    fmt_f2(stmts_per_pt),
+                    density_cell,
                 );
             }
             buf.push('\n');
@@ -2080,6 +2324,19 @@ changes and identifier renames don't inflate or deflate it.\n\
 - **LS/pt** — LS divided by the task's estimation points. A density \
 measure: high values mean the task delivered more surviving code per \
 estimated point than typical; low values mean the opposite.\n\
+- **Stmts** — *Surviving statements (normalised)*. AST-normalised \
+statements introduced by the student that survive at the report's \
+reference date, taken from `pr_survival.statements_surviving_normalized`. \
+Less sensitive to verbosity, formatting, identifier renames and cosmetic \
+rewrites than LS, because the AST normaliser collapses whitespace, masks \
+identifiers and masks literals before counting. For tasks the value is \
+distributed across a PR's linked tasks weighted by estimation-point \
+share; for PRs the value is the raw PR-level total.\n\
+- **Stmts/pt** — Stmts divided by the task's (or the PR's linked tasks') \
+estimation points. The same density idea as LS/pt but on the statement \
+unit, which is the better red flag for over- or under-estimation: it is \
+harder to inflate by reformatting, harder to deflate by refactor, and is \
+the unit used in the per-student `estimation_density` aggregate.\n\
 - **Density** *(cumulative table)* — surviving statements per estimated \
 point across the whole sprint. A code-volume signal at the student level.\n\
 - **Weighted PR Lines** — each PR's `+` and `-` lines distributed across \
@@ -2093,7 +2350,16 @@ Bayesian Rasch-style model fit across the project's tasks. Posterior \
 mean is shown alongside a glyph: **▲** over-estimator (tasks worth less \
 than they were pointed), **▼** under-estimator (tasks worth more), **≈** \
 calibrated within ±0.5 logits. The gauge fixes the team mean β at zero, \
-so β_u is always relative to teammates.\n\
+so β_u is always relative to teammates. Lives only in the per-student \
+summary table — β_u is a single value per student, so repeating it on \
+every task or PR row would be uninformative.\n\
+- **Density Δ** *(per-task / per-PR)* — MAD-normalised deviation of \
+this row's `stmts/points` from the project's median density across the \
+sprint: `(stmts_per_pt − median) / MAD`. **▲** denser than typical \
+(more code per point — under-pointed or unusually dense work), **▼** \
+sparser than typical (over-pointed or light task), **≈** within ±1 \
+MAD-z. Empty when MAD is zero (density is uniform — no normalisation \
+possible) or the row has zero estimation points.\n\
 \n\
 ### PR submission timing\n\
 \n\
@@ -2640,6 +2906,12 @@ mod tests {
              CREATE TABLE pr_line_metrics (pr_id TEXT, sprint_id INTEGER,
                 merge_sha TEXT, lat REAL, lar REAL, ls REAL, ld REAL,
                 PRIMARY KEY (pr_id, sprint_id));
+             CREATE TABLE pr_survival (pr_id TEXT, sprint_id INTEGER,
+                statements_added_raw INTEGER, statements_surviving_raw INTEGER,
+                statements_added_normalized INTEGER,
+                statements_surviving_normalized INTEGER,
+                methods_added INTEGER, methods_surviving INTEGER,
+                PRIMARY KEY (pr_id, sprint_id));
              CREATE TABLE flags (flag_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 student_id TEXT, sprint_id INTEGER, flag_type TEXT, severity TEXT,
                 details TEXT);
@@ -2716,6 +2988,16 @@ mod tests {
              INSERT INTO pr_line_metrics
                 (pr_id, sprint_id, merge_sha, lat, lar, ls, ld)
                 VALUES ('pr-2', 11, 'sha2', 80, 50, 50, 5);
+             INSERT INTO pr_survival
+                (pr_id, sprint_id, statements_added_raw, statements_surviving_raw,
+                 statements_added_normalized, statements_surviving_normalized,
+                 methods_added, methods_surviving)
+                VALUES ('pr-1', 10, 18, 15, 18, 15, 3, 3);
+             INSERT INTO pr_survival
+                (pr_id, sprint_id, statements_added_raw, statements_surviving_raw,
+                 statements_added_normalized, statements_surviving_normalized,
+                 methods_added, methods_surviving)
+                VALUES ('pr-2', 11, 12, 9, 12, 9, 2, 2);
              INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
                 VALUES ('u1', 10, 'LOW_DOC_SCORE', 'WARNING',
                         '{\"message\":\"average doc score below threshold\"}');",

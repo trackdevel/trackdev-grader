@@ -15,12 +15,21 @@ use rusqlite::{params, Connection};
 
 use crate::em::{fit, Observation};
 
-/// Pull the (student, task, points) triples for `project_id`. Filters
+/// Pull the (student, group, points) triples for `project_id`. Filters
 /// follow the codebase conventions: drop USER_STORY rows, drop
 /// unassigned tasks, drop NULL/zero points.
+///
+/// Trackdev tasks are single-assignee (CLAUDE.md gotcha #8), so a
+/// per-task `δ_i` is observed by exactly one student and the Rasch
+/// fit's identifiability gauge collapses β to zero. We group by
+/// `sprint_id` instead: every student of the project contributes to
+/// each sprint's baseline, the per-sprint `δ_s` becomes anchored, and
+/// β_u recovers as the student's systematic deviation from the sprint
+/// mean log-points. The Observation's `task_id` field is reused as the
+/// generic group key (kept for ABI/test stability).
 pub fn load_observations(conn: &Connection, project_id: i64) -> Result<Vec<Observation>> {
     let mut stmt = conn.prepare(
-        "SELECT t.assignee_id, t.id, t.estimation_points
+        "SELECT t.assignee_id, t.sprint_id, t.estimation_points
          FROM tasks t
          JOIN sprints s ON s.id = t.sprint_id
          WHERE s.project_id = ?

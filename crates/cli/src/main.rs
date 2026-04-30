@@ -27,6 +27,28 @@ fn parse_project_filter(projects: Option<String>) -> Option<Vec<String>> {
     })
 }
 
+/// Parse `15m`, `3h`, `2d` into a `chrono::Duration`. Suffix is required:
+/// the value must be a positive integer followed by exactly one of `m` / `h`
+/// / `d`. Returns the duration or an error suitable for `?` propagation.
+fn parse_interval(s: &str) -> Result<chrono::Duration> {
+    let s = s.trim();
+    let (num_str, unit) = s
+        .split_at_checked(s.len().saturating_sub(1))
+        .ok_or_else(|| anyhow::anyhow!("empty interval"))?;
+    let n: i64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid interval '{s}'; expected e.g. 15m, 3h, 2d"))?;
+    if n <= 0 {
+        anyhow::bail!("interval must be positive: {s}");
+    }
+    match unit {
+        "m" => Ok(chrono::Duration::minutes(n)),
+        "h" => Ok(chrono::Duration::hours(n)),
+        "d" => Ok(chrono::Duration::days(n)),
+        other => anyhow::bail!("unknown interval unit '{other}'; expected m, h, or d"),
+    }
+}
+
 /// Render the table-by-table effect of `go` / `go-quick`'s purge step
 /// without touching the DB. Exits the parent command after printing.
 /// (T-P1.6 — `--dry-run` for go/go-quick previews the purge only.)
@@ -135,6 +157,10 @@ enum Command {
         /// Compile only PRs with this number (repeat for multiple; matches across all repos)
         #[arg(long, value_name = "NUMBER")]
         pr: Vec<i64>,
+        /// Skip PRs already compiled within this interval (e.g. 15m, 3h, 2d).
+        /// Applies even with --force.
+        #[arg(long, value_name = "INTERVAL")]
+        skip_delay: Option<String>,
     },
     /// Stage 2: survival analysis (parse, normalize, fingerprint, blame, rates).
     Survive {
@@ -207,6 +233,14 @@ enum Command {
         /// All projects' sprints with this ordinal are frozen.
         #[arg(long)]
         sprint: u32,
+    },
+    /// Fit and persist per-student estimation bias (β_u) for every project,
+    /// or just the projects passed via `--projects`. Writes
+    /// `student_estimation_bias`. Idempotent: rows for the project are
+    /// replaced. T-P2.1.
+    EstimateBias {
+        #[command(flatten)]
+        projects: ProjectsArg,
     },
     /// Generate Excel (.xlsx) + Markdown (.md) multi-sprint project report.
     Report {
@@ -437,7 +471,17 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Compile { projects, force, pr } => {
+        Command::Compile {
+            projects,
+            force,
+            pr,
+            skip_delay,
+        } => {
+            let skip_recent_within = skip_delay
+                .as_deref()
+                .map(parse_interval)
+                .transpose()
+                .context("invalid --skip-delay")?;
             // Stale gradle daemons or worktrees from a prior crashed run
             // tie up the per-version daemon registry; new builds wait
             // forever on a busy/dead daemon. Always sweep at compile start.
@@ -500,6 +544,7 @@ fn main() -> Result<()> {
                     skip_tested,
                     config.mutation.enabled,
                     pr_filter,
+                    skip_recent_within,
                 )
                 .context("compile failed")?;
                 // Compilation summary is sprint-scoped; run it for each.
@@ -743,6 +788,36 @@ fn main() -> Result<()> {
                 rows_written = total_written,
                 "curriculum frozen"
             );
+        }
+        Command::EstimateBias { projects } => {
+            let filter = parse_project_filter(projects.projects);
+            // Resolve the slug filter to project_ids so the fitter can scope.
+            // None means "every project that has at least one estimated task".
+            let project_ids: Option<Vec<i64>> = if let Some(names) = filter.as_deref() {
+                let mut ids: Vec<i64> = Vec::with_capacity(names.len());
+                for name in names {
+                    let pid: Option<i64> = db
+                        .conn
+                        .query_row(
+                            "SELECT id FROM projects WHERE name = ?",
+                            [name],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .ok();
+                    if let Some(pid) = pid {
+                        ids.push(pid);
+                    }
+                }
+                Some(ids)
+            } else {
+                None
+            };
+            let n = sprint_grader_estimation::fit_and_persist_for_projects(
+                &db.conn,
+                project_ids.as_deref(),
+            )
+            .context("estimation bias fitting failed")?;
+            info!(students_written = n, "estimation bias fitted");
         }
         Command::Report { projects, push } => {
             let filter = parse_project_filter(projects.projects);
