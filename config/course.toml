@@ -81,7 +81,7 @@ overlay_files = [
 ]
 
 [build]
-max_parallel_builds = 5
+max_parallel_builds = 2
 stderr_max_chars = 2000
 skip_already_tested = true
 
