@@ -1258,30 +1258,51 @@ Severity bands per `architecture.toml`. Per-student attribution \
         // `Filename` if the repo_full_name is not org-qualified (legacy
         // rows from earlier scans).
         let mut stmt = conn.prepare(
-            "SELECT av.rule_name, av.file_path, av.repo_full_name
+            "SELECT av.rule_name, av.file_path, av.repo_full_name,
+                    av.start_line, av.end_line, av.explanation
              FROM architecture_violations av
              JOIN sprints s ON s.id = av.sprint_id
              WHERE s.project_id = ? AND av.sprint_id = ?
-             ORDER BY av.rule_name, av.file_path",
+             ORDER BY av.rule_name, av.file_path, av.start_line",
         )?;
-        let raw_rows: Vec<(String, String, Option<String>)> = stmt
+        type RawArchRow = (
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+        );
+        let raw_rows: Vec<RawArchRow> = stmt
             .query_map(rusqlite::params![project_id, sprint_id], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
         drop(stmt);
 
         if !raw_rows.is_empty() {
-            // Group by rule_name → unique (file_path, repo_full_name)
-            // pairs, preserving order seen.
-            let mut by_rule: Vec<(String, Vec<(String, String)>)> = Vec::new();
-            for (rule, file, repo) in raw_rows {
-                let repo = repo.unwrap_or_default();
-                let entry = (file, repo);
+            // Map bare repo basename → qualified `<org>/<repo>` for this
+            // project, so legacy `architecture_violations` rows that stored
+            // only the bare directory name still get a clickable github link.
+            // Built once from `pull_requests`.
+            let qualified_by_basename = qualified_repo_names_by_basename(conn);
+
+            // Group by rule_name → unique
+            // (file_path, repo_full_qualified, start_line, end_line, explanation)
+            // tuples, preserving order seen.
+            type FileEntry = (String, String, Option<i64>, Option<i64>, Option<String>);
+            let mut by_rule: Vec<(String, Vec<FileEntry>)> = Vec::new();
+            for (rule, file, repo, start, end, expl) in raw_rows {
+                let repo_raw = repo.unwrap_or_default();
+                let repo = qualify_repo_name(&repo_raw, &qualified_by_basename);
+                let entry = (file, repo, start, end, expl);
                 match by_rule.iter_mut().find(|(r, _)| r == &rule) {
                     Some((_, files)) => {
                         if !files.contains(&entry) {
@@ -1291,26 +1312,48 @@ Severity bands per `architecture.toml`. Per-student attribution \
                     None => by_rule.push((rule, vec![entry])),
                 }
             }
-            // Sort rules by descending file count, tie-break alphabetic.
+            // Sort rules by descending row count, tie-break alphabetic.
             by_rule.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
 
             let _ = writeln!(buf, "**Violations by rule:**\n");
             for (rule, files) in by_rule {
+                let unique_files: HashSet<&str> =
+                    files.iter().map(|(f, _, _, _, _)| f.as_str()).collect();
                 let _ = writeln!(
                     buf,
-                    "- {} — {} file{}",
+                    "- {} — {} occurrence{} across {} file{}",
                     humanize_rule_name(&rule),
                     files.len(),
-                    if files.len() == 1 { "" } else { "s" }
+                    if files.len() == 1 { "" } else { "s" },
+                    unique_files.len(),
+                    if unique_files.len() == 1 { "" } else { "s" }
                 );
-                for (file, repo) in files {
+                for (file, repo, start, end, expl) in files {
                     let basename = file.rsplit('/').next().unwrap_or(&file);
                     let label = format!("`{}`", md_escape(basename));
+                    let line_suffix = format_line_suffix(start, end);
+                    let url_anchor = format_url_line_anchor(start, end);
                     let cell = match github_file_url(&repo, &file) {
-                        Some(url) => format!("[{}]({} \"{}\")", label, url, md_escape(&file)),
-                        None => format!("{} (`{}`)", label, md_escape(&file)),
+                        Some(url) => format!(
+                            "[{}{}]({}{} \"{}\")",
+                            label,
+                            line_suffix,
+                            url,
+                            url_anchor,
+                            md_escape(&file)
+                        ),
+                        None => {
+                            format!("{}{} (`{}`)", label, line_suffix, md_escape(&file))
+                        }
                     };
                     let _ = writeln!(buf, "  - {}", cell);
+                    if let Some(prose) = expl
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        let _ = writeln!(buf, "    - {}", md_escape(prose));
+                    }
                 }
             }
             buf.push('\n');
@@ -1358,6 +1401,9 @@ struct AttributedArchViolation {
     severity: String,
     offending_import: String,
     repo_full_qualified: String,
+    start_line: Option<i64>,
+    end_line: Option<i64>,
+    explanation: Option<String>,
 }
 
 /// Normalize a repo_full_name to its trailing component. The architecture
@@ -1413,6 +1459,19 @@ const KNOWN_RULE_DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "domain-no-jpa",
         "Domain / model classes must not depend on JPA (jakarta.persistence / javax.persistence)",
+    ),
+    // REST API design (LLM-judged, both Spring controllers and Retrofit interfaces).
+    (
+        "URL_CONTAINS_VERB",
+        "REST endpoint paths should be plural nouns, not verbs — the HTTP method already encodes the action",
+    ),
+    (
+        "NON_CANONICAL_CRUD_SHAPE",
+        "CRUD on a resource should use the canonical 2 URLs × 5 verbs shape (`/items`, `/items/{id}` × GET/POST/PUT/PATCH/DELETE)",
+    ),
+    (
+        "RELATIONSHIP_NOT_NESTED",
+        "Nested resources should use the parent-path form `/<parent>/{parentId}/<child>`",
     ),
 ];
 
@@ -1496,12 +1555,22 @@ fn architecture_violations_per_student(
 
     let mut stmt = conn.prepare(
         "SELECT av.rule_name, av.file_path, av.repo_full_name, av.severity,
-                av.offending_import
+                av.offending_import, av.start_line, av.end_line, av.explanation
          FROM architecture_violations av
          JOIN sprints s ON s.id = av.sprint_id
          WHERE s.project_id = ? AND av.sprint_id = ?",
     )?;
-    let rows: Vec<(String, String, String, String, String)> = stmt
+    type AttrRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    );
+    let rows: Vec<AttrRow> = stmt
         .query_map(rusqlite::params![project_id, sprint_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1509,13 +1578,16 @@ fn architecture_violations_per_student(
                 r.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
     let mut out: HashMap<String, Vec<AttributedArchViolation>> = HashMap::new();
-    for (rule, file, repo, severity, import) in rows {
+    for (rule, file, repo, severity, import, start, end, expl) in rows {
         let key = (file.clone(), repo_basename(&repo).to_string());
         let Some((owner, repo_fqn)) = owner_by_file.get(&key) else {
             continue;
@@ -1531,6 +1603,9 @@ fn architecture_violations_per_student(
                 severity,
                 offending_import: import,
                 repo_full_qualified: repo_fqn.clone(),
+                start_line: start,
+                end_line: end,
+                explanation: expl,
             });
     }
     Ok(out)
@@ -1547,6 +1622,66 @@ fn github_file_url(repo_full_qualified: &str, file_path: &str) -> Option<String>
         "https://github.com/{}/blob/HEAD/{}",
         repo_full_qualified, file_path
     ))
+}
+
+/// Build a `bare-repo-name → <org>/<repo>` map by scanning
+/// `pull_requests.repo_full_name`. Legacy `architecture_violations`
+/// rows wrote only the bare directory name; the report rendering uses
+/// this map to recover the qualified form so every file reference
+/// becomes a clickable github link. Scoped globally because basenames
+/// are unique across teams (per the `<stack>-<team>` convention) and
+/// `pull_requests` has no direct project foreign key.
+fn qualified_repo_names_by_basename(conn: &Connection) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT DISTINCT repo_full_name FROM pull_requests
+         WHERE repo_full_name IS NOT NULL
+           AND instr(repo_full_name, '/') > 0",
+    ) else {
+        return out;
+    };
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0));
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            let basename = row.rsplit('/').next().unwrap_or(&row).to_string();
+            out.entry(basename).or_insert(row);
+        }
+    }
+    out
+}
+
+/// If `repo` already looks qualified (`<org>/<repo>`) return it as-is.
+/// Otherwise look up its qualified form in the project's basename map.
+/// Falls back to the original string when no match exists.
+fn qualify_repo_name(repo: &str, by_basename: &HashMap<String, String>) -> String {
+    if repo.contains('/') {
+        return repo.to_string();
+    }
+    by_basename
+        .get(repo)
+        .cloned()
+        .unwrap_or_else(|| repo.to_string())
+}
+
+/// Render the line range as a `:Lstart-Lend` (or `:L<line>` when
+/// start == end) suffix appended to the file basename. Returns empty
+/// string when the violation has no line information.
+fn format_line_suffix(start: Option<i64>, end: Option<i64>) -> String {
+    match (start, end) {
+        (Some(s), Some(e)) if e > s => format!(" :L{}-L{}", s, e),
+        (Some(s), _) => format!(" :L{}", s),
+        _ => String::new(),
+    }
+}
+
+/// GitHub anchor (`#L<n>` or `#L<s>-L<e>`) so the file link jumps to
+/// the offending range. Empty when no line information exists.
+fn format_url_line_anchor(start: Option<i64>, end: Option<i64>) -> String {
+    match (start, end) {
+        (Some(s), Some(e)) if e > s => format!("#L{}-L{}", s, e),
+        (Some(s), _) => format!("#L{}", s),
+        _ => String::new(),
+    }
 }
 
 /// MAD-based deviation of a density (stmts/points) from the project's
@@ -1954,43 +2089,76 @@ fn write_student_architecture_block(buf: &mut String, violations: &[AttributedAr
         total, crit, warn, info_n
     );
 
-    // Group by rule_name. Each grouped row keeps the file path, the
-    // org-qualified repo name (for URL building), and the offending import.
-    // Rule order: descending count, tie-break alphabetical for determinism.
-    type RuleExample = (String, String, String);
-    let mut by_rule: HashMap<String, Vec<RuleExample>> = HashMap::new();
+    // Group by rule_name. Each grouped row keeps everything needed to render
+    // a self-contained explanation: file, qualified repo, offending import,
+    // line range, and any LLM-supplied prose. Rule order: descending count,
+    // tie-break alphabetical for determinism.
+    let mut by_rule: HashMap<String, Vec<&AttributedArchViolation>> = HashMap::new();
     for v in violations {
-        by_rule.entry(v.rule_name.clone()).or_default().push((
-            v.file_path.clone(),
-            v.repo_full_qualified.clone(),
-            v.offending_import.clone(),
-        ));
+        by_rule.entry(v.rule_name.clone()).or_default().push(v);
     }
-    let mut rules: Vec<(String, Vec<RuleExample>)> = by_rule.into_iter().collect();
+    let mut rules: Vec<(String, Vec<&AttributedArchViolation>)> = by_rule.into_iter().collect();
     rules.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
 
     for (rule, files) in rules {
+        let unique_files: HashSet<&str> =
+            files.iter().map(|v| v.file_path.as_str()).collect();
         let _ = writeln!(
             buf,
-            "- {} — {} file(s)",
+            "- {} — {} occurrence(s) across {} file(s)",
             humanize_rule_name(&rule),
-            files.len()
+            files.len(),
+            unique_files.len()
         );
-        // Show up to 3 examples per rule with the offending import. The file
-        // appears as a [basename](github-url) link with the full path in the
-        // markdown title attribute (`[label](url "title")`), so the visible
-        // text stays short while the source of truth is one click away.
-        let mut shown: Vec<&RuleExample> = files.iter().collect();
-        shown.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
-        shown.dedup_by(|a, b| a.0 == b.0 && a.2 == b.2);
-        for (file, repo_fqn, import) in shown.iter().take(3) {
-            let basename = file.rsplit('/').next().unwrap_or(file);
+        // Show up to 3 examples per rule. The file appears as a
+        // [basename:Lstart-Lend](github-url#L…) link with the full path in
+        // the title attribute, so the visible text stays short while the
+        // exact location is one click away. The optional LLM explanation is
+        // emitted as a child bullet so students see the *why*, not just the
+        // tag.
+        let mut shown: Vec<&&AttributedArchViolation> = files.iter().collect();
+        shown.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.offending_import.cmp(&b.offending_import))
+        });
+        shown.dedup_by(|a, b| {
+            a.file_path == b.file_path
+                && a.start_line == b.start_line
+                && a.end_line == b.end_line
+                && a.offending_import == b.offending_import
+        });
+        for v in shown.iter().take(3) {
+            let basename = v.file_path.rsplit('/').next().unwrap_or(&v.file_path);
             let label = format!("`{}`", basename);
-            let file_cell = match github_file_url(repo_fqn, file) {
-                Some(url) => format!("[{}]({} \"{}\")", label, url, md_escape(file)),
-                None => label,
+            let line_suffix = format_line_suffix(v.start_line, v.end_line);
+            let url_anchor = format_url_line_anchor(v.start_line, v.end_line);
+            let file_cell = match github_file_url(&v.repo_full_qualified, &v.file_path) {
+                Some(url) => format!(
+                    "[{}{}]({}{} \"{}\")",
+                    label,
+                    line_suffix,
+                    url,
+                    url_anchor,
+                    md_escape(&v.file_path)
+                ),
+                None => format!("{}{}", label, line_suffix),
             };
-            let _ = writeln!(buf, "  - {} ← `{}`", file_cell, html_escape(import));
+            let _ = writeln!(
+                buf,
+                "  - {} ← `{}`",
+                file_cell,
+                html_escape(&v.offending_import)
+            );
+            if let Some(prose) = v
+                .explanation
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let _ = writeln!(buf, "    - {}", md_escape(prose));
+            }
         }
         if shown.len() > 3 {
             let _ = writeln!(buf, "  - … and {} more", shown.len() - 3);
@@ -2928,6 +3096,8 @@ mod tests {
              CREATE TABLE architecture_violations (repo_full_name TEXT, sprint_id INTEGER,
                 file_path TEXT, rule_name TEXT, violation_kind TEXT,
                 offending_import TEXT, severity TEXT,
+                start_line INTEGER, end_line INTEGER,
+                rule_kind TEXT, rule_version TEXT, explanation TEXT,
                 PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import));
              CREATE TABLE task_similarity_groups (group_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sprint_id INTEGER, project_id INTEGER, representative_task_id INTEGER,
@@ -3348,6 +3518,93 @@ mod tests {
     }
 
     #[test]
+    fn architecture_section_renders_line_ranges_and_explanation() {
+        // start_line / end_line / explanation must surface in section A:
+        // basename gets a `:Lstart-Lend` suffix, the github URL gets a
+        // `#Lstart-Lend` anchor, and the LLM prose is a child bullet.
+        let conn = mk_conn();
+        conn.execute_batch(
+            "INSERT INTO architecture_violations
+                (repo_full_name, sprint_id, file_path, rule_name,
+                 violation_kind, offending_import, severity,
+                 start_line, end_line, rule_kind, explanation)
+             VALUES
+                ('udg/spring-foo', 10, 'A.java', 'HARDCODED_API_URL',
+                 'llm', 'HARDCODED_API_URL@L13', 'WARNING', 13, 13, 'llm',
+                 'API URL should use BuildConfig instead of a literal string.'),
+                ('udg/spring-foo', 10, 'B.java', 'REPOSITORY_NO_CACHING',
+                 'llm', 'REPOSITORY_NO_CACHING@L26', 'WARNING', 26, 49, 'llm',
+                 'Repository hits the network without checking the cache.');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        // Single-line violation: `:L13` suffix and `#L13` anchor.
+        assert!(
+            body.contains(
+                "[`A.java` :L13](https://github.com/udg/spring-foo/blob/HEAD/A.java#L13"
+            ),
+            "single-line link must carry :L13 suffix and #L13 anchor; got:\n{body}"
+        );
+        // Range violation: `:L26-L49` suffix and `#L26-L49` anchor.
+        assert!(
+            body.contains(
+                "[`B.java` :L26-L49](https://github.com/udg/spring-foo/blob/HEAD/B.java#L26-L49"
+            ),
+            "range link must carry :L26-L49 suffix and #L26-L49 anchor; got:\n{body}"
+        );
+        // Explanation prose surfaces as a nested bullet.
+        assert!(
+            body.contains(
+                "    - API URL should use BuildConfig instead of a literal string."
+            ),
+            "first explanation must render as a nested bullet; got:\n{body}"
+        );
+        assert!(
+            body.contains("    - Repository hits the network without checking the cache."),
+            "range explanation must render as a nested bullet; got:\n{body}"
+        );
+        // Headline now reports occurrences and unique files.
+        assert!(
+            body.contains("— 1 occurrence across 1 file"),
+            "rule headline must use occurrence/file phrasing; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn architecture_section_resolves_bare_repo_name_via_pull_requests() {
+        // Legacy `architecture_violations` rows wrote only the bare repo
+        // basename (e.g. `spring-foo`), which makes `github_file_url` fall
+        // back to a non-link form. The team-level "Violations by rule"
+        // renderer must look the qualified name up in `pull_requests` so
+        // every file reference becomes a clickable github link.
+        let conn = mk_conn();
+        conn.execute_batch(
+            "INSERT INTO pull_requests (id, repo_full_name)
+             VALUES ('pr1', 'udg-pds/spring-foo');
+             INSERT INTO architecture_violations
+                (repo_full_name, sprint_id, file_path, rule_name,
+                 violation_kind, offending_import, severity)
+             VALUES
+                ('spring-foo', 10, 'A.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("[`A.java`](https://github.com/udg-pds/spring-foo/blob/HEAD/A.java"),
+            "bare repo name must be resolved against pull_requests so the file link is clickable: {body}"
+        );
+        assert!(
+            !body.contains("`A.java` (`A.java`)"),
+            "non-link fallback must not survive the bare-name resolution: {body}"
+        );
+    }
+
+    #[test]
     fn per_student_architecture_attribution_matches_on_repo_basename() {
         // Regression: the architecture stage writes `repo_full_name` as a
         // bare repo (e.g. `spring-foo`) while fingerprints store `org/repo`
@@ -3410,8 +3667,11 @@ mod tests {
             body
         );
         assert!(
-            body.contains("- **presentation** must not depend on **infrastructure** — 1 file(s)"),
-            "missing rule-grouped breakdown",
+            body.contains(
+                "- **presentation** must not depend on **infrastructure** \
+— 1 occurrence(s) across 1 file(s)"
+            ),
+            "missing rule-grouped breakdown; got:\n{body}",
         );
         assert!(
             body.contains(
