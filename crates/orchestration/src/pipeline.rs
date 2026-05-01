@@ -11,6 +11,7 @@
 //!   6. Cross-project trajectory aggregation.
 //!   7. Optional reports (Excel + Markdown).
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -694,6 +695,81 @@ fn sweep_stale_worktrees(entregues_dir: &Path) {
     }
 }
 
+/// Resolve project IDs from a list of project names. If `names` is None,
+/// returns all project IDs currently in the DB.
+fn resolve_project_ids_from_names(conn: &Connection, names: Option<&[String]>) -> Vec<i64> {
+    match names {
+        Some(ns) if !ns.is_empty() => ns
+            .iter()
+            .filter_map(|n| {
+                conn.query_row("SELECT id FROM projects WHERE name = ?", [n], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .ok()
+            })
+            .collect(),
+        _ => conn
+            .prepare("SELECT id FROM projects ORDER BY id")
+            .ok()
+            .and_then(|mut s| {
+                s.query_map([], |r| r.get::<_, i64>(0))
+                    .ok()
+                    .and_then(|rows| rows.collect::<rusqlite::Result<_>>().ok())
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Snapshot (pr_count, task_count) per project_id. Used before and after
+/// collection to detect which projects received new PRs or tasks.
+fn snapshot_pr_task_counts(conn: &Connection, project_ids: &[i64]) -> HashMap<i64, (i64, i64)> {
+    let mut map: HashMap<i64, (i64, i64)> =
+        project_ids.iter().map(|&id| (id, (0i64, 0i64))).collect();
+    if project_ids.is_empty() {
+        return map;
+    }
+    let ph = (0..project_ids.len())
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let params: Vec<&dyn rusqlite::ToSql> = project_ids
+        .iter()
+        .map(|i| i as &dyn rusqlite::ToSql)
+        .collect();
+
+    let pr_sql = format!(
+        "SELECT s.team_project_id, COUNT(*) \
+         FROM pull_requests pr JOIN students s ON s.id = pr.author_id \
+         WHERE s.team_project_id IN ({ph}) GROUP BY s.team_project_id"
+    );
+    if let Ok(mut stmt) = conn.prepare(&pr_sql) {
+        if let Ok(rows) = stmt.query_map(params.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        }) {
+            for row in rows.flatten() {
+                map.entry(row.0).or_insert((0, 0)).0 = row.1;
+            }
+        }
+    }
+
+    let task_sql = format!(
+        "SELECT sp.project_id, COUNT(*) \
+         FROM tasks t JOIN sprints sp ON sp.id = t.sprint_id \
+         WHERE sp.project_id IN ({ph}) GROUP BY sp.project_id"
+    );
+    if let Ok(mut stmt) = conn.prepare(&task_sql) {
+        if let Ok(rows) = stmt.query_map(params.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        }) {
+            for row in rows.flatten() {
+                map.entry(row.0).or_insert((0, 0)).1 = row.1;
+            }
+        }
+    }
+
+    map
+}
+
 pub fn run_pipeline(
     config: &Config,
     db_path: &Path,
@@ -750,6 +826,20 @@ pub fn run_pipeline(
         }
     }
 
+    // [RunAll only] Snapshot PR + task counts before collection so we can
+    // detect which projects received new data. go/go-quick purge first so
+    // they always do a full reprocess — no snapshot needed there.
+    let early_project_ids: Vec<i64> = if variant == PipelineVariant::RunAll {
+        resolve_project_ids_from_names(&db.conn, opts.project_filter.as_deref())
+    } else {
+        Vec::new()
+    };
+    let pre_counts: HashMap<i64, (i64, i64)> = if variant == PipelineVariant::RunAll {
+        snapshot_pr_task_counts(&db.conn, &early_project_ids)
+    } else {
+        HashMap::new()
+    };
+
     // Stage 1: collection (one pass; collector internally walks every sprint
     // with start_date <= today per project).
     info!(
@@ -791,8 +881,71 @@ pub fn run_pipeline(
     };
     let project_ids_filter: Option<&[i64]> = scoped_project_ids.as_deref();
 
+    // Resolve sprint groupings right after collection — this is read-only
+    // and has no dependency on clone, estimation, or survival. Moving it
+    // here lets us compute the new-data set before deciding what to clone.
+    let groups = resolve_all_sprint_tuples(&db, &opts.today, opts.project_filter.as_deref())?;
+    if groups.is_empty() {
+        warn!("no projects matched — nothing to process");
+        return Ok(());
+    }
+    let flat_sprint_ids: Vec<i64> = groups
+        .iter()
+        .flat_map(|g| g.sprint_ids.iter().copied())
+        .collect();
+
+    // [RunAll only] Post-collection snapshot: determine which projects have
+    // new PRs or tasks. For go/go-quick every project is fully reprocessed
+    // (they purge existing data). For run-all we skip the expensive stages
+    // (survival, compile, architecture) for projects where nothing changed.
+    let projects_with_new_data: HashSet<i64> = if variant == PipelineVariant::RunAll {
+        let post_ids: Vec<i64> = groups.iter().map(|g| g.project_id).collect();
+        let post_counts = snapshot_pr_task_counts(&db.conn, &post_ids);
+        let mut set = HashSet::new();
+        for g in &groups {
+            let (pre_prs, pre_tasks) =
+                pre_counts.get(&g.project_id).copied().unwrap_or((0, 0));
+            let (post_prs, post_tasks) =
+                post_counts.get(&g.project_id).copied().unwrap_or((0, 0));
+            if post_prs > pre_prs || post_tasks > pre_tasks {
+                info!(
+                    project = %g.name,
+                    new_prs = post_prs - pre_prs,
+                    new_tasks = post_tasks - pre_tasks,
+                    "new data detected — scheduling full reprocess"
+                );
+                set.insert(g.project_id);
+            } else {
+                info!(
+                    project = %g.name,
+                    "no new PRs/tasks — skipping survival, compile, and architecture stages"
+                );
+            }
+        }
+        set
+    } else {
+        // go/go-quick: all projects get the full treatment.
+        groups.iter().map(|g| g.project_id).collect()
+    };
+
+    // Sprint IDs restricted to projects that have new data. Survival,
+    // compile, and architecture stages are gated on this subset.
+    let flat_sprint_ids_for_reprocess: Vec<i64> = groups
+        .iter()
+        .filter(|g| projects_with_new_data.contains(&g.project_id))
+        .flat_map(|g| g.sprint_ids.iter().copied())
+        .collect();
+
+    // Clone/update repos only for projects with new data (RunAll); for
+    // go/go-quick use the original project_ids_filter (full scope).
     if !opts.skip_repos && !opts.skip_github {
-        clone_repos_from_db(&db, &opts.entregues_dir, project_ids_filter)?;
+        if variant == PipelineVariant::RunAll {
+            let new_data_ids: Vec<i64> =
+                projects_with_new_data.iter().copied().collect();
+            clone_repos_from_db(&db, &opts.entregues_dir, Some(&new_data_ids))?;
+        } else {
+            clone_repos_from_db(&db, &opts.entregues_dir, project_ids_filter)?;
+        }
     }
 
     // T-P2.1: per-student estimation-bias fitter. Pools every estimated
@@ -806,21 +959,12 @@ pub fn run_pipeline(
         Err(e) => warn!(error = %e, "estimation bias fitting failed"),
     }
 
-    // Resolve sprint groupings after collection.
-    let groups = resolve_all_sprint_tuples(&db, &opts.today, opts.project_filter.as_deref())?;
-    if groups.is_empty() {
-        warn!("no projects matched — nothing to process");
-        return Ok(());
-    }
-    let flat_sprint_ids: Vec<i64> = groups
-        .iter()
-        .flat_map(|g| g.sprint_ids.iter().copied())
-        .collect();
-
     // Stage 2: survival — one pass per sprint (each with its ordinal).
+    // Gated on projects with new data: sprints for unchanged projects are
+    // skipped entirely (survival results are still valid from the prior run).
     info!(stage = 2, total = total_stages, "survival analysis");
     let data_dir = opts.entregues_dir.parent().unwrap_or(&opts.entregues_dir);
-    for sid in &flat_sprint_ids {
+    for sid in &flat_sprint_ids_for_reprocess {
         let ord = sprint_grader_survival::survival::ordinal_for_sprint_id(&db, *sid).unwrap_or(1);
         if let Err(e) = sprint_grader_survival::survival::compute_survival(
             &db,
@@ -838,10 +982,10 @@ pub fn run_pipeline(
     }
 
     // PR compilation: ONE rayon pool sized to `max_parallel_builds`, sweeping
-    // every PR across every sprint. Hoisted out of the per-sprint parallel
-    // block to avoid N(sprints) × M(builds) concurrent gradle processes —
-    // observed as 20 in flight with the default M=5 and 4 sprints.
-    {
+    // every PR across every sprint with new data. Hoisted out of the per-sprint
+    // parallel block to avoid N(sprints) × M(builds) concurrent gradle processes.
+    // Gated on projects with new data — sprints for unchanged projects are skipped.
+    if !flat_sprint_ids_for_reprocess.is_empty() {
         let profiles =
             match sprint_grader_compile::load_build_profiles_from_config(&config.build_profiles) {
                 Ok(p) => p,
@@ -857,7 +1001,7 @@ pub fn run_pipeline(
             let mutation_enabled = config.mutation.enabled;
             if let Err(e) = sprint_grader_compile::check_compilations_parallel(
                 &db.conn,
-                &flat_sprint_ids,
+                &flat_sprint_ids_for_reprocess,
                 &opts.entregues_dir,
                 &profiles,
                 max_parallel,
@@ -947,15 +1091,18 @@ pub fn run_pipeline(
         }
     }
 
-    // T-P2.2: architecture conformance scan. Runs on every variant
-    // (not gated by ai_detection) — it's a deterministic scan of the
-    // already-cloned repos, not an LLM call. Skips silently when
-    // `architecture.toml` is absent or the project dir doesn't exist.
+    // T-P2.2: architecture conformance scan. Gated on projects with new data
+    // (run-all) or all projects (go/go-quick). The scan is deterministic and
+    // does DELETE + re-INSERT per (project, sprint), so skipping unchanged
+    // projects preserves valid prior results and avoids redundant I/O.
     let arch_rules_path = opts.config_dir.join("architecture.toml");
     if arch_rules_path.is_file() {
         match sprint_grader_architecture::ArchitectureRules::load(&arch_rules_path) {
             Ok(arch_rules) => {
-                for g in &groups {
+                for g in groups
+                    .iter()
+                    .filter(|g| projects_with_new_data.contains(&g.project_id))
+                {
                     let project_root = opts.entregues_dir.join(&g.name);
                     for sid in &g.sprint_ids {
                         if let Err(e) = sprint_grader_architecture::scan_project_to_db(
@@ -1050,7 +1197,10 @@ pub fn run_pipeline(
                         "[architecture] running LLM review"
                     );
                     let judge = judge_box;
-                    for g in &groups {
+                    for g in groups
+                        .iter()
+                        .filter(|g| projects_with_new_data.contains(&g.project_id))
+                    {
                         let project_root = opts.entregues_dir.join(&g.name);
                         for sid in &g.sprint_ids {
                             let entries = match std::fs::read_dir(&project_root) {
@@ -1098,7 +1248,10 @@ pub fn run_pipeline(
                     // Architecture stage wrote new violation rows; re-run
                     // attribution per (repo, sprint) so the LLM rows pick
                     // up blame weights too.
-                    for g in &groups {
+                    for g in groups
+                        .iter()
+                        .filter(|g| projects_with_new_data.contains(&g.project_id))
+                    {
                         let project_root = opts.entregues_dir.join(&g.name);
                         let entries = match std::fs::read_dir(&project_root) {
                             Ok(e) => e,
@@ -1229,5 +1382,87 @@ mod tests {
         assert!(!PipelineVariant::RunAll.purge_existing());
         assert!(PipelineVariant::Go.purge_existing());
         assert!(PipelineVariant::GoQuick.purge_existing());
+    }
+
+    fn mk_mem_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE students (id TEXT PRIMARY KEY, team_project_id INTEGER);
+             CREATE TABLE sprints (id INTEGER PRIMARY KEY, project_id INTEGER);
+             CREATE TABLE pull_requests (id TEXT PRIMARY KEY, author_id TEXT);
+             CREATE TABLE tasks (id INTEGER PRIMARY KEY, sprint_id INTEGER);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn snapshot_returns_zeros_for_empty_db() {
+        let conn = mk_mem_conn();
+        conn.execute("INSERT INTO projects (id, name) VALUES (1, 'p1')", [])
+            .unwrap();
+        let snap = snapshot_pr_task_counts(&conn, &[1]);
+        assert_eq!(snap[&1], (0, 0));
+    }
+
+    #[test]
+    fn snapshot_counts_prs_and_tasks_by_project() {
+        let conn = mk_mem_conn();
+        conn.execute_batch(
+            "INSERT INTO projects VALUES (1, 'p1'), (2, 'p2');
+             INSERT INTO students VALUES ('s1', 1), ('s2', 2);
+             INSERT INTO sprints VALUES (10, 1), (20, 2);
+             INSERT INTO pull_requests VALUES ('pr1', 's1'), ('pr2', 's1'), ('pr3', 's2');
+             INSERT INTO tasks VALUES (100, 10), (101, 10), (102, 20);",
+        )
+        .unwrap();
+        let snap = snapshot_pr_task_counts(&conn, &[1, 2]);
+        assert_eq!(snap[&1], (2, 2)); // project 1: 2 PRs, 2 tasks
+        assert_eq!(snap[&2], (1, 1)); // project 2: 1 PR, 1 task
+    }
+
+    #[test]
+    fn snapshot_detects_new_prs() {
+        let conn = mk_mem_conn();
+        conn.execute_batch(
+            "INSERT INTO projects VALUES (1, 'p1');
+             INSERT INTO students VALUES ('s1', 1);
+             INSERT INTO sprints VALUES (10, 1);
+             INSERT INTO pull_requests VALUES ('pr1', 's1');
+             INSERT INTO tasks VALUES (100, 10);",
+        )
+        .unwrap();
+        let pre = snapshot_pr_task_counts(&conn, &[1]);
+        conn.execute("INSERT INTO pull_requests VALUES ('pr2', 's1')", [])
+            .unwrap();
+        let post = snapshot_pr_task_counts(&conn, &[1]);
+        let (pre_prs, _) = pre[&1];
+        let (post_prs, _) = post[&1];
+        assert!(post_prs > pre_prs, "new PR should increase the count");
+    }
+
+    #[test]
+    fn resolve_project_ids_from_names_finds_existing() {
+        let conn = mk_mem_conn();
+        conn.execute_batch(
+            "INSERT INTO projects VALUES (1, 'alpha'), (2, 'beta');",
+        )
+        .unwrap();
+        let names = vec!["alpha".to_string()];
+        let ids = resolve_project_ids_from_names(&conn, Some(&names));
+        assert_eq!(ids, vec![1]);
+    }
+
+    #[test]
+    fn resolve_project_ids_from_names_returns_all_when_no_filter() {
+        let conn = mk_mem_conn();
+        conn.execute_batch(
+            "INSERT INTO projects VALUES (1, 'alpha'), (2, 'beta');",
+        )
+        .unwrap();
+        let mut ids = resolve_project_ids_from_names(&conn, None);
+        ids.sort();
+        assert_eq!(ids, vec![1, 2]);
     }
 }
