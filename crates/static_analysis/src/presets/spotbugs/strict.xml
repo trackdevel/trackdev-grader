@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Strict SpotBugs filter for trackdev-grader. Adds MULTITHREADING,
+  SECURITY, MALICIOUS_CODE, and BAD_PRACTICE to the standard set, plus
+  every FindSecBugs category (SECURITY is the umbrella label
+  FindSecBugs registers under).
+-->
+<FindBugsFilter>
+    <Match>
+        <Bug category="CORRECTNESS"/>
+    </Match>
+    <Match>
+        <Bug category="STYLE"/>
+    </Match>
+    <Match>
+        <Bug category="PERFORMANCE"/>
+    </Match>
+    <Match>
+        <Bug category="MULTITHREADING"/>
+    </Match>
+    <Match>
+        <Bug category="SECURITY"/>
+    </Match>
+    <Match>
+        <Bug category="MALICIOUS_CODE"/>
+    </Match>
+    <Match>
+        <Bug category="BAD_PRACTICE"/>
+    </Match>
+</FindBugsFilter>

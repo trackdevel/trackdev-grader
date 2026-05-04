@@ -20,6 +20,7 @@ rusqlite.workspace = true
 rust_xlsxwriter = "0.94"
 sprint-grader-core = { path = "../core" }
 sprint-grader-repo-analysis = { path = "../repo_analysis" }
+sprint-grader-static-analysis = { path = "../static_analysis" }
 
 [dev-dependencies]
 tempfile.workspace = true

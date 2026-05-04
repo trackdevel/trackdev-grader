@@ -11,9 +11,11 @@ pub mod adapter;
 pub mod attribution;
 pub mod checkstyle;
 pub mod config;
+pub mod i18n;
 pub mod pmd;
 pub mod presets;
 pub mod sarif;
+pub mod spotbugs;
 
 pub use adapter::{
     Analyzer, AnalyzerConfig, AnalyzerInput, AnalyzerOutput, AnalyzerStatus, Category, Finding,
@@ -23,6 +25,7 @@ pub use attribution::attribute_findings_for_repo;
 pub use checkstyle::{Checkstyle, CHECKSTYLE_VERSION};
 pub use config::Rules;
 pub use pmd::{Pmd, PMD_VERSION};
+pub use spotbugs::{SpotBugs, FINDSECBUGS_VERSION, SPOTBUGS_VERSION};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -158,7 +161,72 @@ pub fn scan_repo_to_db(
         }
     }
 
-    // SpotBugs lands in T6.
+    // SpotBugs (T6). Class-file analyzer: short-circuit when
+    // `compile_stage` did not produce a successful build for the
+    // sprint, so we don't even spawn the launcher in that case. The
+    // `static_analysis_runs` row records SKIPPED_NO_CLASSES so the
+    // report can render "skipped — compile failed" instead of staying
+    // silent.
+    if rules.spotbugs.enabled {
+        let class_roots = spotbugs::discover_class_roots(repo_path);
+        let compile_ok = spotbugs::latest_pr_compiled_ok(conn, repo_full_name, sprint_id);
+        if class_roots.is_empty() || !compile_ok {
+            let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            let diagnostics = if !compile_ok {
+                "no successful PR build for this sprint".to_string()
+            } else {
+                "no class roots found under build/".to_string()
+            };
+            conn.execute(
+                "INSERT OR REPLACE INTO static_analysis_runs
+                    (repo_full_name, sprint_id, analyzer, status, findings_count,
+                     duration_ms, head_sha, diagnostics, ran_at)
+                 VALUES (?, ?, 'spotbugs', 'SKIPPED_NO_CLASSES', 0, 0, ?, ?, ?)",
+                params![repo_full_name, sprint_id, head_sha, diagnostics, now],
+            )?;
+        } else {
+            match SpotBugs::discover(rules.spotbugs.include_findsecbugs) {
+                Some(analyzer) => {
+                    let cfg = AnalyzerConfig {
+                        ruleset_ref: rules.spotbugs.effort.clone(), // placeholder; preset chosen below
+                        severity_floor: rules.severity_floor,
+                        max_findings: rules.max_findings_per_analyzer,
+                    };
+                    // SpotBugs presets aren't named in the rules struct —
+                    // they share the analyzer-level preset (`"beginner" |
+                    // "standard" | "strict"`) by default. Until a
+                    // dedicated knob is added, derive from the PMD preset
+                    // value: instructors who picked "strict" for PMD
+                    // almost always want strict here too.
+                    let derived_preset = rules.pmd.preset.clone();
+                    let cfg = AnalyzerConfig {
+                        ruleset_ref: derived_preset,
+                        ..cfg
+                    };
+                    run_analyzer_with_classes(
+                        conn,
+                        &analyzer,
+                        &cfg,
+                        repo_path,
+                        repo_full_name,
+                        sprint_id,
+                        head_sha.as_deref(),
+                        rules,
+                        work_dir.path(),
+                        "spotbugs",
+                        rules.spotbugs.heap_mb,
+                        class_roots,
+                    )?;
+                }
+                None => {
+                    warn!(
+                        repo = repo_full_name,
+                        "SpotBugs launcher not found; skipping (set SPOTBUGS_HOME or run scripts/install-analyzers.sh)"
+                    );
+                }
+            }
+        }
+    }
 
     // Attribution. Mirrors the architecture crate's lib.rs:100-111: log
     // and continue on error, so a single team's broken git repo can't
@@ -224,8 +292,39 @@ fn run_analyzer_into_db(
     analyzer_id: &str,
     heap_mb: u32,
 ) -> rusqlite::Result<()> {
-    // Per-analyzer scratch dir so PMD's `pmd.sarif` and Checkstyle's
-    // `checkstyle.sarif` can't collide.
+    run_analyzer_with_classes(
+        conn,
+        analyzer,
+        cfg,
+        repo_path,
+        repo_full_name,
+        sprint_id,
+        head_sha,
+        rules,
+        work_dir,
+        analyzer_id,
+        heap_mb,
+        vec![], // PMD/Checkstyle don't need class roots.
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_analyzer_with_classes(
+    conn: &Connection,
+    analyzer: &dyn Analyzer,
+    cfg: &AnalyzerConfig,
+    repo_path: &Path,
+    repo_full_name: &str,
+    sprint_id: i64,
+    head_sha: Option<&str>,
+    rules: &Rules,
+    work_dir: &Path,
+    analyzer_id: &str,
+    heap_mb: u32,
+    class_roots: Vec<PathBuf>,
+) -> rusqlite::Result<()> {
+    // Per-analyzer scratch dir so PMD's `pmd.sarif`, Checkstyle's
+    // `checkstyle.sarif`, and SpotBugs' `spotbugs.sarif` can't collide.
     let analyzer_work = work_dir.join(analyzer_id);
     if let Err(e) = std::fs::create_dir_all(&analyzer_work) {
         warn!(analyzer = analyzer_id, error = %e, "cannot create analyzer scratch dir");
@@ -237,7 +336,7 @@ fn run_analyzer_into_db(
         repo_full_name,
         head_sha: head_sha.map(|s| s.to_string()),
         source_roots: discover_source_roots(repo_path),
-        class_roots: vec![], // T6 fills this for SpotBugs.
+        class_roots,
         jdk_major: 21,
         work_dir: analyzer_work,
         timeout: Duration::from_secs(rules.timeout_seconds),

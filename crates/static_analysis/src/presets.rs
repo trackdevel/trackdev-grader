@@ -61,6 +61,30 @@ pub fn resolve_checkstyle_ruleset(preset: &str) -> Result<NamedTempFile> {
     write_to_temp(body, ".xml")
 }
 
+// --- SpotBugs ---------------------------------------------------------------
+
+const SPOTBUGS_BEGINNER_XML: &str = include_str!("presets/spotbugs/beginner.xml");
+const SPOTBUGS_STANDARD_XML: &str = include_str!("presets/spotbugs/standard.xml");
+const SPOTBUGS_STRICT_XML: &str = include_str!("presets/spotbugs/strict.xml");
+
+/// Resolve a SpotBugs `preset` reference to a freshly-materialised XML
+/// filter file. SpotBugs uses include-filter semantics: only matched
+/// `<Match>` blocks survive into the output.
+pub fn resolve_spotbugs_ruleset(preset: &str) -> Result<NamedTempFile> {
+    let body = match preset {
+        "beginner" => SPOTBUGS_BEGINNER_XML,
+        "standard" => SPOTBUGS_STANDARD_XML,
+        "strict" => SPOTBUGS_STRICT_XML,
+        other => {
+            return Err(anyhow!(
+                "unknown SpotBugs preset '{}'; expected one of: beginner, standard, strict",
+                other
+            ));
+        }
+    };
+    write_to_temp(body, ".xml")
+}
+
 fn write_to_temp(body: &str, suffix: &str) -> Result<NamedTempFile> {
     let mut tmp = tempfile::Builder::new()
         .prefix("trackdev-static-analysis-")
@@ -113,5 +137,25 @@ mod tests {
     fn unknown_checkstyle_preset_is_rejected() {
         let err = resolve_checkstyle_ruleset("zen").unwrap_err();
         assert!(err.to_string().contains("unknown Checkstyle preset"));
+    }
+
+    #[test]
+    fn spotbugs_presets_are_non_empty_xml() {
+        assert!(SPOTBUGS_BEGINNER_XML.contains("FindBugsFilter"));
+        assert!(SPOTBUGS_STANDARD_XML.contains("PERFORMANCE"));
+        assert!(SPOTBUGS_STRICT_XML.contains("SECURITY"));
+    }
+
+    #[test]
+    fn resolve_spotbugs_ruleset_writes_to_disk() {
+        let tmp = resolve_spotbugs_ruleset("beginner").unwrap();
+        let body = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(body.contains("FindBugsFilter"));
+    }
+
+    #[test]
+    fn unknown_spotbugs_preset_is_rejected() {
+        let err = resolve_spotbugs_ruleset("zen").unwrap_err();
+        assert!(err.to_string().contains("unknown SpotBugs preset"));
     }
 }

@@ -2159,6 +2159,186 @@ fn write_student_architecture_block(buf: &mut String, violations: &[AttributedAr
     buf.push('\n');
 }
 
+// ── Static-analysis findings (T-SA) ──────────────────────────────────────────
+//
+// Renders the section between B (per-student dashboards, which include the
+// per-student architecture block) and C (peer-group analysis). Joins
+// `static_analysis_finding_attribution` to `static_analysis_findings`, scopes
+// to the team via `students.team_project_id`, then groups by student. The
+// section is gated by a top-level `include_static_analysis` flag plumbed
+// through the public entry points; `sync-reports` passes `false` so the
+// section is stripped before pushing to team repos (instructor-only by
+// default per the phase-1 sign-off).
+fn write_section_static_analysis(
+    buf: &mut String,
+    conn: &Connection,
+    sprint_id: i64,
+    project_id: i64,
+    depth: usize,
+    top_n_per_student: usize,
+) -> rusqlite::Result<()> {
+    use sprint_grader_static_analysis::i18n;
+
+    let h2 = "#".repeat(depth);
+    let h3 = "#".repeat(depth + 1);
+
+    // Pull the per-student finding stream once. The query joins through
+    // `students.team_project_id` so we don't surface findings authored by
+    // someone outside this team's roster — defensive against stale
+    // identities lingering in the attribution table.
+    type Row = (
+        String,         // student_id
+        String,         // full_name
+        String,         // analyzer
+        String,         // rule_id
+        String,         // severity
+        Option<String>, // category
+        String,         // file_path
+        String,         // repo_full_name
+        Option<i64>,    // start_line
+        Option<i64>,    // end_line
+        String,         // message
+        Option<String>, // help_uri
+        f64,            // weight
+    );
+    let mut stmt = conn.prepare(
+        "SELECT a.student_id, COALESCE(s.full_name, s.id),
+                f.analyzer, f.rule_id, f.severity, f.category,
+                f.file_path, f.repo_full_name, f.start_line, f.end_line,
+                f.message, f.help_uri, a.weight
+         FROM static_analysis_finding_attribution a
+         JOIN static_analysis_findings f ON f.id = a.finding_id
+         JOIN students s ON s.id = a.student_id
+         WHERE a.sprint_id = ? AND s.team_project_id = ?
+         ORDER BY s.full_name, a.weight DESC, f.file_path, f.start_line",
+    )?;
+    let rows: Vec<Row> = stmt
+        .query_map(rusqlite::params![sprint_id, project_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                r.get::<_, Option<i64>>(8)?,
+                r.get::<_, Option<i64>>(9)?,
+                r.get::<_, String>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, f64>(12)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let _ = writeln!(buf, "{} {}\n", h2, i18n::SECTION_HEADER);
+
+    if rows.is_empty() {
+        let _ = writeln!(buf, "{}\n", i18n::NO_FINDINGS);
+        return Ok(());
+    }
+
+    // Project-wide severity tally (counts per finding occurrence — a
+    // single finding shared by N students counts N times against the
+    // total, matching how the architecture summary reports too).
+    let mut total_crit = 0usize;
+    let mut total_warn = 0usize;
+    let mut total_info = 0usize;
+    for r in &rows {
+        match r.4.as_str() {
+            "CRITICAL" => total_crit += 1,
+            "WARNING" => total_warn += 1,
+            _ => total_info += 1,
+        }
+    }
+    let _ = writeln!(
+        buf,
+        "{} {} · {} {} · {} {}\n",
+        total_crit,
+        i18n::SEVERITY_CRITICAL_PLURAL,
+        total_warn,
+        i18n::SEVERITY_WARNING_PLURAL,
+        total_info,
+        i18n::SEVERITY_INFO_PLURAL,
+    );
+
+    let _ = writeln!(buf, "{} {}\n", h3, i18n::PER_STUDENT_SUBHEADER);
+
+    #[derive(Default)]
+    struct PerStudent {
+        full_name: String,
+        crit: usize,
+        warn: usize,
+        weight: f64,
+        findings: Vec<usize>, // indices into `rows`
+    }
+    use std::collections::BTreeMap;
+    let mut by_student: BTreeMap<String, PerStudent> = BTreeMap::new();
+    for (idx, r) in rows.iter().enumerate() {
+        let acc = by_student.entry(r.0.clone()).or_default();
+        if acc.full_name.is_empty() {
+            acc.full_name = r.1.clone();
+        }
+        match r.4.as_str() {
+            "CRITICAL" => acc.crit += 1,
+            "WARNING" => acc.warn += 1,
+            _ => {}
+        }
+        acc.weight += r.12;
+        acc.findings.push(idx);
+    }
+
+    // Per-student rendering — full_name already used as the primary
+    // sort key in the SQL ORDER BY, so iteration follows the same order.
+    for ps in by_student.values() {
+        let _ = writeln!(
+            buf,
+            "- **{}** — {} {}, {} {} ({} {:.1})",
+            ps.full_name,
+            ps.crit,
+            i18n::SEVERITY_CRITICAL_PLURAL,
+            ps.warn,
+            i18n::SEVERITY_WARNING_PLURAL,
+            i18n::WEIGHT_LABEL,
+            ps.weight
+        );
+        let cap = top_n_per_student.max(1);
+        for &idx in ps.findings.iter().take(cap) {
+            let r = &rows[idx];
+            let basename = r.6.rsplit('/').next().unwrap_or(&r.6);
+            let label = format!("`{}`", basename);
+            let line_suffix = format_line_suffix(r.8, r.9);
+            let url_anchor = format_url_line_anchor(r.8, r.9);
+            let file_cell = match github_file_url(&r.7, &r.6) {
+                Some(url) => format!("[{}{}]({}{})", label, line_suffix, url, url_anchor),
+                None => format!("{}{}", label, line_suffix),
+            };
+            let _ = writeln!(
+                buf,
+                "  - {} — `{}:{}` — {}",
+                file_cell,
+                r.2,
+                r.3,
+                md_escape(r.10.lines().next().unwrap_or(""))
+            );
+        }
+        if ps.findings.len() > cap {
+            let _ = writeln!(
+                buf,
+                "  - … {} {}",
+                ps.findings.len() - cap,
+                i18n::MORE_LABEL
+            );
+        }
+    }
+
+    buf.push('\n');
+    let _ = writeln!(buf, "{}\n", i18n::DISCLAIMER);
+    Ok(())
+}
+
 // ── Section C: peer-group analysis ───────────────────────────────────────────
 
 fn write_section_c(
@@ -2644,6 +2824,32 @@ pub fn generate_markdown_report_to_path_ex(
     output_path: &Path,
     cumulative_sprint_ids: Option<&[i64]>,
 ) -> rusqlite::Result<()> {
+    // Default: instructor-friendly (include the static-analysis section).
+    // `sync-reports --push` calls the `_ex2` variant with `false`.
+    generate_markdown_report_to_path_ex2(
+        conn,
+        sprint_id,
+        project_id,
+        project_name,
+        output_path,
+        cumulative_sprint_ids,
+        true,
+    )
+}
+
+/// Like `generate_markdown_report_to_path_ex` but takes
+/// `include_static_analysis`. T-SA: `false` strips the "Análisis estático"
+/// section so reports pushed to team repos don't surface the findings
+/// (instructor-only by default).
+pub fn generate_markdown_report_to_path_ex2(
+    conn: &Connection,
+    sprint_id: i64,
+    project_id: i64,
+    project_name: &str,
+    output_path: &Path,
+    cumulative_sprint_ids: Option<&[i64]>,
+    include_static_analysis: bool,
+) -> rusqlite::Result<()> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -2660,6 +2866,16 @@ pub fn generate_markdown_report_to_path_ex(
         2,
     )?;
     write_section_b(&mut buf, conn, sprint_id, project_id, 2)?;
+    if include_static_analysis {
+        write_section_static_analysis(
+            &mut buf,
+            conn,
+            sprint_id,
+            project_id,
+            2,
+            DEFAULT_TOP_N_PER_STUDENT,
+        )?;
+    }
     write_section_c(&mut buf, conn, sprint_id, project_id, 2)?;
     if let Some(sids) = cumulative_sprint_ids {
         if !sids.is_empty() {
@@ -2673,9 +2889,16 @@ pub fn generate_markdown_report_to_path_ex(
 
     std::fs::write(output_path, buf)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    info!(path = %output_path.display(), cumulative = cumulative_sprint_ids.is_some(), "Markdown report written");
+    info!(path = %output_path.display(), cumulative = cumulative_sprint_ids.is_some(), include_static_analysis, "Markdown report written");
     Ok(())
 }
+
+/// Default cap on findings listed per student in the report. Kept here
+/// rather than threading `Rules` all the way through the report API —
+/// callers that want a different cap can use the `_ex2` variant once we
+/// extend it to take a `RenderOptions`. The phase-1 default of 5 is the
+/// recommendation in `static_analysis.toml.example::[reporting] top_n_per_student`.
+const DEFAULT_TOP_N_PER_STUDENT: usize = 5;
 
 /// Multi-sprint project report: one `# Project report` header, then one
 /// `## Sprint K: {name} ({start} — {end})` section per sprint in
@@ -2706,6 +2929,30 @@ pub fn generate_markdown_report_multi_to_path(
     project_name: &str,
     sprint_ids_ordered: &[i64],
     output_path: &Path,
+) -> rusqlite::Result<()> {
+    // Default: instructor-friendly. `sync-reports --push` uses the `_ex`
+    // variant with `false` to strip the static-analysis section before
+    // committing to team repos.
+    generate_markdown_report_multi_to_path_ex(
+        conn,
+        project_id,
+        project_name,
+        sprint_ids_ordered,
+        output_path,
+        true,
+    )
+}
+
+/// Like `generate_markdown_report_multi_to_path` but takes
+/// `include_static_analysis`. T-SA: pass `false` from `sync-reports --push`
+/// so reports pushed to team repos don't surface the findings.
+pub fn generate_markdown_report_multi_to_path_ex(
+    conn: &Connection,
+    project_id: i64,
+    project_name: &str,
+    sprint_ids_ordered: &[i64],
+    output_path: &Path,
+    include_static_analysis: bool,
 ) -> rusqlite::Result<()> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
@@ -2763,6 +3010,16 @@ pub fn generate_markdown_report_multi_to_path(
             3,
         )?;
         write_section_b(&mut buf, conn, *sid, project_id, 3)?;
+        if include_static_analysis {
+            write_section_static_analysis(
+                &mut buf,
+                conn,
+                *sid,
+                project_id,
+                3,
+                DEFAULT_TOP_N_PER_STUDENT,
+            )?;
+        }
         write_section_c(&mut buf, conn, *sid, project_id, 3)?;
     }
 
@@ -3091,6 +3348,27 @@ mod tests {
                 start_line INTEGER, end_line INTEGER,
                 rule_kind TEXT, rule_version TEXT, explanation TEXT,
                 PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import));
+             CREATE TABLE static_analysis_findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_full_name TEXT NOT NULL, sprint_id INTEGER NOT NULL,
+                analyzer TEXT NOT NULL, analyzer_version TEXT,
+                rule_id TEXT NOT NULL, category TEXT, severity TEXT NOT NULL,
+                file_path TEXT NOT NULL, start_line INTEGER, end_line INTEGER,
+                message TEXT NOT NULL, help_uri TEXT,
+                fingerprint TEXT NOT NULL, head_sha TEXT,
+                UNIQUE (repo_full_name, sprint_id, fingerprint));
+             CREATE TABLE static_analysis_finding_attribution (
+                finding_id INTEGER NOT NULL, student_id TEXT NOT NULL,
+                lines_authored INTEGER NOT NULL, total_lines INTEGER NOT NULL,
+                weight REAL NOT NULL, sprint_id INTEGER NOT NULL,
+                PRIMARY KEY (finding_id, student_id));
+             CREATE TABLE static_analysis_runs (
+                repo_full_name TEXT NOT NULL, sprint_id INTEGER NOT NULL,
+                analyzer TEXT NOT NULL, status TEXT NOT NULL,
+                findings_count INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER, head_sha TEXT, diagnostics TEXT,
+                ran_at TEXT NOT NULL,
+                PRIMARY KEY (repo_full_name, sprint_id, analyzer));
              CREATE TABLE task_similarity_groups (group_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sprint_id INTEGER, project_id INTEGER, representative_task_id INTEGER,
                 group_label TEXT, stack TEXT, layer TEXT, action TEXT,
@@ -3792,5 +4070,147 @@ mod tests {
         let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("| [#44](https://github.com/udg-pds/spring-foo/pull/44) | spring-foo | [No metric PR](https://github.com/udg-pds/spring-foo/pull/44) | +10 / -2 | 4 | 0 | 0 | 0 |"));
+    }
+
+    // --- T-SA: static-analysis section -------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_static_analysis_finding(
+        conn: &Connection,
+        finding_id: i64,
+        student: &str,
+        rule_id: &str,
+        analyzer: &str,
+        severity: &str,
+        file_path: &str,
+        start: i64,
+        end: i64,
+        weight: f64,
+    ) {
+        conn.execute(
+            "INSERT INTO static_analysis_findings
+                (id, repo_full_name, sprint_id, analyzer, rule_id, severity, category,
+                 file_path, start_line, end_line, message, fingerprint)
+             VALUES (?, 'udg-pds/spring-foo', 10, ?, ?, ?, 'bug', ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                finding_id,
+                analyzer,
+                rule_id,
+                severity,
+                file_path,
+                start,
+                end,
+                format!("Posible problema de {}", rule_id),
+                format!("fp-{}-{}", finding_id, rule_id),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO static_analysis_finding_attribution
+                (finding_id, student_id, lines_authored, total_lines, weight, sprint_id)
+             VALUES (?, ?, 1, 1, ?, 10)",
+            rusqlite::params![finding_id, student, weight],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn static_analysis_section_renders_blob_url_with_line_anchor() {
+        let conn = mk_conn();
+        seed_static_analysis_finding(
+            &conn,
+            1,
+            "u1",
+            "UnusedPrivateField",
+            "pmd",
+            "WARNING",
+            "src/main/java/com/x/UserController.java",
+            26,
+            49,
+            0.8,
+        );
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains(
+                "blob/HEAD/src/main/java/com/x/UserController.java#L26-L49"
+            ),
+            "static-analysis section must emit a clickable blob URL with the line anchor; got:\n{body}"
+        );
+        assert!(
+            body.contains("`pmd:UnusedPrivateField`"),
+            "finding line must include `analyzer:rule_id`; got:\n{body}"
+        );
+        assert!(
+            body.contains("Análisis estático del código"),
+            "Spanish section header must surface; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn static_analysis_section_omitted_when_disabled() {
+        let conn = mk_conn();
+        seed_static_analysis_finding(
+            &conn,
+            2,
+            "u1",
+            "UnusedPrivateField",
+            "pmd",
+            "WARNING",
+            "Foo.java",
+            7,
+            7,
+            1.0,
+        );
+        let tmp = TempDir::new().unwrap();
+        let report_path = tmp.path().join("report.md");
+        // _ex2 with `false` is the path `sync-reports --push` takes.
+        generate_markdown_report_to_path_ex2(&conn, 10, 1, "pds26-1a", &report_path, None, false)
+            .unwrap();
+        let body = std::fs::read_to_string(&report_path).unwrap();
+        assert!(
+            !body.contains("Análisis estático del código"),
+            "section must be stripped when include_static_analysis = false; got:\n{body}"
+        );
+        assert!(
+            !body.contains("UnusedPrivateField"),
+            "no finding must surface when disabled; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn static_analysis_caps_per_student_at_top_n() {
+        let conn = mk_conn();
+        // Seed 8 findings for one student. Default cap is 5, so 3 should
+        // be rolled up into the "… N más" line.
+        for i in 0..8 {
+            seed_static_analysis_finding(
+                &conn,
+                100 + i,
+                "u1",
+                &format!("Rule{}", i),
+                "pmd",
+                "WARNING",
+                &format!("F{}.java", i),
+                1 + i,
+                1 + i,
+                // descending weights so the highest-weight ones stay in
+                // the top-5 deterministically
+                1.0 - (i as f64) * 0.05,
+            );
+        }
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("… 3 más"),
+            "rollup line must surface the 3 truncated findings; got:\n{body}"
+        );
+        // Top 5 must still show; rule 0 is the highest weight.
+        assert!(
+            body.contains("`pmd:Rule0`"),
+            "top-weighted finding must remain in the cap; got:\n{body}"
+        );
     }
 }
