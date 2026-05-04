@@ -2303,6 +2303,97 @@ fn severity_rank(sev: &str) -> u8 {
     }
 }
 
+/// STATIC_ANALYSIS_HOTSPOT (T-SA). Per-student companion to the
+/// PMD/Checkstyle/SpotBugs scan. Sums each student's blame-attribution
+/// `weight` across this sprint's `static_analysis_findings` and fires
+/// when that sum is ≥ the configured threshold. Mirror of
+/// `architecture_hotspot`, joined on the new tables; the offender JSON
+/// includes the analyzer id, rule id, and category so the report can
+/// render which tool flagged what.
+///
+/// Severity is the maximum severity of the contributing findings;
+/// per-tool severity normalisation already happened in
+/// `static_analysis::sarif::parse`. Default threshold (`10.0`) keeps
+/// the flag effectively silent until an instructor lowers it — phase-1
+/// sign-off was "feedback only".
+fn static_analysis_hotspot(
+    conn: &Connection,
+    sprint_id: i64,
+    min_weighted: f64,
+) -> rusqlite::Result<Vec<Flag>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.student_id, f.severity, a.weight, f.analyzer, f.rule_id,
+                f.category, f.file_path
+         FROM static_analysis_finding_attribution a
+         JOIN static_analysis_findings f ON f.id = a.finding_id
+         WHERE a.sprint_id = ?",
+    )?;
+    let rows = stmt
+        .query_map([sprint_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct Acc {
+        weighted: f64,
+        worst_severity: String,
+        offenders: Vec<Value>,
+    }
+    let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
+    for (student_id, severity, weight, analyzer, rule_id, category, file_path) in rows {
+        let acc = by_student.entry(student_id).or_default();
+        acc.weighted += weight;
+        if severity_rank(&severity) > severity_rank(&acc.worst_severity) {
+            acc.worst_severity = severity.clone();
+        }
+        acc.offenders.push(json!({
+            "analyzer": analyzer,
+            "rule_id": rule_id,
+            "category": category,
+            "file_path": file_path,
+            "severity": severity,
+            "weight": weight,
+        }));
+    }
+    let mut flags = Vec::new();
+    for (student_id, acc) in by_student {
+        if acc.weighted >= min_weighted {
+            let mut offenders = acc.offenders;
+            offenders.truncate(10);
+            let severity = if acc.worst_severity.is_empty() {
+                "WARNING"
+            } else if acc.worst_severity == "CRITICAL" {
+                "CRITICAL"
+            } else if acc.worst_severity == "INFO" {
+                "INFO"
+            } else {
+                "WARNING"
+            };
+            flags.push(Flag {
+                student_id,
+                flag_type: "STATIC_ANALYSIS_HOTSPOT",
+                severity,
+                details: json!({
+                    "weighted": round3(acc.weighted),
+                    "min_weighted": min_weighted,
+                    "offenders": offenders,
+                }),
+            });
+        }
+    }
+    Ok(flags)
+}
+
 /// ESTIMATION_BIAS (T-P2.1). Per-student calibration flag based on the
 /// `student_estimation_bias` posterior fitted by the `estimation` crate.
 /// Fires WARNING when the 95 % credible interval for `β_u` excludes 0
@@ -2601,6 +2692,16 @@ pub fn detect_flags_for_sprint_id(
             conn,
             sprint_id,
             config.detector_thresholds.architecture_hotspot_min_weighted
+        )
+    );
+    total += run!(
+        "STATIC_ANALYSIS_HOTSPOT",
+        static_analysis_hotspot(
+            conn,
+            sprint_id,
+            config
+                .detector_thresholds
+                .static_analysis_hotspot_min_weighted
         )
     );
     total += run!("ESTIMATION_BIAS", estimation_bias(conn, sprint_id));
