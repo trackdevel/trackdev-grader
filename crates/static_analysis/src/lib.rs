@@ -9,6 +9,8 @@
 
 pub mod adapter;
 pub mod config;
+pub mod pmd;
+pub mod presets;
 pub mod sarif;
 
 pub use adapter::{
@@ -16,6 +18,7 @@ pub use adapter::{
     Severity,
 };
 pub use config::Rules;
+pub use pmd::{Pmd, PMD_VERSION};
 
 use std::path::Path;
 
