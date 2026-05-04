@@ -18,8 +18,24 @@ fn weighted_pr_lines_split_by_estimation_points() {
     common::seed_student(&conn, "alice");
     common::seed_student(&conn, "bob");
 
-    common::seed_task(&conn, 1, common::SPRINT_ID, Some("alice"), Some(3), "DONE", "TASK");
-    common::seed_task(&conn, 2, common::SPRINT_ID, Some("bob"), Some(1), "DONE", "TASK");
+    common::seed_task(
+        &conn,
+        1,
+        common::SPRINT_ID,
+        Some("alice"),
+        Some(3),
+        "DONE",
+        "TASK",
+    );
+    common::seed_task(
+        &conn,
+        2,
+        common::SPRINT_ID,
+        Some("bob"),
+        Some(1),
+        "DONE",
+        "TASK",
+    );
 
     common::seed_pr(
         &conn,
@@ -81,7 +97,15 @@ fn metrics_computation_is_idempotent() {
     let conn = common::make_db();
     common::seed_default_project(&conn);
     common::seed_student(&conn, "carol");
-    common::seed_task(&conn, 10, common::SPRINT_ID, Some("carol"), Some(2), "DONE", "TASK");
+    common::seed_task(
+        &conn,
+        10,
+        common::SPRINT_ID,
+        Some("carol"),
+        Some(2),
+        "DONE",
+        "TASK",
+    );
 
     compute_metrics_for_sprint_id(&conn, common::SPRINT_ID, 24).unwrap();
     compute_metrics_for_sprint_id(&conn, common::SPRINT_ID, 24).unwrap();
