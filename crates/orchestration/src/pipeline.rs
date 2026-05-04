@@ -483,8 +483,7 @@ pub fn rerun_post_collection_for_sprint_ids(
     drop(db);
 
     let workers = max_workers.unwrap_or(sprint_ids.len());
-    let results =
-        run_parallel_project_block(db_path, config, sprint_ids, workers, true)?;
+    let results = run_parallel_project_block(db_path, config, sprint_ids, workers, true)?;
     for r in &results {
         if !r.stage_errors.is_empty() {
             let failed: Vec<&str> = r.stage_errors.iter().map(|(k, _)| k.as_str()).collect();
@@ -903,10 +902,8 @@ pub fn run_pipeline(
         let post_counts = snapshot_pr_task_counts(&db.conn, &post_ids);
         let mut set = HashSet::new();
         for g in &groups {
-            let (pre_prs, pre_tasks) =
-                pre_counts.get(&g.project_id).copied().unwrap_or((0, 0));
-            let (post_prs, post_tasks) =
-                post_counts.get(&g.project_id).copied().unwrap_or((0, 0));
+            let (pre_prs, pre_tasks) = pre_counts.get(&g.project_id).copied().unwrap_or((0, 0));
+            let (post_prs, post_tasks) = post_counts.get(&g.project_id).copied().unwrap_or((0, 0));
             if post_prs > pre_prs || post_tasks > pre_tasks {
                 info!(
                     project = %g.name,
@@ -940,8 +937,7 @@ pub fn run_pipeline(
     // go/go-quick use the original project_ids_filter (full scope).
     if !opts.skip_repos && !opts.skip_github {
         if variant == PipelineVariant::RunAll {
-            let new_data_ids: Vec<i64> =
-                projects_with_new_data.iter().copied().collect();
+            let new_data_ids: Vec<i64> = projects_with_new_data.iter().copied().collect();
             clone_repos_from_db(&db, &opts.entregues_dir, Some(&new_data_ids))?;
         } else {
             clone_repos_from_db(&db, &opts.entregues_dir, project_ids_filter)?;
@@ -1445,10 +1441,8 @@ mod tests {
     #[test]
     fn resolve_project_ids_from_names_finds_existing() {
         let conn = mk_mem_conn();
-        conn.execute_batch(
-            "INSERT INTO projects VALUES (1, 'alpha'), (2, 'beta');",
-        )
-        .unwrap();
+        conn.execute_batch("INSERT INTO projects VALUES (1, 'alpha'), (2, 'beta');")
+            .unwrap();
         let names = vec!["alpha".to_string()];
         let ids = resolve_project_ids_from_names(&conn, Some(&names));
         assert_eq!(ids, vec![1]);
@@ -1457,10 +1451,8 @@ mod tests {
     #[test]
     fn resolve_project_ids_from_names_returns_all_when_no_filter() {
         let conn = mk_mem_conn();
-        conn.execute_batch(
-            "INSERT INTO projects VALUES (1, 'alpha'), (2, 'beta');",
-        )
-        .unwrap();
+        conn.execute_batch("INSERT INTO projects VALUES (1, 'alpha'), (2, 'beta');")
+            .unwrap();
         let mut ids = resolve_project_ids_from_names(&conn, None);
         ids.sort();
         assert_eq!(ids, vec![1, 2]);
