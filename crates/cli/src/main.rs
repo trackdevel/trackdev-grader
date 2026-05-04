@@ -14,8 +14,10 @@ use tracing_subscriber::EnvFilter;
 
 use sprint_grader_collect::{run_collection, CollectOpts};
 use sprint_grader_core::{Config, Database};
-use sprint_grader_orchestration::{android_repo_root, publish_report_updates, repo_has_report_changes};
 use sprint_grader_orchestration::pipeline::resolve_all_sprint_tuples;
+use sprint_grader_orchestration::{
+    android_repo_root, publish_report_updates, repo_has_report_changes,
+};
 
 fn parse_project_filter(projects: Option<String>) -> Option<Vec<String>> {
     projects.map(|s| {
@@ -511,7 +513,11 @@ fn main() -> Result<()> {
                 // `--force --pr 42` only touches that single PR and leaves
                 // other rows intact.
                 if force && pr.is_empty() {
-                    let phs = all_sprint_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    let phs = all_sprint_ids
+                        .iter()
+                        .map(|_| "?")
+                        .collect::<Vec<_>>()
+                        .join(",");
                     db.conn
                         .execute(
                             &format!("DELETE FROM pr_compilation WHERE sprint_id IN ({phs})"),
@@ -532,7 +538,10 @@ fn main() -> Result<()> {
                             rusqlite::params_from_iter(all_sprint_ids.iter()),
                         )
                         .context("failed to purge compilation_failure_summary for --force")?;
-                    info!(sprints = all_sprint_ids.len(), "purged stale compilation rows for --force recompile");
+                    info!(
+                        sprints = all_sprint_ids.len(),
+                        "purged stale compilation rows for --force recompile"
+                    );
                 }
                 sprint_grader_compile::check_compilations_parallel(
                     &db.conn,
@@ -557,13 +566,10 @@ fn main() -> Result<()> {
                 // requiring a full `analyze` re-run.
                 if force {
                     for sid in &all_sprint_ids {
-                        sprint_grader_analyze::redetect_compile_flags_for_sprint_id(
-                            &db.conn,
-                            *sid,
-                        )
-                        .with_context(|| {
-                            format!("compile flag redetection failed for sprint_id {sid}")
-                        })?;
+                        sprint_grader_analyze::redetect_compile_flags_for_sprint_id(&db.conn, *sid)
+                            .with_context(|| {
+                                format!("compile flag redetection failed for sprint_id {sid}")
+                            })?;
                     }
                 }
                 // Kill gradle daemons spawned during this run. The pre-run sweep
@@ -589,9 +595,10 @@ fn main() -> Result<()> {
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
             for sid in groups.iter().flat_map(|g| g.sprint_ids.iter().copied()) {
-                let n =
-                    sprint_grader_analyze::flags::detect_flags_for_sprint_id(&db.conn, sid, &config)
-                        .with_context(|| format!("flags failed for sprint_id {sid}"))?;
+                let n = sprint_grader_analyze::flags::detect_flags_for_sprint_id(
+                    &db.conn, sid, &config,
+                )
+                .with_context(|| format!("flags failed for sprint_id {sid}"))?;
                 info!(sprint_id = sid, flags = n, "flags recomputed");
             }
         }
@@ -798,11 +805,9 @@ fn main() -> Result<()> {
                 for name in names {
                     let pid: Option<i64> = db
                         .conn
-                        .query_row(
-                            "SELECT id FROM projects WHERE name = ?",
-                            [name],
-                            |r| r.get::<_, i64>(0),
-                        )
+                        .query_row("SELECT id FROM projects WHERE name = ?", [name], |r| {
+                            r.get::<_, i64>(0)
+                        })
                         .ok();
                     if let Some(pid) = pid {
                         ids.push(pid);
@@ -866,10 +871,7 @@ fn main() -> Result<()> {
                     &report_path,
                 )
                 .with_context(|| format!("Markdown report failed for {}", report_path.display()))?;
-                repo_reports
-                    .entry(repo_root)
-                    .or_default()
-                    .push(report_path);
+                repo_reports.entry(repo_root).or_default().push(report_path);
             }
 
             if push {
@@ -880,9 +882,8 @@ fn main() -> Result<()> {
                     {
                         continue;
                     }
-                    publish_report_updates(repo_root, report_paths).with_context(|| {
-                        format!("publish failed for {}", repo_root.display())
-                    })?;
+                    publish_report_updates(repo_root, report_paths)
+                        .with_context(|| format!("publish failed for {}", repo_root.display()))?;
                     published_repos += 1;
                 }
                 info!(published_repos, "reports pushed");
