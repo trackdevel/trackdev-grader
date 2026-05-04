@@ -105,7 +105,13 @@ mod row_aliases {
         Option<String>,
         Option<String>,
     );
-    pub type ApprovedBrokenRow = (String, Option<String>, Option<String>, Option<i64>, Option<String>);
+    pub type ApprovedBrokenRow = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    );
     pub type SuspectFastTaskRow = (
         Option<i64>,
         Option<String>,
