@@ -63,6 +63,10 @@ pub struct PipelineOptions {
     pub skip_github: bool,
     pub skip_repos: bool,
     pub skip_reports: bool,
+    /// Bypass the static-analysis (PMD/Checkstyle/SpotBugs) stage for
+    /// this run. CLI defaults: `false` for run-all and go, `true` for
+    /// go-quick (parallels how go-quick skips the LLM judge).
+    pub skip_static_analysis: bool,
     pub force_pr_refresh: bool,
     pub max_workers: Option<usize>,
 }
@@ -77,6 +81,7 @@ impl PipelineOptions {
             skip_github: false,
             skip_repos: false,
             skip_reports: false,
+            skip_static_analysis: false,
             force_pr_refresh: false,
             max_workers: None,
         }
@@ -1120,6 +1125,55 @@ pub fn run_pipeline(
         info!(
             path = %arch_rules_path.display(),
             "architecture.toml absent — skipping architecture scan"
+        );
+    }
+
+    // T-SA: Java static-analysis (PMD/Checkstyle/SpotBugs). Same gating
+    // as architecture: present `static_analysis.toml` → run; absent →
+    // silent skip. go-quick further skips by default via
+    // `opts.skip_static_analysis = true` (parallels how go-quick skips
+    // the LLM judge — adds 10–20 min per run otherwise).
+    let sa_rules_path = opts.config_dir.join("static_analysis.toml");
+    if opts.skip_static_analysis {
+        info!(
+            variant = variant.name(),
+            "static-analysis stage skipped via skip_static_analysis"
+        );
+    } else if sa_rules_path.is_file() {
+        match sprint_grader_static_analysis::Rules::load(&sa_rules_path) {
+            Ok(sa_rules) => {
+                for g in groups
+                    .iter()
+                    .filter(|g| projects_with_new_data.contains(&g.project_id))
+                {
+                    let project_root = opts.entregues_dir.join(&g.name);
+                    for sid in &g.sprint_ids {
+                        if let Err(e) = sprint_grader_static_analysis::scan_project_to_db(
+                            &db.conn,
+                            &project_root,
+                            *sid,
+                            &sa_rules,
+                        ) {
+                            warn!(
+                                project = %g.name,
+                                sprint_id = sid,
+                                error = %e,
+                                "static-analysis scan failed"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => warn!(
+                error = %e,
+                path = %sa_rules_path.display(),
+                "static-analysis rules load failed"
+            ),
+        }
+    } else {
+        info!(
+            path = %sa_rules_path.display(),
+            "static_analysis.toml absent — skipping static-analysis scan"
         );
     }
 

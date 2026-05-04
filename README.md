@@ -83,6 +83,7 @@ runnable and testable.
 | [`curriculum`](crates/curriculum) | knowledge base | Parses LaTeX slide decks to extract the set of concepts / imports taught in each sprint. Used downstream by `ai_detect` to flag code that uses material the team hasn't been taught yet. |
 | [`repo_analysis`](crates/repo_analysis) | 6 | Clusters tasks by `(stack, layer, action)` with MAD-based outlier detection; classifies merged PRs into submission timing tiers (early / on-time / late / cramming). |
 | [`ai_detect`](crates/ai_detect) | 7 | Behavioural signals (single-commit dumps, fix-up patterns, line-per-minute productivity), per-student stylometric baseline + deviation, curriculum violations, text-consistency score, and Bayesian fusion into per-PR / per-file / per-student AI-usage probabilities. |
+| [`static_analysis`](crates/static_analysis) | 5c | Java static-analysis stage. Shells PMD / Checkstyle (T6 adds SpotBugs + FindSecBugs), parses SARIF 2.1.0, normalises severity per analyzer, and writes `static_analysis_findings` + `static_analysis_finding_attribution` (per-student blame weights). Gated on `config/static_analysis.toml`; absent file → silent skip. |
 | [`report`](crates/report) | 8 | Per-sprint Excel workbooks (one per team + cross-team summary) and a multi-sprint Markdown `REPORT.md` committed back into each team's Android repo with inline SVG sparklines. |
 | [`orchestration`](crates/orchestration) | glue | The three full-pipeline variants (`run-all`, `go`, `go-quick`), parallel sprint execution via `rayon`, cache purge, the `diff-db` table-by-table dual-run checker, and the `sync-reports` publisher. |
 | [`cli`](crates/cli) | binary | The `sprint-grader` clap CLI exposing every stage as its own subcommand plus the full-pipeline aggregates. |
@@ -403,6 +404,7 @@ Stage commands (each runs one analysis stage against sprints with
 | `analyze` | metrics inputs | `student_sprint_metrics`, `flags` |
 | `inequality` | `student_sprint_metrics` | `team_sprint_inequality`, `student_sprint_contribution`, `student_trajectory` |
 | `quality` | repo clones | `method_metrics`, `satd_items`, `student_sprint_quality` |
+| `static-analysis [--no-spotbugs]` | repo clones | `static_analysis_findings`, `static_analysis_finding_attribution`, `static_analysis_runs` (requires `config/static_analysis.toml`) |
 | `process` | PR + commit data | `sprint_planning_quality`, `pr_regularity`, `student_sprint_temporal`, `team_sprint_collaboration` |
 | `evaluate` | `pull_requests` | `pr_doc_evaluation`, `task_description_evaluation` (uses Claude API if available) |
 | `task-similarity` | `tasks`, `pr_line_metrics` | `task_similarity_groups`, `task_group_members` |
@@ -415,9 +417,9 @@ Orchestration / utility:
 
 | Command | Purpose |
 |---|---|
-| `run-all` | Additive full pipeline; no AI detection. |
-| `go [--dry-run] [--require-clean-tree]` | End-of-sprint: purge → re-collect → full pipeline + AI detection. `--dry-run` previews the cascade purge step (per-table row counts) and exits before any pipeline stage runs. `--require-clean-tree` refuses to start if `git status --porcelain` reports a dirty working tree. |
-| `go-quick [--dry-run] [--require-clean-tree]` | Same as `go`, but PR doc evaluation always runs heuristic-only (no Claude calls). Same `--dry-run` / `--require-clean-tree` semantics as `go`. |
+| `run-all [--skip-static-analysis]` | Additive full pipeline; no AI detection. Static-analysis stage runs when `config/static_analysis.toml` exists; pass the flag to bypass. |
+| `go [--dry-run] [--require-clean-tree] [--skip-static-analysis]` | End-of-sprint: purge → re-collect → full pipeline + AI detection. `--dry-run` previews the cascade purge step (per-table row counts) and exits before any pipeline stage runs. `--require-clean-tree` refuses to start if `git status --porcelain` reports a dirty working tree. |
+| `go-quick [--dry-run] [--require-clean-tree] [--run-static-analysis]` | Same as `go`, but PR doc evaluation always runs heuristic-only (no Claude calls) and the static-analysis stage is skipped by default — pass `--run-static-analysis` to opt in. Same `--dry-run` / `--require-clean-tree` semantics as `go`. |
 | `sync-reports [--push]` | Regenerate `REPORT.md` for every sprint up to today; optionally commit + push to each team's `main`. |
 | `purge-cache --line-metrics --survival --compilation --doc-eval [--dry-run] [--require-clean-tree]` | Selectively drop derived rows so the next run recomputes them. `--dry-run` rewrites each `DELETE` as a `SELECT COUNT(*)` over the same predicate and prints projected row counts table-by-table without modifying the DB. `--require-clean-tree` is the same guard as on `go`. |
 | `debug-pr-lines` | Dump LAT/LAR/LS computation for individual PRs (diagnostics). |
