@@ -60,10 +60,8 @@ pub(crate) fn enrich_flag_details(
     details: Option<&str>,
 ) -> Option<String> {
     match flag_type {
-        "TEAM_INEQUALITY" => {
-            enrich_team_inequality_details(conn, sprint_id, student_id, details?)
-                .and_then(|v| serde_json::to_string(&v).ok())
-        }
+        "TEAM_INEQUALITY" => enrich_team_inequality_details(conn, sprint_id, student_id, details?)
+            .and_then(|v| serde_json::to_string(&v).ok()),
         "APPROVED_BROKEN_PR" => enrich_approved_broken_pr_details(conn, details?)
             .and_then(|v| serde_json::to_string(&v).ok()),
         _ => None,
@@ -83,7 +81,12 @@ fn enrich_approved_broken_pr_details(conn: &Connection, details: &str) -> Option
         .query_row(
             "SELECT url, repo_full_name FROM pull_requests WHERE id = ? LIMIT 1",
             [&pr_id],
-            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
         .ok()?;
     let obj = parsed.as_object_mut()?;
@@ -378,7 +381,10 @@ fn render_single_commit_dump(v: &Value) -> RenderedFlagDetails {
     let (plain_pr, md_pr, url) = pr_reference(v, true);
     let total_lines = number_field(v, "total_lines");
     let plain = match total_lines {
-        Some(n) => format!("Single-commit dump: {plain_pr} ({} total lines).", fmt_num(n)),
+        Some(n) => format!(
+            "Single-commit dump: {plain_pr} ({} total lines).",
+            fmt_num(n)
+        ),
         None => format!("Single-commit dump: {plain_pr}."),
     };
     let markdown = match total_lines {

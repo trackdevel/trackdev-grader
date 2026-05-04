@@ -1347,11 +1347,7 @@ Severity bands per `architecture.toml`. Per-student attribution \
                         }
                     };
                     let _ = writeln!(buf, "  - {}", cell);
-                    if let Some(prose) = expl
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                    {
+                    if let Some(prose) = expl.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                         let _ = writeln!(buf, "    - {}", md_escape(prose));
                     }
                 }
@@ -1992,11 +1988,8 @@ fn write_section_b(
                 } else {
                     None
                 };
-                let density_cell = fmt_density_dev(density_mad_z(
-                    pr_density,
-                    pr_density_median,
-                    pr_density_mad,
-                ));
+                let density_cell =
+                    fmt_density_dev(density_mad_z(pr_density, pr_density_median, pr_density_mad));
                 // push_table_row escapes pipes, but we want the link to stay
                 // intact — emit by hand for this row.
                 let _ = writeln!(
@@ -2101,8 +2094,7 @@ fn write_student_architecture_block(buf: &mut String, violations: &[AttributedAr
     rules.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
 
     for (rule, files) in rules {
-        let unique_files: HashSet<&str> =
-            files.iter().map(|v| v.file_path.as_str()).collect();
+        let unique_files: HashSet<&str> = files.iter().map(|v| v.file_path.as_str()).collect();
         let _ = writeln!(
             buf,
             "- {} — {} occurrence(s) across {} file(s)",
@@ -3542,9 +3534,7 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         // Single-line violation: `:L13` suffix and `#L13` anchor.
         assert!(
-            body.contains(
-                "[`A.java` :L13](https://github.com/udg/spring-foo/blob/HEAD/A.java#L13"
-            ),
+            body.contains("[`A.java` :L13](https://github.com/udg/spring-foo/blob/HEAD/A.java#L13"),
             "single-line link must carry :L13 suffix and #L13 anchor; got:\n{body}"
         );
         // Range violation: `:L26-L49` suffix and `#L26-L49` anchor.
@@ -3556,9 +3546,7 @@ mod tests {
         );
         // Explanation prose surfaces as a nested bullet.
         assert!(
-            body.contains(
-                "    - API URL should use BuildConfig instead of a literal string."
-            ),
+            body.contains("    - API URL should use BuildConfig instead of a literal string."),
             "first explanation must render as a nested bullet; got:\n{body}"
         );
         assert!(
