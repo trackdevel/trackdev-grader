@@ -8,6 +8,7 @@
 //! pipeline+CLI, report rendering, and SpotBugs.
 
 pub mod adapter;
+pub mod checkstyle;
 pub mod config;
 pub mod pmd;
 pub mod presets;
@@ -17,6 +18,7 @@ pub use adapter::{
     Analyzer, AnalyzerConfig, AnalyzerInput, AnalyzerOutput, AnalyzerStatus, Category, Finding,
     Severity,
 };
+pub use checkstyle::{Checkstyle, CHECKSTYLE_VERSION};
 pub use config::Rules;
 pub use pmd::{Pmd, PMD_VERSION};
 

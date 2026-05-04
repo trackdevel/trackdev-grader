@@ -38,6 +38,29 @@ pub fn resolve_pmd_ruleset(preset: &str) -> Result<NamedTempFile> {
     write_to_temp(body, ".xml")
 }
 
+// --- Checkstyle -------------------------------------------------------------
+
+const CHECKSTYLE_BEGINNER_XML: &str = include_str!("presets/checkstyle/beginner.xml");
+const CHECKSTYLE_STANDARD_XML: &str = include_str!("presets/checkstyle/standard.xml");
+const CHECKSTYLE_STRICT_XML: &str = include_str!("presets/checkstyle/strict.xml");
+
+/// Resolve a Checkstyle `preset` reference to a freshly-materialised XML
+/// file. Same lifetime semantics as `resolve_pmd_ruleset`.
+pub fn resolve_checkstyle_ruleset(preset: &str) -> Result<NamedTempFile> {
+    let body = match preset {
+        "beginner" => CHECKSTYLE_BEGINNER_XML,
+        "standard" => CHECKSTYLE_STANDARD_XML,
+        "strict" => CHECKSTYLE_STRICT_XML,
+        other => {
+            return Err(anyhow!(
+                "unknown Checkstyle preset '{}'; expected one of: beginner, standard, strict",
+                other
+            ));
+        }
+    };
+    write_to_temp(body, ".xml")
+}
+
 fn write_to_temp(body: &str, suffix: &str) -> Result<NamedTempFile> {
     let mut tmp = tempfile::Builder::new()
         .prefix("trackdev-static-analysis-")
@@ -70,5 +93,25 @@ mod tests {
     fn unknown_preset_is_rejected() {
         let err = resolve_pmd_ruleset("nonsense").unwrap_err();
         assert!(err.to_string().contains("unknown PMD preset"));
+    }
+
+    #[test]
+    fn checkstyle_presets_are_non_empty_xml() {
+        assert!(CHECKSTYLE_BEGINNER_XML.contains("Checker"));
+        assert!(CHECKSTYLE_STANDARD_XML.contains("TreeWalker"));
+        assert!(CHECKSTYLE_STRICT_XML.contains("CyclomaticComplexity"));
+    }
+
+    #[test]
+    fn resolve_checkstyle_ruleset_writes_to_disk() {
+        let tmp = resolve_checkstyle_ruleset("beginner").unwrap();
+        let body = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(body.contains("Checker"));
+    }
+
+    #[test]
+    fn unknown_checkstyle_preset_is_rejected() {
+        let err = resolve_checkstyle_ruleset("zen").unwrap_err();
+        assert!(err.to_string().contains("unknown Checkstyle preset"));
     }
 }

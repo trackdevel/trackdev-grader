@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+    "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+    "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<!--
+  Beginner-friendly Checkstyle config for trackdev-grader. Hand-curated
+  subset that catches the highest signal-to-noise issues for first-year
+  Software Engineering students: braces, naming, and missing public
+  Javadoc. No layout, line-length, or complexity rules — those drown
+  beginners and don't track well to actual code-quality gains.
+-->
+<module name="Checker">
+    <property name="charset" value="UTF-8"/>
+    <property name="severity" value="warning"/>
+    <property name="fileExtensions" value="java"/>
+
+    <module name="TreeWalker">
+        <!-- Braces -->
+        <module name="LeftCurly"/>
+        <module name="RightCurly"/>
+        <module name="NeedBraces"/>
+
+        <!-- Naming -->
+        <module name="TypeName"/>
+        <module name="MemberName"/>
+        <module name="MethodName"/>
+        <module name="ParameterName"/>
+        <module name="LocalVariableName"/>
+        <module name="ConstantName"/>
+
+        <!-- Public Javadoc only -->
+        <module name="MissingJavadocMethod">
+            <property name="scope" value="public"/>
+            <property name="allowMissingPropertyJavadoc" value="true"/>
+            <property name="ignoreMethodNamesRegex" value="^main$|^.*Test$"/>
+        </module>
+    </module>
+</module>
