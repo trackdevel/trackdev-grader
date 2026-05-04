@@ -1226,8 +1226,7 @@ contribution_imbalance_stddev = 1.5
     fn missing_evaluate_model_id_rejects_with_clear_message() {
         let tmp = tempfile::tempdir().unwrap();
         // Has [architecture] model_id but no [evaluate] block at all.
-        let body =
-            format!("{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nmodel_id = \"x\"\n");
+        let body = format!("{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nmodel_id = \"x\"\n");
         write_config(tmp.path(), &body);
         let err = Config::load(tmp.path()).expect_err("must reject");
         let msg = err.to_string();
@@ -1245,7 +1244,9 @@ contribution_imbalance_stddev = 1.5
         );
         write_config(tmp.path(), &body);
         let err = Config::load(tmp.path()).expect_err("must reject empty");
-        assert!(err.to_string().contains("[architecture] model_id must not be empty"));
+        assert!(err
+            .to_string()
+            .contains("[architecture] model_id must not be empty"));
     }
 
     #[test]
@@ -1256,7 +1257,9 @@ contribution_imbalance_stddev = 1.5
         );
         write_config(tmp.path(), &body);
         let err = Config::load(tmp.path()).expect_err("must reject empty");
-        assert!(err.to_string().contains("[evaluate] model_id must not be empty"));
+        assert!(err
+            .to_string()
+            .contains("[evaluate] model_id must not be empty"));
     }
 
     #[test]
