@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<ruleset name="static-analysis-standard-pmd"
+         xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
+    <description>
+        Standard Java rules for trackdev-grader: full bestpractices and
+        errorprone categories. References the persistent category XMLs
+        directly so this ruleset works across PMD 7.x minor versions
+        (PMD 7.10+ removed the `quickstart.xml` meta-ruleset).
+    </description>
+
+    <rule ref="category/java/bestpractices.xml"/>
+    <rule ref="category/java/errorprone.xml"/>
+</ruleset>

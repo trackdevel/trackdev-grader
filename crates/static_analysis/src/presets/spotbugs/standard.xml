@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Standard SpotBugs filter for trackdev-grader. Adds STYLE and PERFORMANCE
+  to the beginner CORRECTNESS set.
+-->
+<FindBugsFilter>
+    <Match>
+        <Bug category="CORRECTNESS"/>
+    </Match>
+    <Match>
+        <Bug category="STYLE"/>
+    </Match>
+    <Match>
+        <Bug category="PERFORMANCE"/>
+    </Match>
+</FindBugsFilter>

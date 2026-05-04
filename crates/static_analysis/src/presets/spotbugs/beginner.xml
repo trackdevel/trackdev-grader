@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Beginner SpotBugs filter for trackdev-grader. Includes only the
+  CORRECTNESS category — the smallest, highest-signal subset for first-year
+  Software Engineering students. Produces FindBugs-style results that
+  SpotBugs 4.x emits as SARIF.
+-->
+<FindBugsFilter>
+    <Match>
+        <Bug category="CORRECTNESS"/>
+    </Match>
+</FindBugsFilter>

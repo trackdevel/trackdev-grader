@@ -1,0 +1,90 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+    "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+    "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<!--
+  Strict Checkstyle config for trackdev-grader: standard preset plus
+  cyclomatic-complexity, length, encapsulation, and full Javadoc rules.
+  Use only on courses where instructors have opted in to a rigorous bar
+  — this set will be loud on first-year code.
+-->
+<module name="Checker">
+    <property name="charset" value="UTF-8"/>
+    <property name="severity" value="warning"/>
+    <property name="fileExtensions" value="java"/>
+
+    <module name="LineLength">
+        <property name="max" value="120"/>
+        <property name="ignorePattern" value="^package.*|^import.*|a href|href|http://|https://|ftp://"/>
+    </module>
+    <module name="FileLength">
+        <property name="max" value="2000"/>
+    </module>
+
+    <module name="TreeWalker">
+        <!-- Imports -->
+        <module name="UnusedImports"/>
+        <module name="RedundantImport"/>
+        <module name="AvoidStarImport"/>
+
+        <!-- Braces -->
+        <module name="LeftCurly"/>
+        <module name="RightCurly"/>
+        <module name="NeedBraces"/>
+
+        <!-- Naming -->
+        <module name="TypeName"/>
+        <module name="MemberName"/>
+        <module name="MethodName"/>
+        <module name="ParameterName"/>
+        <module name="LocalVariableName"/>
+        <module name="ConstantName"/>
+        <module name="PackageName"/>
+
+        <!-- Whitespace -->
+        <module name="WhitespaceAfter"/>
+        <module name="WhitespaceAround"/>
+        <module name="GenericWhitespace"/>
+
+        <!-- Encapsulation -->
+        <module name="VisibilityModifier"/>
+        <module name="HiddenField">
+            <property name="ignoreConstructorParameter" value="true"/>
+            <property name="ignoreSetter" value="true"/>
+        </module>
+
+        <!-- Complexity / size -->
+        <module name="CyclomaticComplexity">
+            <property name="max" value="12"/>
+        </module>
+        <module name="MethodLength">
+            <property name="max" value="80"/>
+        </module>
+        <module name="ParameterNumber">
+            <property name="max" value="7"/>
+        </module>
+
+        <!-- Code health -->
+        <module name="EmptyBlock"/>
+        <module name="EmptyStatement"/>
+        <module name="MagicNumber">
+            <property name="ignoreNumbers" value="-1, 0, 1, 2"/>
+        </module>
+        <module name="MissingSwitchDefault"/>
+        <module name="FallThrough"/>
+        <module name="EqualsHashCode"/>
+        <module name="StringLiteralEquality"/>
+
+        <!-- Full Javadoc -->
+        <module name="MissingJavadocMethod">
+            <property name="scope" value="protected"/>
+            <property name="ignoreMethodNamesRegex" value="^main$|^.*Test$"/>
+        </module>
+        <module name="MissingJavadocType">
+            <property name="scope" value="protected"/>
+        </module>
+        <module name="JavadocVariable">
+            <property name="accessModifiers" value="public, protected"/>
+        </module>
+    </module>
+</module>

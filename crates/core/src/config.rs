@@ -364,6 +364,14 @@ pub struct DetectorThresholdsConfig {
     /// default 2.0 picks up students who own multiple violations or a clear
     /// majority share of one severe span.
     pub architecture_hotspot_min_weighted: f64,
+    /// `STATIC_ANALYSIS_HOTSPOT` (T-SA): per-student companion to the
+    /// PMD/Checkstyle/SpotBugs scan. Same semantics as
+    /// `architecture_hotspot_min_weighted` but counted against
+    /// `static_analysis_finding_attribution`. Default 10.0 keeps the flag
+    /// effectively silent — phase-1 sign-off was "feedback only", and
+    /// `REPORT.md` is committed back to team repos. Lower this in
+    /// `course.toml [detector_thresholds]` when ready to grade.
+    pub static_analysis_hotspot_min_weighted: f64,
 }
 
 impl Default for DetectorThresholdsConfig {
@@ -383,6 +391,9 @@ impl Default for DetectorThresholdsConfig {
             bulk_rename_adds_dels_ratio: 0.8,
             bulk_rename_line_floor: 50,
             architecture_hotspot_min_weighted: 2.0,
+            // Phase-1 default: feedback only. The flag rarely fires until
+            // an instructor lowers this knob in course.toml.
+            static_analysis_hotspot_min_weighted: 10.0,
         }
     }
 }
@@ -629,6 +640,7 @@ struct RawDetectorThresholds {
     bulk_rename_adds_dels_ratio: Option<f64>,
     bulk_rename_line_floor: Option<i64>,
     architecture_hotspot_min_weighted: Option<f64>,
+    static_analysis_hotspot_min_weighted: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -950,6 +962,10 @@ impl Config {
                 .detector_thresholds
                 .architecture_hotspot_min_weighted
                 .unwrap_or(detector_defaults.architecture_hotspot_min_weighted),
+            static_analysis_hotspot_min_weighted: raw
+                .detector_thresholds
+                .static_analysis_hotspot_min_weighted
+                .unwrap_or(detector_defaults.static_analysis_hotspot_min_weighted),
         };
 
         Ok(Config {

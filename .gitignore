@@ -17,3 +17,7 @@ plan*/
 .claude/
 .mcp.json
 tmp/
+# Static-analysis vendored JARs/distributions installed by
+# scripts/install-analyzers.sh (~150 MB; not committed by default per
+# trackdev_static_analysis_phase2_plan.md §2 "Vendoring policy" fallback).
+crates/static_analysis/vendor/

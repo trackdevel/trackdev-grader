@@ -195,6 +195,19 @@ enum Command {
         #[command(flatten)]
         projects: ProjectsArg,
     },
+    /// Run Java static analyzers (PMD, Checkstyle, SpotBugs) and
+    /// attribute findings via git blame. Reads `config/static_analysis.toml`
+    /// — absent file is a hard error here (unlike the orchestrated runs,
+    /// which silently skip the stage when the config file is missing).
+    StaticAnalysis {
+        #[command(flatten)]
+        projects: ProjectsArg,
+        /// Skip SpotBugs even if `static_analysis.toml` enables it.
+        /// Useful for fast iteration since SpotBugs is the only analyzer
+        /// that requires compiled `.class` files.
+        #[arg(long)]
+        no_spotbugs: bool,
+    },
     /// Process metrics (planning, regularity, temporal, collaboration).
     Process {
         #[command(flatten)]
@@ -271,6 +284,10 @@ enum Command {
         skip_github: bool,
         #[arg(long)]
         skip_repos: bool,
+        /// Skip the Java static-analysis (PMD/Checkstyle/SpotBugs) stage.
+        /// Default: stage runs when `config/static_analysis.toml` exists.
+        #[arg(long)]
+        skip_static_analysis: bool,
         #[arg(long)]
         force_pr_refresh: bool,
     },
@@ -286,6 +303,10 @@ enum Command {
         skip_perplexity: bool,
         #[arg(long)]
         skip_llm_judge: bool,
+        /// Skip the Java static-analysis (PMD/Checkstyle/SpotBugs) stage.
+        /// Default: stage runs when `config/static_analysis.toml` exists.
+        #[arg(long)]
+        skip_static_analysis: bool,
         #[arg(long)]
         force_pr_refresh: bool,
         /// Preview the purge step's effect and exit before any pipeline
@@ -309,6 +330,12 @@ enum Command {
         skip_perplexity: bool,
         #[arg(long)]
         skip_llm_judge: bool,
+        /// Run the Java static-analysis stage even on go-quick.
+        /// Default: go-quick **skips** static analysis to keep iteration
+        /// fast (the stage adds 10–20 minutes per run); pass this to
+        /// force it on.
+        #[arg(long)]
+        run_static_analysis: bool,
         #[arg(long)]
         force_pr_refresh: bool,
         /// Preview the purge step's effect and exit before any pipeline
@@ -647,6 +674,37 @@ fn main() -> Result<()> {
                     .with_context(|| format!("quality failed for sprint_id {sid}"))?;
             }
         }
+        Command::StaticAnalysis {
+            projects,
+            no_spotbugs,
+        } => {
+            let filter = parse_project_filter(projects.projects);
+            let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
+            let rules_path = config_dir.join("static_analysis.toml");
+            let mut rules =
+                sprint_grader_static_analysis::Rules::load(&rules_path).with_context(|| {
+                    format!(
+                        "loading {} (this subcommand requires the file to exist; \
+                         the orchestrated runs silently skip when it's absent)",
+                        rules_path.display()
+                    )
+                })?;
+            if no_spotbugs {
+                rules.spotbugs.enabled = false;
+            }
+            for g in &groups {
+                let project_root = entregues_dir.join(&g.name);
+                for sid in &g.sprint_ids {
+                    sprint_grader_static_analysis::scan_project_to_db(
+                        &db.conn,
+                        &project_root,
+                        *sid,
+                        &rules,
+                    )
+                    .with_context(|| format!("static-analysis failed for sprint_id {sid}"))?;
+                }
+            }
+        }
         Command::Process { projects } => {
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
@@ -920,6 +978,7 @@ fn main() -> Result<()> {
             projects,
             skip_github,
             skip_repos,
+            skip_static_analysis,
             force_pr_refresh,
         } => {
             drop(db);
@@ -931,6 +990,7 @@ fn main() -> Result<()> {
                 skip_github,
                 skip_repos,
                 skip_reports: false,
+                skip_static_analysis,
                 force_pr_refresh,
                 max_workers: None,
             };
@@ -948,6 +1008,7 @@ fn main() -> Result<()> {
             skip_repos,
             skip_perplexity: _,
             skip_llm_judge: _,
+            skip_static_analysis,
             force_pr_refresh,
             dry_run,
             require_clean_tree,
@@ -973,6 +1034,7 @@ fn main() -> Result<()> {
                 skip_github,
                 skip_repos,
                 skip_reports: false,
+                skip_static_analysis,
                 force_pr_refresh,
                 max_workers: None,
             };
@@ -990,6 +1052,7 @@ fn main() -> Result<()> {
             skip_repos,
             skip_perplexity: _,
             skip_llm_judge: _,
+            run_static_analysis,
             force_pr_refresh,
             dry_run,
             require_clean_tree,
@@ -1015,6 +1078,9 @@ fn main() -> Result<()> {
                 skip_github,
                 skip_repos,
                 skip_reports: false,
+                // go-quick skips static analysis by default; --run-static-analysis
+                // overrides. Mirrors how go-quick skips the LLM judge by default.
+                skip_static_analysis: !run_static_analysis,
                 force_pr_refresh,
                 max_workers: None,
             };

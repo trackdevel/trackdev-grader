@@ -76,12 +76,17 @@ pub fn sync_reports_through_sprint(
             continue;
         };
         let report_path = repo_root.join("REPORT.md");
-        sprint_grader_report::generate_markdown_report_multi_to_path(
+        // T-SA: sync-reports publishes to team repos. Strip the
+        // static-analysis section regardless of `--push` — the file we
+        // write here is what students see in their cloned working tree
+        // even when push is off (instructor-only by phase-1 sign-off).
+        sprint_grader_report::generate_markdown_report_multi_to_path_ex(
             &db.conn,
             g.project_id,
             &g.name,
             &g.sprint_ids,
             &report_path,
+            false,
         )
         .with_context(|| format!("failed to generate {}", report_path.display()))?;
         generated_reports.push(report_path.clone());

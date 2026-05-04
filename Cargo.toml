@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli", "crates/collect", "crates/survival", "crates/compile_stage", "crates/analyze", "crates/evaluate", "crates/quality", "crates/process_stage", "crates/curriculum", "crates/repo_analysis", "crates/ai_detect", "crates/architecture", "crates/architecture_llm", "crates/estimation", "crates/report", "crates/orchestration", "crates/blackbox"]
+members = ["crates/core", "crates/cli", "crates/collect", "crates/survival", "crates/compile_stage", "crates/analyze", "crates/evaluate", "crates/quality", "crates/process_stage", "crates/curriculum", "crates/repo_analysis", "crates/ai_detect", "crates/architecture", "crates/architecture_llm", "crates/estimation", "crates/report", "crates/orchestration", "crates/blackbox", "crates/static_analysis"]
 
 [workspace.package]
 version = "0.1.0"
