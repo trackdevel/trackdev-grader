@@ -200,10 +200,7 @@ fn kill_descendant_tree(_root_pid: u32) {}
 /// build (gradle, pitest) blocks on `write()` after ~64 KB of output and
 /// we report a spurious timeout.
 #[cfg(test)]
-fn spawn_tail_reader<R: Read + Send + 'static>(
-    pipe: R,
-    max_bytes: usize,
-) -> JoinHandle<Vec<u8>> {
+fn spawn_tail_reader<R: Read + Send + 'static>(pipe: R, max_bytes: usize) -> JoinHandle<Vec<u8>> {
     spawn_tail_reader_tagged::<R>(None, pipe, max_bytes)
 }
 
@@ -1292,12 +1289,7 @@ pub fn check_compilations_parallel(
                     guard
                         .iter()
                         .map(|(pr_id, (repo, num, t))| {
-                            (
-                                pr_id.clone(),
-                                repo.clone(),
-                                *num,
-                                t.elapsed().as_secs(),
-                            )
+                            (pr_id.clone(), repo.clone(), *num, t.elapsed().as_secs())
                         })
                         .collect()
                 };
@@ -1362,9 +1354,10 @@ pub fn check_compilations_parallel(
                         "could not create per-worker gradle home; falling back to default"
                     );
                 } else {
-                    profile_for_job
-                        .env
-                        .insert("GRADLE_USER_HOME".to_string(), worker_home.to_string_lossy().into_owned());
+                    profile_for_job.env.insert(
+                        "GRADLE_USER_HOME".to_string(),
+                        worker_home.to_string_lossy().into_owned(),
+                    );
                 }
 
                 let r = compile_and_mutate_pr_in_worktree(
