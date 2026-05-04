@@ -867,3 +867,69 @@ CREATE TABLE IF NOT EXISTS student_sprint_ai_usage (
     file_count_flagged      INTEGER,
     PRIMARY KEY (student_id, sprint_id)
 );
+
+-- Java static-analysis findings (T-SA / phase 2). One row per
+-- (repo, sprint, analyzer, rule, file, location). The natural
+-- PK would be very wide (long rule ids, long messages), so we use a
+-- surrogate `id` for the FK from `_attribution`, and dedup
+-- across re-runs via `UNIQUE (repo_full_name, sprint_id, fingerprint)`.
+-- `fingerprint` = sha1(analyzer|rule|file|start_line|message[..120]) — see
+-- `static_analysis::adapter::Finding::compute_fingerprint`.
+-- `head_sha` is the repo HEAD at scan time; `diff-db` uses it as a
+-- reproducibility anchor when comparing runs.
+CREATE TABLE IF NOT EXISTS static_analysis_findings (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_full_name   TEXT    NOT NULL,
+    sprint_id        INTEGER NOT NULL,
+    analyzer         TEXT    NOT NULL,        -- 'pmd' | 'checkstyle' | 'spotbugs'
+    analyzer_version TEXT,
+    rule_id          TEXT    NOT NULL,
+    category         TEXT,                    -- 'style' | 'bug' | 'security' | ...
+    severity         TEXT    NOT NULL,        -- 'CRITICAL' | 'WARNING' | 'INFO'
+    file_path        TEXT    NOT NULL,
+    start_line       INTEGER,
+    end_line         INTEGER,
+    message          TEXT    NOT NULL,
+    help_uri         TEXT,
+    fingerprint      TEXT    NOT NULL,
+    head_sha         TEXT,
+    UNIQUE (repo_full_name, sprint_id, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sa_findings_sprint
+    ON static_analysis_findings(sprint_id, repo_full_name);
+
+-- Per-student blame attribution for `static_analysis_findings` (T-SA / phase
+-- 2). Identical shape to `architecture_violation_attribution`: weight =
+-- lines_authored / total_lines computed via `git blame -w --ignore-revs-file`
+-- over the finding's [start_line..=end_line], so a 1-line typo fix in a
+-- 30-line offending block carries ~3% weight, not 50%.
+CREATE TABLE IF NOT EXISTS static_analysis_finding_attribution (
+    finding_id     INTEGER NOT NULL,
+    student_id     TEXT    NOT NULL,
+    lines_authored INTEGER NOT NULL,
+    total_lines    INTEGER NOT NULL,
+    weight         REAL    NOT NULL,         -- in [0, 1]
+    sprint_id      INTEGER NOT NULL,
+    PRIMARY KEY (finding_id, student_id),
+    FOREIGN KEY (finding_id) REFERENCES static_analysis_findings(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sa_attr_sprint
+    ON static_analysis_finding_attribution(sprint_id);
+
+-- Per-(analyzer, repo, sprint) outcome row so the report can render
+-- "spotbugs: skipped — compile failed" honestly instead of a silent
+-- absence, and so re-runs can decide whether to skip cheaply.
+CREATE TABLE IF NOT EXISTS static_analysis_runs (
+    repo_full_name TEXT    NOT NULL,
+    sprint_id      INTEGER NOT NULL,
+    analyzer       TEXT    NOT NULL,
+    status         TEXT    NOT NULL,         -- 'OK' | 'SKIPPED_NO_CLASSES' | 'CRASHED' | 'TIMED_OUT'
+    findings_count INTEGER NOT NULL DEFAULT 0,
+    duration_ms    INTEGER,
+    head_sha       TEXT,
+    diagnostics    TEXT,
+    ran_at         TEXT    NOT NULL,         -- ISO-8601 UTC
+    PRIMARY KEY (repo_full_name, sprint_id, analyzer)
+);

@@ -1,0 +1,25 @@
+[package]
+name = "sprint-grader-static-analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+sha1 = "0.10"
+chrono.workspace = true
+sprint-grader-core = { path = "../core" }
+sprint-grader-survival = { path = "../survival" }
+
+[dev-dependencies]
+tempfile.workspace = true

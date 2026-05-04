@@ -67,6 +67,7 @@ impl Database {
             ("architecture_violations", "rule_kind", "TEXT"),
             ("architecture_violations", "rule_version", "TEXT"),
             ("architecture_violations", "explanation", "TEXT"),
+            // T-SA: static_analysis_* columns added here when needed.
         ];
         for (table, column, coltype) in migrations {
             let existing: Vec<String> = self.column_names(table)?;
