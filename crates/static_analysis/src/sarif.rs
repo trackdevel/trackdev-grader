@@ -250,8 +250,20 @@ fn result_to_finding(
     })
 }
 
+/// Strip the `file:` URI scheme from a SARIF artifact URI. SpotBugs and
+/// PMD emit `file:/abs/path` (RFC 8089 single-slash form, no authority),
+/// while Checkstyle and others emit `file:///abs/path` or `file://host/...`.
+/// We first try the authority form (`file://…`, which subsumes `file:///`)
+/// and fall back to bare `file:` so the leading `/` of an absolute path
+/// stays intact.
 fn strip_file_scheme(uri: &str) -> String {
-    uri.strip_prefix("file://").unwrap_or(uri).to_string()
+    if let Some(rest) = uri.strip_prefix("file://") {
+        return rest.to_string();
+    }
+    if let Some(rest) = uri.strip_prefix("file:") {
+        return rest.to_string();
+    }
+    uri.to_string()
 }
 
 fn severity_from(
@@ -434,6 +446,15 @@ mod tests {
         let findings = parse_str(PMD_SARIF).unwrap();
         assert_eq!(findings[0].fingerprint.len(), 40);
         assert_ne!(findings[0].fingerprint, findings[1].fingerprint);
+    }
+
+    #[test]
+    fn strip_file_scheme_handles_all_rfc8089_forms() {
+        assert_eq!(strip_file_scheme("file:/abs/path"), "/abs/path");
+        assert_eq!(strip_file_scheme("file:///abs/path"), "/abs/path");
+        assert_eq!(strip_file_scheme("file://host/abs"), "host/abs");
+        assert_eq!(strip_file_scheme("relative/path.java"), "relative/path.java");
+        assert_eq!(strip_file_scheme("/already/abs"), "/already/abs");
     }
 
     #[test]
