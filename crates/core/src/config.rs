@@ -51,8 +51,8 @@ pub struct Config {
 /// pointed at (Opus on Max plans), draining quota.
 #[derive(Debug, Clone)]
 pub struct EvaluateConfig {
-    /// Backend selector. Either `"claude-cli"` (default) or
-    /// `"anthropic-api"`.
+    /// Backend selector. One of `"claude-cli"` (default),
+    /// `"anthropic-api"`, or `"deepseek-api"`.
     pub judge: String,
     /// Pinned model id (e.g. `claude-haiku-4-5-20251001`). REQUIRED in
     /// course.toml; passed verbatim to the CLI via `--model` and to the
@@ -91,9 +91,10 @@ impl Default for EvaluateConfig {
 /// scans (T-P2.2 / T-P3.1) always run when `architecture.toml` exists;
 /// the LLM judge is opt-in. The judge backend is selectable: `claude-cli`
 /// (the local Claude Code CLI; the default — no API key needed, uses
-/// the user's subscription) or `anthropic-api` (direct API; requires
-/// `ANTHROPIC_API_KEY`). Missing prerequisites fall back to a silent
-/// skip — running without an LLM is a supported mode.
+/// the user's subscription), `anthropic-api` (direct API; requires
+/// `ANTHROPIC_API_KEY`), or `deepseek-api` (DeepSeek chat completions;
+/// requires `DEEPSEEK_API_KEY`). Missing prerequisites fall back to a
+/// silent skip — running without an LLM is a supported mode.
 #[derive(Debug, Clone)]
 pub struct ArchitectureConfig {
     /// When true AND the selected judge's prerequisites are met, the
@@ -102,7 +103,8 @@ pub struct ArchitectureConfig {
     pub llm_review: bool,
     /// Which judge backend to use. `"claude-cli"` (default) shells out
     /// to the `claude` binary; `"anthropic-api"` uses the direct
-    /// Anthropic SDK and requires `ANTHROPIC_API_KEY`.
+    /// Anthropic SDK and requires `ANTHROPIC_API_KEY`; `"deepseek-api"`
+    /// uses DeepSeek chat completions and requires `DEEPSEEK_API_KEY`.
     pub judge: String,
     pub model_id: String,
     pub max_tokens: u32,
@@ -1104,9 +1106,11 @@ impl Config {
                 let arch_model_id = raw.architecture.model_id.ok_or_else(|| {
                     Error::ConfigInvalid(
                         "[architecture] model_id is required in course.toml — pin to a \
-                         specific id (e.g. \"claude-haiku-4-5-20251001\"). There is no \
-                         default to prevent silently falling back to the user's Claude \
-                         session model (Opus on Max plans)."
+                         specific id (e.g. \"claude-haiku-4-5-20251001\" for Anthropic, \
+                         or \"deepseek-chat\" for DeepSeek). There is no default to \
+                         prevent silently falling back to the user's Claude session \
+                         model (Opus on Max plans) or to a backend-default that \
+                         drifts under your feet."
                             .to_string(),
                     )
                 })?;
@@ -1151,9 +1155,11 @@ impl Config {
                 let eval_model_id = raw.evaluate.model_id.ok_or_else(|| {
                     Error::ConfigInvalid(
                         "[evaluate] model_id is required in course.toml — pin to a \
-                         specific id (e.g. \"claude-haiku-4-5-20251001\"). There is no \
-                         default to prevent silently falling back to the user's Claude \
-                         session model (Opus on Max plans)."
+                         specific id (e.g. \"claude-haiku-4-5-20251001\" for Anthropic, \
+                         or \"deepseek-chat\" for DeepSeek). There is no default to \
+                         prevent silently falling back to the user's Claude session \
+                         model (Opus on Max plans) or to a backend-default that \
+                         drifts under your feet."
                             .to_string(),
                     )
                 })?;
@@ -1371,6 +1377,21 @@ contribution_imbalance_stddev = 1.5
         assert!(err
             .to_string()
             .contains("[evaluate] model_id must not be empty"));
+    }
+
+    #[test]
+    fn deepseek_judge_round_trips_through_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nllm_review = true\njudge = \"deepseek-api\"\nmodel_id = \"deepseek-chat\"\n[evaluate]\njudge = \"deepseek-api\"\nmodel_id = \"deepseek-chat\"\n"
+        );
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("load deepseek config");
+        assert_eq!(cfg.architecture.judge, "deepseek-api");
+        assert_eq!(cfg.architecture.model_id, "deepseek-chat");
+        assert!(cfg.architecture.llm_review);
+        assert_eq!(cfg.evaluate.judge, "deepseek-api");
+        assert_eq!(cfg.evaluate.model_id, "deepseek-chat");
     }
 
     #[test]
