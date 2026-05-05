@@ -2,8 +2,10 @@
 
 pub mod complexity;
 pub mod halstead;
+pub mod i18n;
 pub mod quality_delta;
 pub mod satd;
+pub mod testability;
 
 pub use complexity::{analyze_file, analyze_method, MethodMetrics};
 pub use halstead::{compute_halstead, maintainability_index, HalsteadMetrics};
