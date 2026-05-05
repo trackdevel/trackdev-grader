@@ -104,7 +104,6 @@ fn t_t4_2_schema_includes_all_p2_derived_tables() {
         "curriculum_concepts_snapshot",
         "pipeline_run",
         "architecture_violations",
-        "student_estimation_bias",
         "pr_mutation",
     ];
     for table in must_exist {
@@ -123,17 +122,15 @@ fn t_t4_2_schema_includes_all_p2_derived_tables() {
 //
 // Snapshot-shaped: drive the markdown renderer end-to-end and assert
 // it produces *some* report output containing the new section labels
-// (T-P2.1 β_u column, T-P2.2 architecture conformance subsection, T-P2.3
-// ownership treemap). We don't snapshot the bytes (insta golden)
-// because the canonical fixture includes timestamps; the new-section
-// presence is the thing that catches accidental removal.
+// (T-P2.2 architecture conformance subsection, T-P2.3 ownership
+// treemap). We don't snapshot the bytes (insta golden) because the
+// canonical fixture includes timestamps; the new-section presence is
+// the thing that catches accidental removal.
 
 #[test]
 fn t_t4_3_markdown_report_includes_new_p2_sections() {
     let tmp = tempfile::tempdir().unwrap();
     let (conn, paths) = Fixture::new().build(tmp.path()).unwrap();
-    // Seed enough so the renderer has something to put in each section.
-    sprint_grader_estimation::fit_and_persist_for_project(&conn, ids::PROJECT_ID).unwrap();
     conn.execute(
         "INSERT INTO architecture_violations
             (repo_full_name, sprint_id, file_path, rule_name, violation_kind,
