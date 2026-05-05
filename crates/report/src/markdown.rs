@@ -1715,6 +1715,7 @@ fn write_section_b(
     sprint_id: i64,
     project_id: i64,
     depth: usize,
+    sa_per_student: Option<(&HashMap<String, Vec<SaFinding>>, usize)>,
 ) -> rusqlite::Result<()> {
     let h2 = "#".repeat(depth);
     let h3 = "#".repeat(depth + 1);
@@ -1788,6 +1789,39 @@ fn write_section_b(
             (sid, name, github)
         })
         .collect();
+
+    if let Some((sa_data, _)) = sa_per_student {
+        let mut t_total = 0usize;
+        let mut t_crit = 0usize;
+        let mut t_warn = 0usize;
+        let mut t_info = 0usize;
+        for findings in sa_data.values() {
+            for f in findings {
+                t_total += 1;
+                match f.severity.to_ascii_uppercase().as_str() {
+                    "CRITICAL" => t_crit += 1,
+                    "WARNING" => t_warn += 1,
+                    "INFO" => t_info += 1,
+                    _ => {}
+                }
+            }
+        }
+        if t_total > 0 {
+            use sprint_grader_static_analysis::i18n as sai18n;
+            let _ = writeln!(
+                buf,
+                "**{}:** {} ({} {} · {} {} · {} {})\n",
+                sai18n::TEAM_TALLY_LABEL,
+                t_total,
+                t_crit,
+                sai18n::SEVERITY_CRITICAL_PLURAL,
+                t_warn,
+                sai18n::SEVERITY_WARNING_PLURAL,
+                t_info,
+                sai18n::SEVERITY_INFO_PLURAL,
+            );
+        }
+    }
 
     for (sid, name, github) in &students {
         let _ = writeln!(buf, "{} {}", h3, name);
@@ -2053,6 +2087,14 @@ fn write_section_b(
             }
         }
 
+        if let Some((sa_data, top_n)) = sa_per_student {
+            if let Some(findings) = sa_data.get(sid) {
+                if !findings.is_empty() {
+                    write_student_static_analysis_block(buf, findings, top_n);
+                }
+            }
+        }
+
         buf.push_str("---\n\n");
     }
     Ok(())
@@ -2161,53 +2203,301 @@ fn write_student_architecture_block(buf: &mut String, violations: &[AttributedAr
 
 // ── Static-analysis findings (T-SA) ──────────────────────────────────────────
 //
-// Renders the section between B (per-student dashboards, which include the
-// per-student architecture block) and C (peer-group analysis). Joins
-// `static_analysis_finding_attribution` to `static_analysis_findings`, scopes
-// to the team via `students.team_project_id`, then groups by student. The
-// section is gated by a top-level `include_static_analysis` flag plumbed
-// through the public entry points; `sync-reports` passes `false` so the
-// section is stripped before pushing to team repos (instructor-only by
-// default per the phase-1 sign-off).
-fn write_section_static_analysis(
+// Findings are rendered inside each student's Section B block (after the
+// architecture violations). The `static_analysis_per_student` function fetches
+// all rows once; `write_section_b` distributes them per student via
+// `write_student_static_analysis_block`. The block is gated by the
+// `include_static_analysis` flag: `sync-reports --push` passes `false` so
+// team-facing reports don't surface the findings.
+
+struct SaFinding {
+    analyzer: String,
+    rule_id: String,
+    severity: String,
+    file_path: String,
+    repo_full_name: String,
+    start_line: Option<i64>,
+    end_line: Option<i64>,
+    message: String,
+    weight: f64,
+}
+
+fn static_analysis_per_student(
+    conn: &Connection,
+    sprint_id: i64,
+    project_id: i64,
+) -> rusqlite::Result<HashMap<String, Vec<SaFinding>>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.student_id,
+                f.analyzer, f.rule_id, f.severity,
+                f.file_path, f.repo_full_name,
+                f.start_line, f.end_line, f.message,
+                a.weight
+         FROM static_analysis_finding_attribution a
+         JOIN static_analysis_findings f ON f.id = a.finding_id
+         JOIN students s ON s.id = a.student_id
+         WHERE a.sprint_id = ? AND s.team_project_id = ?
+         ORDER BY a.weight DESC, f.file_path, f.start_line",
+    )?;
+    let mut result: HashMap<String, Vec<SaFinding>> = HashMap::new();
+    let rows = stmt.query_map(rusqlite::params![sprint_id, project_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            SaFinding {
+                analyzer: r.get(1)?,
+                rule_id: r.get(2)?,
+                severity: r.get(3)?,
+                file_path: r.get(4)?,
+                repo_full_name: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                start_line: r.get(6)?,
+                end_line: r.get(7)?,
+                message: r.get(8)?,
+                weight: r.get(9)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (student_id, finding) = row?;
+        result.entry(student_id).or_default().push(finding);
+    }
+    Ok(result)
+}
+
+fn write_student_static_analysis_block(
+    buf: &mut String,
+    findings: &[SaFinding],
+    top_n: usize,
+) {
+    use sprint_grader_static_analysis::i18n;
+
+    let total = findings.len();
+    let crit = findings
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("CRITICAL"))
+        .count();
+    let warn = findings
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("WARNING"))
+        .count();
+    let info_n = findings
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("INFO"))
+        .count();
+    let total_weight: f64 = findings.iter().map(|f| f.weight).sum();
+
+    let _ = writeln!(
+        buf,
+        "**{}:** {} ({} {} · {} {} · {} {}) — {} {:.1}\n",
+        i18n::BLOCK_HEADER,
+        total,
+        crit,
+        i18n::SEVERITY_CRITICAL_PLURAL,
+        warn,
+        i18n::SEVERITY_WARNING_PLURAL,
+        info_n,
+        i18n::SEVERITY_INFO_PLURAL,
+        i18n::WEIGHT_LABEL,
+        total_weight,
+    );
+
+    let cap = top_n.max(1);
+    for f in findings.iter().take(cap) {
+        let basename = f.file_path.rsplit('/').next().unwrap_or(&f.file_path);
+        let label = format!("`{}`", basename);
+        let line_suffix = format_line_suffix(f.start_line, f.end_line);
+        let url_anchor = format_url_line_anchor(f.start_line, f.end_line);
+        let file_cell = match github_file_url(&f.repo_full_name, &f.file_path) {
+            Some(url) => format!("[{}{}]({}{})", label, line_suffix, url, url_anchor),
+            None => format!("{}{}", label, line_suffix),
+        };
+        let _ = writeln!(
+            buf,
+            "- {} — `{}:{}` · _{}_ — {}",
+            file_cell,
+            f.analyzer,
+            f.rule_id,
+            f.severity.to_lowercase(),
+            md_escape(f.message.lines().next().unwrap_or("")),
+        );
+    }
+    if findings.len() > cap {
+        let _ = writeln!(buf, "- … {} {}", findings.len() - cap, i18n::MORE_LABEL);
+    }
+    buf.push('\n');
+}
+
+// ── Section: complexity & testability hotspots (T-CX) ────────────────────────
+
+/// Student-facing complexity / testability section. Lists every method
+/// flagged by the testability scan, grouped by file, with a clickable
+/// `[Class.method()](github_url#L<start>-L<end>)` anchor and the rule's
+/// student-facing prose. **No** weights, severity tallies, attribution
+/// percentages, or flag rendering — those are the professor view (step 7).
+fn write_section_complexity_hotspots(
     buf: &mut String,
     conn: &Connection,
     sprint_id: i64,
     project_id: i64,
     depth: usize,
-    top_n_per_student: usize,
 ) -> rusqlite::Result<()> {
-    use sprint_grader_static_analysis::i18n;
+    use sprint_grader_quality::i18n as cxi18n;
+
+    let h2 = "#".repeat(depth);
+    let _ = writeln!(buf, "{} {}\n", h2, cxi18n::SECTION_HEADER);
+
+    type Row = (
+        i64,            // finding_id
+        String,         // repo_full_name
+        String,         // file_path
+        Option<String>, // class_name
+        String,         // method_name
+        i64,            // start_line
+        i64,            // end_line
+        String,         // rule_key
+        String,         // severity
+        Option<f64>,    // measured_value
+        Option<f64>,    // threshold
+        Option<String>, // detail
+    );
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT f.id, f.repo_full_name, f.file_path, f.class_name,
+                f.method_name, f.start_line, f.end_line, f.rule_key, f.severity,
+                f.measured_value, f.threshold, f.detail
+         FROM method_complexity_findings f
+         WHERE f.sprint_id = ?
+           AND (
+             f.project_id = ?
+             OR EXISTS (
+               SELECT 1 FROM pull_requests pr
+               WHERE pr.repo_full_name = f.repo_full_name
+                 AND EXISTS (
+                   SELECT 1 FROM tasks t
+                   JOIN task_pull_requests tpr ON tpr.task_id = t.id
+                   WHERE tpr.pr_id = pr.id AND t.sprint_id = ?
+                 )
+             )
+           )
+         ORDER BY f.file_path, f.start_line, f.rule_key",
+    )?;
+    let rows: Vec<Row> = stmt
+        .query_map(rusqlite::params![sprint_id, project_id, sprint_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, Option<f64>>(9)?,
+                r.get::<_, Option<f64>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    if rows.is_empty() {
+        let _ = writeln!(buf, "{}\n", cxi18n::NO_FINDINGS);
+        return Ok(());
+    }
+
+    let _ = writeln!(buf, "{}", cxi18n::INTRO_BLURB);
+
+    use std::collections::BTreeMap;
+    type FileKey = (String, String);
+    type MethodKey = (Option<String>, String, i64, i64);
+    let mut by_file: BTreeMap<FileKey, BTreeMap<MethodKey, Vec<Row>>> = BTreeMap::new();
+    for r in rows {
+        let file_key = (r.1.clone(), r.2.clone());
+        let method_key = (r.3.clone(), r.4.clone(), r.5, r.6);
+        by_file
+            .entry(file_key)
+            .or_default()
+            .entry(method_key)
+            .or_default()
+            .push(r);
+    }
+
+    let qualified_by_basename = qualified_repo_names_by_basename(conn);
+    for ((repo_raw, file_path), methods) in by_file {
+        let repo = qualify_repo_name(&repo_raw, &qualified_by_basename);
+        let basename = file_path.rsplit('/').next().unwrap_or(&file_path);
+        let file_label = format!("`{}`", basename);
+        let file_link = match github_file_url(&repo, &file_path) {
+            Some(url) => format!("[{}]({} \"{}\")", file_label, url, file_path),
+            None => file_label,
+        };
+        let _ = writeln!(buf, "- {}", file_link);
+        for ((class_name, method_name, start, end), rules) in methods {
+            let class_prefix = class_name
+                .as_deref()
+                .filter(|s| !s.is_empty() && *s != "<unknown>")
+                .map(|c| format!("{c}."))
+                .unwrap_or_default();
+            let method_label = format!("`{}{}()`", class_prefix, method_name);
+            let url_anchor = format_url_line_anchor(Some(start), Some(end));
+            let method_link = match github_file_url(&repo, &file_path) {
+                Some(url) => format!("[{}]({}{})", method_label, url, url_anchor),
+                None => method_label,
+            };
+            let _ = writeln!(buf, "  - {}", method_link);
+            for r in rules {
+                let prose = cxi18n::rule_prose(&r.7);
+                let measured_tail = match (r.9, r.10) {
+                    (Some(m), Some(t)) => {
+                        format!(" ({} > {})", round_to_int_if_integer(m), round_to_int_if_integer(t))
+                    }
+                    _ => String::new(),
+                };
+                let _ = writeln!(buf, "    - {}{}", prose, measured_tail);
+            }
+        }
+    }
+    buf.push('\n');
+    Ok(())
+}
+
+/// Professor-only attribution + flag block (T-CX, step 7). Renders
+/// per-student weighted contribution across this sprint's complexity
+/// findings, sorted by descending hotspot score (Σ weight ×
+/// severity_rank), and inlines the COMPLEXITY_HOTSPOT flag detail row
+/// for every student that crossed the threshold. Skipped entirely when
+/// no findings or no attribution exist for the project.
+fn write_section_complexity_attribution(
+    buf: &mut String,
+    conn: &Connection,
+    sprint_id: i64,
+    project_id: i64,
+    depth: usize,
+) -> rusqlite::Result<()> {
+    use sprint_grader_quality::i18n as cxi18n;
 
     let h2 = "#".repeat(depth);
     let h3 = "#".repeat(depth + 1);
 
-    // Pull the per-student finding stream once. The query joins through
-    // `students.team_project_id` so we don't surface findings authored by
-    // someone outside this team's roster — defensive against stale
-    // identities lingering in the attribution table.
     type Row = (
-        String,         // student_id
-        String,         // full_name
-        String,         // analyzer
-        String,         // rule_id
-        String,         // severity
-        Option<String>, // category
-        String,         // file_path
-        String,         // repo_full_name
-        Option<i64>,    // start_line
-        Option<i64>,    // end_line
-        String,         // message
-        Option<String>, // help_uri
-        f64,            // weight
+        String,
+        String,
+        String,
+        f64,
+        String,
+        String,
+        Option<String>,
+        String,
+        i64,
+        i64,
+        String,
     );
     let mut stmt = conn.prepare(
         "SELECT a.student_id, COALESCE(s.full_name, s.id),
-                f.analyzer, f.rule_id, f.severity, f.category,
-                f.file_path, f.repo_full_name, f.start_line, f.end_line,
-                f.message, f.help_uri, a.weight
-         FROM static_analysis_finding_attribution a
-         JOIN static_analysis_findings f ON f.id = a.finding_id
+                f.severity, a.weight, f.rule_key, f.file_path,
+                f.class_name, f.method_name, f.start_line, f.end_line,
+                f.repo_full_name
+         FROM method_complexity_attribution a
+         JOIN method_complexity_findings f ON f.id = a.finding_id
          JOIN students s ON s.id = a.student_id
          WHERE a.sprint_id = ? AND s.team_project_id = ?
          ORDER BY s.full_name, a.weight DESC, f.file_path, f.start_line",
@@ -2218,125 +2508,166 @@ fn write_section_static_analysis(
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
+                r.get::<_, f64>(3)?,
                 r.get::<_, String>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                r.get::<_, Option<i64>>(8)?,
-                r.get::<_, Option<i64>>(9)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?,
                 r.get::<_, String>(10)?,
-                r.get::<_, Option<String>>(11)?,
-                r.get::<_, f64>(12)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
-    let _ = writeln!(buf, "{} {}\n", h2, i18n::SECTION_HEADER);
-
     if rows.is_empty() {
-        let _ = writeln!(buf, "{}\n", i18n::NO_FINDINGS);
         return Ok(());
     }
 
-    // Project-wide severity tally (counts per finding occurrence — a
-    // single finding shared by N students counts N times against the
-    // total, matching how the architecture summary reports too).
-    let mut total_crit = 0usize;
-    let mut total_warn = 0usize;
-    let mut total_info = 0usize;
-    for r in &rows {
-        match r.4.as_str() {
-            "CRITICAL" => total_crit += 1,
-            "WARNING" => total_warn += 1,
-            _ => total_info += 1,
-        }
-    }
     let _ = writeln!(
         buf,
-        "{} {} · {} {} · {} {}\n",
-        total_crit,
-        i18n::SEVERITY_CRITICAL_PLURAL,
-        total_warn,
-        i18n::SEVERITY_WARNING_PLURAL,
-        total_info,
-        i18n::SEVERITY_INFO_PLURAL,
+        "{} {} — grading attribution (instructor view)\n",
+        h2, cxi18n::SECTION_HEADER
     );
+    let _ = writeln!(buf, "{}", cxi18n::PROF_DISCLAIMER);
+    let _ = writeln!(buf, "{} {}\n", h3, cxi18n::PROF_PER_STUDENT_HEADER);
 
-    let _ = writeln!(buf, "{} {}\n", h3, i18n::PER_STUDENT_SUBHEADER);
+    fn rank(sev: &str) -> u8 {
+        match sev {
+            "CRITICAL" => 3,
+            "WARNING" => 2,
+            "INFO" => 1,
+            _ => 0,
+        }
+    }
 
+    use std::collections::BTreeMap;
     #[derive(Default)]
-    struct PerStudent {
+    struct Acc {
         full_name: String,
+        score: f64,
         crit: usize,
         warn: usize,
-        weight: f64,
-        findings: Vec<usize>, // indices into `rows`
+        info: usize,
+        weight_sum: f64,
+        offenders: Vec<usize>,
     }
-    use std::collections::BTreeMap;
-    let mut by_student: BTreeMap<String, PerStudent> = BTreeMap::new();
+    let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
     for (idx, r) in rows.iter().enumerate() {
         let acc = by_student.entry(r.0.clone()).or_default();
         if acc.full_name.is_empty() {
             acc.full_name = r.1.clone();
         }
-        match r.4.as_str() {
+        let r_rank = rank(&r.2) as f64;
+        acc.score += r.3 * r_rank;
+        acc.weight_sum += r.3;
+        match r.2.as_str() {
             "CRITICAL" => acc.crit += 1,
             "WARNING" => acc.warn += 1,
+            "INFO" => acc.info += 1,
             _ => {}
         }
-        acc.weight += r.12;
-        acc.findings.push(idx);
+        acc.offenders.push(idx);
     }
 
-    // Per-student rendering — full_name already used as the primary
-    // sort key in the SQL ORDER BY, so iteration follows the same order.
-    for ps in by_student.values() {
+    let mut entries: Vec<(String, Acc)> = by_student.into_iter().collect();
+    entries.sort_by(|a, b| {
+        b.1.score
+            .partial_cmp(&a.1.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    type FlagRow = (String, String, String);
+    let mut flag_stmt = conn.prepare(
+        "SELECT student_id, severity, COALESCE(details, '')
+         FROM flags WHERE sprint_id = ? AND flag_type = 'COMPLEXITY_HOTSPOT'",
+    )?;
+    let flags: BTreeMap<String, (String, String)> = flag_stmt
+        .query_map([sprint_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .map(|t: FlagRow| (t.0, (t.1, t.2)))
+        .collect();
+    drop(flag_stmt);
+
+    let qualified_by_basename = qualified_repo_names_by_basename(conn);
+    for (sid, acc) in entries {
+        let band = flags
+            .get(&sid)
+            .map(|(sev, _)| sev.as_str())
+            .unwrap_or("(below threshold)");
         let _ = writeln!(
             buf,
-            "- **{}** — {} {}, {} {} ({} {:.1})",
-            ps.full_name,
-            ps.crit,
-            i18n::SEVERITY_CRITICAL_PLURAL,
-            ps.warn,
-            i18n::SEVERITY_WARNING_PLURAL,
-            i18n::WEIGHT_LABEL,
-            ps.weight
+            "- **{}** — {} {:.2}, {} {:.2} · {} {}, {} {}, {} {} · {}: `{}`",
+            acc.full_name,
+            cxi18n::PROF_SCORE_LABEL,
+            acc.score,
+            cxi18n::PROF_WEIGHT_LABEL,
+            acc.weight_sum,
+            acc.crit,
+            cxi18n::SEVERITY_CRITICAL_PLURAL,
+            acc.warn,
+            cxi18n::SEVERITY_WARNING_PLURAL,
+            acc.info,
+            cxi18n::SEVERITY_INFO_PLURAL,
+            cxi18n::PROF_FLAG_SUMMARY_HEADER,
+            band,
         );
-        let cap = top_n_per_student.max(1);
-        for &idx in ps.findings.iter().take(cap) {
+        for &idx in acc.offenders.iter().take(5) {
             let r = &rows[idx];
-            let basename = r.6.rsplit('/').next().unwrap_or(&r.6);
-            let label = format!("`{}`", basename);
-            let line_suffix = format_line_suffix(r.8, r.9);
-            let url_anchor = format_url_line_anchor(r.8, r.9);
-            let file_cell = match github_file_url(&r.7, &r.6) {
-                Some(url) => format!("[{}{}]({}{})", label, line_suffix, url, url_anchor),
-                None => format!("{}{}", label, line_suffix),
+            let repo = qualify_repo_name(&r.10, &qualified_by_basename);
+            let basename = r.5.rsplit('/').next().unwrap_or(&r.5);
+            let class_prefix = r
+                .6
+                .as_deref()
+                .filter(|s| !s.is_empty() && *s != "<unknown>")
+                .map(|c| format!("{c}."))
+                .unwrap_or_default();
+            let method_label = format!("`{}{}()`", class_prefix, r.7);
+            let url_anchor = format_url_line_anchor(Some(r.8), Some(r.9));
+            let method_link = match github_file_url(&repo, &r.5) {
+                Some(url) => format!("[{}]({}{})", method_label, url, url_anchor),
+                None => method_label,
             };
+            let prose = cxi18n::rule_prose(&r.4);
             let _ = writeln!(
                 buf,
-                "  - {} — `{}:{}` — {}",
-                file_cell,
+                "  - {} ({}, {} {:.2}) — {} — `{}`",
+                method_link,
                 r.2,
+                cxi18n::PROF_WEIGHT_LABEL,
                 r.3,
-                md_escape(r.10.lines().next().unwrap_or(""))
+                md_escape(prose),
+                basename,
             );
         }
-        if ps.findings.len() > cap {
+        if acc.offenders.len() > 5 {
             let _ = writeln!(
                 buf,
                 "  - … {} {}",
-                ps.findings.len() - cap,
-                i18n::MORE_LABEL
+                acc.offenders.len() - 5,
+                cxi18n::MORE_LABEL
             );
         }
     }
-
     buf.push('\n');
-    let _ = writeln!(buf, "{}\n", i18n::DISCLAIMER);
     Ok(())
+}
+
+/// Render a metric value as an integer when it has no fractional part,
+/// otherwise `:.1`.
+fn round_to_int_if_integer(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 {
+        format!("{}", value as i64)
+    } else {
+        format!("{:.1}", value)
+    }
 }
 
 // ── Section C: peer-group analysis ───────────────────────────────────────────
@@ -2732,6 +3063,18 @@ infrastructure*); AST rules document a structural constraint such as \
 - **Attribution** — the dominant author of the offending file (by \
 surviving statements). That author owns the violation in section B.\n\
 \n\
+### Static analysis (per student)\n\
+\n\
+Each student dashboard ends with a **Static analysis** block summarising \
+findings from PMD, Checkstyle and SpotBugs that `git blame` attributes \
+to that student. **Informational only — these findings do not affect \
+the assignment grade.** The headline reports total findings broken down \
+by severity, plus a `weight` figure: weight reflects how much of each \
+offending region the student authored, so a 1-line typo fix on a 30-line \
+method weighs ~0.03, not 0.50. Findings are listed top-`weight` first; \
+the team-wide tally (when present) appears just under the section B \
+heading.\n\
+\n\
 ### Flags\n\
 \n\
 Flags are signal triggers: each one fires when a specific evidence \
@@ -2838,9 +3181,9 @@ pub fn generate_markdown_report_to_path_ex(
 }
 
 /// Like `generate_markdown_report_to_path_ex` but takes
-/// `include_static_analysis`. T-SA: `false` strips the "Análisis estático"
-/// section so reports pushed to team repos don't surface the findings
-/// (instructor-only by default).
+/// `include_static_analysis`. T-SA: `false` strips the "Static code
+/// analysis" section so reports pushed to team repos don't surface the
+/// findings (instructor-only by default).
 pub fn generate_markdown_report_to_path_ex2(
     conn: &Connection,
     sprint_id: i64,
@@ -2865,17 +3208,20 @@ pub fn generate_markdown_report_to_path_ex2(
         cumulative_sprint_ids,
         2,
     )?;
-    write_section_b(&mut buf, conn, sprint_id, project_id, 2)?;
-    if include_static_analysis {
-        write_section_static_analysis(
-            &mut buf,
-            conn,
-            sprint_id,
-            project_id,
-            2,
-            DEFAULT_TOP_N_PER_STUDENT,
-        )?;
-    }
+    let sa_data = if include_static_analysis {
+        Some(static_analysis_per_student(conn, sprint_id, project_id)?)
+    } else {
+        None
+    };
+    write_section_b(
+        &mut buf,
+        conn,
+        sprint_id,
+        project_id,
+        2,
+        sa_data.as_ref().map(|d| (d, DEFAULT_TOP_N_PER_STUDENT)),
+    )?;
+    write_section_complexity_hotspots(&mut buf, conn, sprint_id, project_id, 2)?;
     write_section_c(&mut buf, conn, sprint_id, project_id, 2)?;
     if let Some(sids) = cumulative_sprint_ids {
         if !sids.is_empty() {
@@ -2943,6 +3289,39 @@ pub fn generate_markdown_report_multi_to_path(
     )
 }
 
+/// Optional knobs the multi-sprint Markdown renderer accepts. Defaults
+/// (`MultiReportOptions::default()`) match the historical
+/// instructor-friendly preset: static analysis on, professor view off.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MultiReportOptions {
+    /// T-SA: when `false`, the static-analysis section is stripped from
+    /// the rendered markdown.
+    pub include_static_analysis: bool,
+    /// T-CX (step 7): when `true`, append the per-student
+    /// "Code complexity & testability — grading attribution" block
+    /// (weighted contribution + COMPLEXITY_HOTSPOT band) to every
+    /// sprint section. The student-facing complexity-hotspots section
+    /// always renders regardless; this flag ONLY toggles the
+    /// instructor-only attribution block beneath it.
+    pub professor_view: bool,
+}
+
+impl MultiReportOptions {
+    pub fn instructor() -> Self {
+        Self {
+            include_static_analysis: true,
+            professor_view: false,
+        }
+    }
+
+    pub fn team_facing() -> Self {
+        Self {
+            include_static_analysis: false,
+            professor_view: false,
+        }
+    }
+}
+
 /// Like `generate_markdown_report_multi_to_path` but takes
 /// `include_static_analysis`. T-SA: pass `false` from `sync-reports --push`
 /// so reports pushed to team repos don't surface the findings.
@@ -2953,6 +3332,51 @@ pub fn generate_markdown_report_multi_to_path_ex(
     sprint_ids_ordered: &[i64],
     output_path: &Path,
     include_static_analysis: bool,
+) -> rusqlite::Result<()> {
+    generate_markdown_report_multi_to_path_with_opts(
+        conn,
+        project_id,
+        project_name,
+        sprint_ids_ordered,
+        output_path,
+        MultiReportOptions {
+            include_static_analysis,
+            professor_view: false,
+        },
+    )
+}
+
+/// New canonical entry point for multi-sprint markdown rendering. T-CX
+/// (step 7) added this shape so callers can request the instructor-only
+/// professor view (per-student weighted attribution + COMPLEXITY_HOTSPOT
+/// band) on top of the always-on student-facing complexity section.
+pub fn generate_markdown_report_multi_to_path_with_opts(
+    conn: &Connection,
+    project_id: i64,
+    project_name: &str,
+    sprint_ids_ordered: &[i64],
+    output_path: &Path,
+    opts: MultiReportOptions,
+) -> rusqlite::Result<()> {
+    generate_markdown_report_multi_to_path_inner(
+        conn,
+        project_id,
+        project_name,
+        sprint_ids_ordered,
+        output_path,
+        opts.include_static_analysis,
+        opts.professor_view,
+    )
+}
+
+fn generate_markdown_report_multi_to_path_inner(
+    conn: &Connection,
+    project_id: i64,
+    project_name: &str,
+    sprint_ids_ordered: &[i64],
+    output_path: &Path,
+    include_static_analysis: bool,
+    professor_view: bool,
 ) -> rusqlite::Result<()> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
@@ -3009,16 +3433,22 @@ pub fn generate_markdown_report_multi_to_path_ex(
             Some(&sprint_ids_ordered[..=idx]),
             3,
         )?;
-        write_section_b(&mut buf, conn, *sid, project_id, 3)?;
-        if include_static_analysis {
-            write_section_static_analysis(
-                &mut buf,
-                conn,
-                *sid,
-                project_id,
-                3,
-                DEFAULT_TOP_N_PER_STUDENT,
-            )?;
+        let sa_data = if include_static_analysis {
+            Some(static_analysis_per_student(conn, *sid, project_id)?)
+        } else {
+            None
+        };
+        write_section_b(
+            &mut buf,
+            conn,
+            *sid,
+            project_id,
+            3,
+            sa_data.as_ref().map(|d| (d, DEFAULT_TOP_N_PER_STUDENT)),
+        )?;
+        write_section_complexity_hotspots(&mut buf, conn, *sid, project_id, 3)?;
+        if professor_view {
+            write_section_complexity_attribution(&mut buf, conn, *sid, project_id, 3)?;
         }
         write_section_c(&mut buf, conn, *sid, project_id, 3)?;
     }
@@ -3378,6 +3808,19 @@ mod tests {
                 sprint_id INTEGER, is_outlier INTEGER, outlier_reason TEXT,
                 points_deviation REAL, lar_deviation REAL, ls_deviation REAL,
                 ls_per_point_deviation REAL, PRIMARY KEY (group_id, task_id));
+             CREATE TABLE method_complexity_findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sprint_id INTEGER NOT NULL, project_id INTEGER NOT NULL,
+                repo_full_name TEXT NOT NULL, file_path TEXT NOT NULL,
+                class_name TEXT, method_name TEXT NOT NULL,
+                start_line INTEGER NOT NULL, end_line INTEGER NOT NULL,
+                rule_key TEXT NOT NULL, severity TEXT NOT NULL,
+                measured_value REAL, threshold REAL, detail TEXT);
+             CREATE TABLE method_complexity_attribution (
+                finding_id INTEGER NOT NULL, student_id TEXT NOT NULL,
+                lines_attributed INTEGER NOT NULL, weighted_lines REAL NOT NULL,
+                weight REAL NOT NULL, sprint_id INTEGER NOT NULL,
+                PRIMARY KEY (finding_id, student_id));
              INSERT INTO projects VALUES (1, 'pds26-1a');
              INSERT INTO sprints VALUES (10, 1, 'Sprint 1', '2026-02-16', '2026-03-08');
              INSERT INTO sprints VALUES (11, 1, 'Sprint 2', '2026-03-09', '2026-03-29');
@@ -4100,7 +4543,7 @@ mod tests {
                 file_path,
                 start,
                 end,
-                format!("Posible problema de {}", rule_id),
+                format!("Possible {} issue", rule_id),
                 format!("fp-{}-{}", finding_id, rule_id),
             ],
         )
@@ -4116,6 +4559,7 @@ mod tests {
 
     #[test]
     fn static_analysis_section_renders_blob_url_with_line_anchor() {
+        use sprint_grader_static_analysis::i18n as sai18n;
         let conn = mk_conn();
         seed_static_analysis_finding(
             &conn,
@@ -4136,20 +4580,31 @@ mod tests {
             body.contains(
                 "blob/HEAD/src/main/java/com/x/UserController.java#L26-L49"
             ),
-            "static-analysis section must emit a clickable blob URL with the line anchor; got:\n{body}"
+            "static-analysis block must emit a clickable blob URL with the line anchor; got:\n{body}"
         );
         assert!(
             body.contains("`pmd:UnusedPrivateField`"),
             "finding line must include `analyzer:rule_id`; got:\n{body}"
         );
+        let block_marker = format!("**{}:**", sai18n::BLOCK_HEADER);
         assert!(
-            body.contains("Análisis estático del código"),
-            "Spanish section header must surface; got:\n{body}"
+            body.contains(&block_marker),
+            "per-student static-analysis block header must surface ({block_marker}); got:\n{body}"
+        );
+        let team_marker = format!("**{}:**", sai18n::TEAM_TALLY_LABEL);
+        assert!(
+            body.contains(&team_marker),
+            "team-level static-analysis tally must surface ({team_marker}); got:\n{body}"
+        );
+        assert!(
+            body.contains(sai18n::SEVERITY_INFO_PLURAL),
+            "headline must include the info-severity bucket; got:\n{body}"
         );
     }
 
     #[test]
     fn static_analysis_section_omitted_when_disabled() {
+        use sprint_grader_static_analysis::i18n as sai18n;
         let conn = mk_conn();
         seed_static_analysis_finding(
             &conn,
@@ -4169,9 +4624,15 @@ mod tests {
         generate_markdown_report_to_path_ex2(&conn, 10, 1, "pds26-1a", &report_path, None, false)
             .unwrap();
         let body = std::fs::read_to_string(&report_path).unwrap();
+        let block_marker = format!("**{}:**", sai18n::BLOCK_HEADER);
         assert!(
-            !body.contains("Análisis estático del código"),
-            "section must be stripped when include_static_analysis = false; got:\n{body}"
+            !body.contains(&block_marker),
+            "static-analysis block must be stripped when include_static_analysis = false; got:\n{body}"
+        );
+        let team_marker = format!("**{}:**", sai18n::TEAM_TALLY_LABEL);
+        assert!(
+            !body.contains(&team_marker),
+            "team tally must be stripped when include_static_analysis = false; got:\n{body}"
         );
         assert!(
             !body.contains("UnusedPrivateField"),
@@ -4183,7 +4644,7 @@ mod tests {
     fn static_analysis_caps_per_student_at_top_n() {
         let conn = mk_conn();
         // Seed 8 findings for one student. Default cap is 5, so 3 should
-        // be rolled up into the "… N más" line.
+        // be rolled up into the "… N more" line.
         for i in 0..8 {
             seed_static_analysis_finding(
                 &conn,
@@ -4204,7 +4665,7 @@ mod tests {
         let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(
-            body.contains("… 3 más"),
+            body.contains("… 3 more"),
             "rollup line must surface the 3 truncated findings; got:\n{body}"
         );
         // Top 5 must still show; rule 0 is the highest weight.
@@ -4212,5 +4673,309 @@ mod tests {
             body.contains("`pmd:Rule0`"),
             "top-weighted finding must remain in the cap; got:\n{body}"
         );
+    }
+
+    // ── Complexity / testability section (T-CX, steps 6 + 7) ───────────
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_complexity_finding(
+        conn: &Connection,
+        finding_id: i64,
+        repo_full_name: &str,
+        file_path: &str,
+        class_name: &str,
+        method_name: &str,
+        rule_key: &str,
+        severity: &str,
+        start: i64,
+        end: i64,
+        measured: Option<f64>,
+        threshold: Option<f64>,
+    ) {
+        conn.execute(
+            "INSERT INTO method_complexity_findings
+                (id, sprint_id, project_id, repo_full_name, file_path, class_name,
+                 method_name, start_line, end_line, rule_key, severity,
+                 measured_value, threshold, detail)
+             VALUES (?, 10, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')",
+            rusqlite::params![
+                finding_id,
+                repo_full_name,
+                file_path,
+                class_name,
+                method_name,
+                start,
+                end,
+                rule_key,
+                severity,
+                measured,
+                threshold,
+            ],
+        )
+        .unwrap();
+    }
+
+    fn seed_complexity_attribution(
+        conn: &Connection,
+        finding_id: i64,
+        student_id: &str,
+        weight: f64,
+    ) {
+        conn.execute(
+            "INSERT INTO method_complexity_attribution
+                (finding_id, student_id, lines_attributed, weighted_lines, weight, sprint_id)
+             VALUES (?, ?, 5, 10.0, ?, 10)",
+            rusqlite::params![finding_id, student_id, weight],
+        )
+        .unwrap();
+    }
+
+    fn seed_complexity_flag(conn: &Connection, student_id: &str, severity: &str) {
+        conn.execute(
+            "INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
+             VALUES (?, 10, 'COMPLEXITY_HOTSPOT', ?, '{}')",
+            rusqlite::params![student_id, severity],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn complexity_section_shows_no_findings_placeholder_on_empty_db() {
+        let conn = mk_conn();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("Code complexity & testability"));
+        assert!(body.contains("_No complex or hard-to-test methods detected this sprint._"));
+    }
+
+    #[test]
+    fn complexity_section_renders_method_link_with_blob_anchor() {
+        let conn = mk_conn();
+        conn.execute(
+            "INSERT INTO pull_requests (id, pr_number, repo_full_name, title, url,
+                author_id, additions, deletions, changed_files, created_at, merged, merged_at, body)
+             VALUES ('pr1', 1, 'udg-pds/spring-foo', 't', 'u', 'u1', 0, 0, 0,
+                     '2026-02-20', 1, '2026-02-22', '')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, task_key, name, type, status, estimation_points,
+                assignee_id, sprint_id) VALUES (1, 'T-1', 'x', 'TASK', 'DONE', 3, 'u1', 10)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (1, 'pr1')",
+            [],
+        )
+        .unwrap();
+        seed_complexity_finding(
+            &conn,
+            1,
+            "udg-pds/spring-foo",
+            "src/main/java/com/x/UserController.java",
+            "UserController",
+            "register",
+            "cyclomatic",
+            "WARNING",
+            42,
+            90,
+            Some(17.0),
+            Some(15.0),
+        );
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("`UserController.register()`"));
+        assert!(body.contains(
+            "blob/HEAD/src/main/java/com/x/UserController.java#L42-L90"
+        ));
+        assert!(body.contains("Cyclomatic complexity above the ceiling"));
+        assert!(body.contains("(17 > 15)"));
+        // Student-facing report MUST NOT leak grading information *inside
+        // the complexity section*.
+        let section_start = body
+            .find("## Code complexity & testability")
+            .expect("section header present");
+        let section_end = body[section_start + 1..]
+            .find("\n## ")
+            .map(|i| section_start + 1 + i)
+            .unwrap_or(body.len());
+        let section = &body[section_start..section_end];
+        assert!(!section.contains("weight"));
+        assert!(!section.contains("COMPLEXITY_HOTSPOT"));
+    }
+
+    #[test]
+    fn complexity_section_groups_multiple_rules_under_same_method() {
+        let conn = mk_conn();
+        conn.execute(
+            "INSERT INTO pull_requests (id, pr_number, repo_full_name, title, url,
+                author_id, additions, deletions, changed_files, created_at, merged, merged_at, body)
+             VALUES ('pr1', 1, 'udg-pds/spring-foo', 't', 'u', 'u1', 0, 0, 0,
+                     '2026-02-20', 1, '2026-02-22', '')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, task_key, name, type, status, estimation_points,
+                assignee_id, sprint_id) VALUES (1, 'T-1', 'x', 'TASK', 'DONE', 3, 'u1', 10)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (1, 'pr1')",
+            [],
+        )
+        .unwrap();
+        seed_complexity_finding(
+            &conn,
+            1,
+            "udg-pds/spring-foo",
+            "src/main/java/com/x/A.java",
+            "A",
+            "f",
+            "cyclomatic",
+            "CRITICAL",
+            10,
+            50,
+            Some(22.0),
+            Some(15.0),
+        );
+        seed_complexity_finding(
+            &conn,
+            2,
+            "udg-pds/spring-foo",
+            "src/main/java/com/x/A.java",
+            "A",
+            "f",
+            "broad-catch",
+            "WARNING",
+            10,
+            50,
+            None,
+            None,
+        );
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let method_occurrences = body.matches("`A.f()`").count();
+        assert_eq!(method_occurrences, 1);
+        assert!(body.contains("Cyclomatic complexity above the ceiling"));
+        assert!(body.contains("Catches `Exception`/`Throwable` without rethrowing"));
+    }
+
+    #[test]
+    fn professor_view_appends_attribution_block_with_flag_band() {
+        let conn = mk_conn();
+        conn.execute(
+            "INSERT INTO pull_requests (id, pr_number, repo_full_name, title, url,
+                author_id, additions, deletions, changed_files, created_at, merged, merged_at, body)
+             VALUES ('pr1', 1, 'udg-pds/spring-foo', 't', 'u', 'u1', 0, 0, 0,
+                     '2026-02-20', 1, '2026-02-22', '')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, task_key, name, type, status, estimation_points,
+                assignee_id, sprint_id) VALUES (1, 'T-1', 'x', 'TASK', 'DONE', 3, 'u1', 10)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (1, 'pr1')",
+            [],
+        )
+        .unwrap();
+        seed_complexity_finding(
+            &conn,
+            1,
+            "udg-pds/spring-foo",
+            "src/main/java/com/x/UserController.java",
+            "UserController",
+            "register",
+            "cyclomatic",
+            "WARNING",
+            42,
+            90,
+            Some(17.0),
+            Some(15.0),
+        );
+        seed_complexity_attribution(&conn, 1, "u1", 1.0);
+        seed_complexity_flag(&conn, "u1", "WARNING");
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REPORT_PROFESSOR.md");
+        generate_markdown_report_multi_to_path_with_opts(
+            &conn,
+            1,
+            "pds26-1a",
+            &[10],
+            &path,
+            MultiReportOptions {
+                include_static_analysis: true,
+                professor_view: true,
+            },
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("## Code complexity & testability"));
+        assert!(body.contains("grading attribution"));
+        assert!(body.contains("Alice Bob") && body.contains("score"));
+        assert!(body.contains("COMPLEXITY_HOTSPOT band: `WARNING`"));
+        let prof_section_start = body.find("grading attribution").unwrap();
+        let prof_section = &body[prof_section_start..];
+        assert!(prof_section.contains(
+            "blob/HEAD/src/main/java/com/x/UserController.java#L42-L90"
+        ));
+    }
+
+    #[test]
+    fn professor_view_off_by_default_does_not_render_attribution_block() {
+        let conn = mk_conn();
+        conn.execute(
+            "INSERT INTO pull_requests (id, pr_number, repo_full_name, title, url,
+                author_id, additions, deletions, changed_files, created_at, merged, merged_at, body)
+             VALUES ('pr1', 1, 'udg-pds/spring-foo', 't', 'u', 'u1', 0, 0, 0,
+                     '2026-02-20', 1, '2026-02-22', '')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, task_key, name, type, status, estimation_points,
+                assignee_id, sprint_id) VALUES (1, 'T-1', 'x', 'TASK', 'DONE', 3, 'u1', 10)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (1, 'pr1')",
+            [],
+        )
+        .unwrap();
+        seed_complexity_finding(
+            &conn,
+            1,
+            "udg-pds/spring-foo",
+            "src/main/java/com/x/A.java",
+            "A",
+            "f",
+            "cyclomatic",
+            "WARNING",
+            10,
+            50,
+            Some(12.0),
+            Some(10.0),
+        );
+        seed_complexity_attribution(&conn, 1, "u1", 1.0);
+        seed_complexity_flag(&conn, "u1", "WARNING");
+
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("## Code complexity & testability"));
+        assert!(!body.contains("grading attribution"));
+        assert!(!body.contains("COMPLEXITY_HOTSPOT band"));
     }
 }

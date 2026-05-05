@@ -51,6 +51,13 @@ pub struct MethodMetrics {
     pub parameter_count: i64,
     pub max_nesting_depth: i64,
     pub return_count: i64,
+    /// 1-based line where the method declaration begins (inclusive).
+    /// Wired into `method_metrics.start_line` so the testability stage
+    /// can derive findings + drive bad-line-weighted blame attribution
+    /// without re-parsing the source.
+    pub start_line: i64,
+    /// 1-based line where the method declaration ends (inclusive).
+    pub end_line: i64,
 }
 
 fn children(node: Node) -> Vec<Node> {
@@ -200,6 +207,8 @@ pub fn analyze_method(node: Node, source: &[u8], file_path: &str) -> MethodMetri
         parameter_count: count_parameters(node),
         max_nesting_depth: max_nesting_depth(node, source),
         return_count: count_returns(node),
+        start_line: (node.start_position().row as i64) + 1,
+        end_line: (node.end_position().row as i64) + 1,
     }
 }
 

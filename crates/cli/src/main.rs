@@ -208,6 +208,15 @@ enum Command {
         #[arg(long)]
         no_spotbugs: bool,
     },
+    /// Per-method complexity & testability scan (T-CX). Writes
+    /// `method_complexity_findings`, `method_complexity_attribution`,
+    /// `method_metrics`, and a `method_complexity_runs` row per
+    /// (repo, sprint). Re-runs against the same git HEAD short-circuit
+    /// to keep `report` regeneration cheap.
+    ComplexityScan {
+        #[command(flatten)]
+        projects: ProjectsArg,
+    },
     /// Process metrics (planning, regularity, temporal, collaboration).
     Process {
         #[command(flatten)]
@@ -264,6 +273,12 @@ enum Command {
         /// Commit and push updated report files directly to `main`
         #[arg(long)]
         push: bool,
+        /// Additionally render an instructor-only `REPORT_PROFESSOR.md`
+        /// to the parent of each android repo. Includes per-student
+        /// weighted attribution + the COMPLEXITY_HOTSPOT band — never
+        /// committed to the team repo. T-CX (step 7).
+        #[arg(long)]
+        professor_report: bool,
     },
     /// Refresh reports for every sprint up to `today` and publish them to the
     /// Android repo clones.
@@ -705,6 +720,25 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::ComplexityScan { projects } => {
+            let filter = parse_project_filter(projects.projects);
+            let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
+            for g in &groups {
+                let project_root = entregues_dir.join(&g.name);
+                for sid in &g.sprint_ids {
+                    sprint_grader_quality::testability::scan_project_to_db(
+                        &db.conn,
+                        &project_root,
+                        *sid,
+                        g.project_id,
+                        &config.detector_thresholds,
+                    )
+                    .with_context(|| {
+                        format!("complexity scan failed for sprint_id {sid}")
+                    })?;
+                }
+            }
+        }
         Command::Process { projects } => {
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
@@ -882,7 +916,11 @@ fn main() -> Result<()> {
             .context("estimation bias fitting failed")?;
             info!(students_written = n, "estimation bias fitted");
         }
-        Command::Report { projects, push } => {
+        Command::Report {
+            projects,
+            push,
+            professor_report,
+        } => {
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
             if groups.is_empty() {
@@ -929,7 +967,33 @@ fn main() -> Result<()> {
                     &report_path,
                 )
                 .with_context(|| format!("Markdown report failed for {}", report_path.display()))?;
-                repo_reports.entry(repo_root).or_default().push(report_path);
+                repo_reports.entry(repo_root.clone()).or_default().push(report_path);
+
+                if professor_report {
+                    // Parent of the android repo — `data/entregues/<project>/`
+                    // by convention. Stays OUT of the android repo's git
+                    // tree so the per-student attribution + flag rendering
+                    // never gets pushed to the team's branch.
+                    let prof_path = repo_root
+                        .parent()
+                        .unwrap_or(&repo_root)
+                        .join("REPORT_PROFESSOR.md");
+                    sprint_grader_report::generate_markdown_report_multi_to_path_with_opts(
+                        &db.conn,
+                        g.project_id,
+                        &g.name,
+                        &g.sprint_ids,
+                        &prof_path,
+                        sprint_grader_report::MultiReportOptions {
+                            include_static_analysis: true,
+                            professor_view: true,
+                        },
+                    )
+                    .with_context(|| {
+                        format!("Professor report failed for {}", prof_path.display())
+                    })?;
+                    info!(path = %prof_path.display(), "professor report written");
+                }
             }
 
             if push {

@@ -68,6 +68,10 @@ impl Database {
             ("architecture_violations", "rule_version", "TEXT"),
             ("architecture_violations", "explanation", "TEXT"),
             // T-SA: static_analysis_* columns added here when needed.
+            // T-CX: line range on `method_metrics` so testability scans
+            // can derive classic complexity findings without re-parsing.
+            ("method_metrics", "start_line", "INTEGER"),
+            ("method_metrics", "end_line", "INTEGER"),
         ];
         for (table, column, coltype) in migrations {
             let existing: Vec<String> = self.column_names(table)?;

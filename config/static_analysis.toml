@@ -1,0 +1,47 @@
+# Java static-analysis configuration for trackdev-grader.
+#
+# Rename this file to `static_analysis.toml` to enable the stage. With the
+# file absent, `run-all` and `go` silently skip static-analysis; with the
+# file present, they run PMD + Checkstyle (+ SpotBugs in T6) per
+# (project, sprint) and persist findings + per-student blame attribution.
+#
+# Findings surface in REPORT.md (instructor-only by default — sync-reports
+# strips the section before pushing to team repos) and as the
+# `STATIC_ANALYSIS_HOTSPOT` flag. The flag is feedback-only by default:
+# `static_analysis_hotspot_min_weighted = 10.0` in `course.toml
+# [detector_thresholds]` keeps it effectively silent. Lower it when ready
+# to grade.
+
+severity_floor = "INFO"            # drop findings below this before INSERT
+max_findings_per_analyzer = 200    # per (repo, sprint, analyzer) cap
+timeout_seconds = 120
+locale = "es"                      # 'es' | 'ca' | 'en'
+
+# --- Per-analyzer config ---------------------------------------------------
+
+[pmd]
+enabled = true
+preset  = "beginner"               # 'beginner' | 'standard' | 'strict'
+# ruleset_path = "config/pmd/custom.xml"     # absolute path; overrides `preset`
+include_cpd = true                 # within-repo copy-paste detection
+heap_mb = 512
+
+[checkstyle]
+enabled = true
+preset  = "beginner"
+# ruleset_path = "config/checkstyle/custom.xml"
+heap_mb = 256
+
+[spotbugs]
+enabled = true                     # auto-skipped when compile_stage didn't produce classes (T6)
+effort  = "default"                # 'min' | 'less' | 'default' | 'more' | 'max'
+min_rank = 14                      # 1 = scariest, 20 = mildest
+include_findsecbugs = true
+heap_mb = 1024
+
+# --- Reporting tuning ------------------------------------------------------
+
+[reporting]
+group_by_file = true               # markdown sub-bullets grouped per file
+top_n_per_student = 5              # cap per-student finding list in REPORT.md
+include_help_uri = true
