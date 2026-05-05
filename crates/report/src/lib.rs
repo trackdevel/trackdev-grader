@@ -12,6 +12,7 @@ pub mod xlsx;
 pub use markdown::{
     generate_markdown_report, generate_markdown_report_ex, generate_markdown_report_multi,
     generate_markdown_report_multi_to_path, generate_markdown_report_multi_to_path_ex,
-    generate_markdown_report_to_path_ex, generate_markdown_report_to_path_ex2,
+    generate_markdown_report_multi_to_path_with_opts, generate_markdown_report_to_path_ex,
+    generate_markdown_report_to_path_ex2, MultiReportOptions,
 };
 pub use xlsx::{generate_reports, generate_summary_report, generate_team_report};
