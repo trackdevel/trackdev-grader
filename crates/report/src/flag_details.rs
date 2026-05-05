@@ -38,6 +38,7 @@ pub(crate) fn render_flag_details(flag_type: &str, details: Option<&str>) -> Ren
         ("COSMETIC_REWRITE", Some(v)) => render_cosmetic_rewrite_legacy(v),
         ("COMPLEXITY_HOTSPOT", Some(v)) => render_complexity_hotspot(v),
         ("STATIC_ANALYSIS_HOTSPOT", Some(v)) => render_static_analysis_hotspot(v),
+        ("ARCHITECTURE_HOTSPOT", Some(v)) => render_architecture_hotspot(v),
         (_, Some(v)) => render_generic(v),
         (_, None) => {
             let text = details.unwrap_or_default().to_string();
@@ -495,8 +496,27 @@ fn render_complexity_hotspot(v: &Value) -> RenderedFlagDetails {
         (Some(s), _, _) => format!("Complexity hotspot score {}.", fmt_num(s)),
         _ => "Complexity hotspot threshold reached.".to_string(),
     };
-    let tail = " See the Code complexity & testability section for the offending methods.";
+    let tail =
+        " See the Complexity & testability block in this dashboard for the offending methods.";
     let text = format!("{band}{tail}");
+    RenderedFlagDetails::new(text.clone(), md_escape(&text), None)
+}
+
+fn render_architecture_hotspot(v: &Value) -> RenderedFlagDetails {
+    let weighted = number_field(v, "weighted");
+    let min_weighted = number_field(v, "min_weighted");
+    let lead = match (weighted, min_weighted) {
+        (Some(w), Some(m)) => format!(
+            "Architecture weighted contribution reached {} (threshold {}).",
+            fmt_num(w),
+            fmt_num(m)
+        ),
+        (Some(w), None) => format!("Architecture weighted contribution reached {}.", fmt_num(w)),
+        _ => "Architecture hotspot threshold reached.".to_string(),
+    };
+    let tail =
+        " See the Architecture violations block in this dashboard for the attributed offenders.";
+    let text = format!("{lead}{tail}");
     RenderedFlagDetails::new(text.clone(), md_escape(&text), None)
 }
 
@@ -512,7 +532,7 @@ fn render_static_analysis_hotspot(v: &Value) -> RenderedFlagDetails {
         (Some(w), None) => format!("Static-analysis weighted findings reached {}.", fmt_num(w)),
         _ => "Static-analysis threshold reached.".to_string(),
     };
-    let tail = " See the Static code analysis section for the attributed findings.";
+    let tail = " See the Static analysis block in this dashboard for the attributed findings.";
     let text = format!("{lead}{tail}");
     RenderedFlagDetails::new(text.clone(), md_escape(&text), None)
 }
