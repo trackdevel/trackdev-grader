@@ -10,7 +10,7 @@
 //! Inline `<svg>` blocks keep the document self-contained (GitHub, GitLab,
 //! and most Markdown viewers render SVG). No external image assets.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -622,7 +622,11 @@ fn write_student_summary_table(buf: &mut String, students: &[StudentSummaryRow])
     let mad = sprint_grader_core::stats::mad(&densities);
     push_table_header(buf, &student_summary_headers());
     for s in students {
-        let density_value = if s.density > 0.0 { Some(s.density) } else { None };
+        let density_value = if s.density > 0.0 {
+            Some(s.density)
+        } else {
+            None
+        };
         let cells = vec![
             s.full_name.clone(),
             s.github_login
@@ -1155,108 +1159,33 @@ Severity bands per `architecture.toml`. Per-student attribution \
 (by dominant author of the offending file) follows in Section B.\n",
             arch_total, crit, warn, info_n
         );
-        // For every rule, fetch the (file, repo_full_name) pairs that
-        // violate it. The renderer then groups by humanised rule
-        // description and emits a nested list with one bullet per file,
-        // each as a clickable GitHub link. Falls back to a plain
-        // `Filename` if the repo_full_name is not org-qualified (legacy
-        // rows from earlier scans).
-        let mut stmt = conn.prepare(
-            "SELECT av.rule_name, av.file_path, av.repo_full_name,
-                    av.start_line, av.end_line, av.explanation
-             FROM architecture_violations av
-             JOIN sprints s ON s.id = av.sprint_id
-             WHERE s.project_id = ? AND av.sprint_id = ?
-             ORDER BY av.rule_name, av.file_path, av.start_line",
-        )?;
-        type RawArchRow = (
-            String,
-            String,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            Option<String>,
-        );
-        let raw_rows: Vec<RawArchRow> = stmt
-            .query_map(rusqlite::params![project_id, sprint_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<i64>>(3)?,
-                    r.get::<_, Option<i64>>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        drop(stmt);
 
-        if !raw_rows.is_empty() {
-            // Map bare repo basename → qualified `<org>/<repo>` for this
-            // project, so legacy `architecture_violations` rows that stored
-            // only the bare directory name still get a clickable github link.
-            // Built once from `pull_requests`.
-            let qualified_by_basename = qualified_repo_names_by_basename(conn);
-
-            // Group by rule_name → unique
-            // (file_path, repo_full_qualified, start_line, end_line, explanation)
-            // tuples, preserving order seen.
-            type FileEntry = (String, String, Option<i64>, Option<i64>, Option<String>);
-            let mut by_rule: Vec<(String, Vec<FileEntry>)> = Vec::new();
-            for (rule, file, repo, start, end, expl) in raw_rows {
-                let repo_raw = repo.unwrap_or_default();
-                let repo = qualify_repo_name(&repo_raw, &qualified_by_basename);
-                let entry = (file, repo, start, end, expl);
-                match by_rule.iter_mut().find(|(r, _)| r == &rule) {
-                    Some((_, files)) => {
-                        if !files.contains(&entry) {
-                            files.push(entry);
-                        }
-                    }
-                    None => by_rule.push((rule, vec![entry])),
-                }
-            }
-            // Sort rules by descending row count, tie-break alphabetic.
-            by_rule.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
-
-            let _ = writeln!(buf, "**Violations by rule:**\n");
-            for (rule, files) in by_rule {
-                let unique_files: HashSet<&str> =
-                    files.iter().map(|(f, _, _, _, _)| f.as_str()).collect();
-                let _ = writeln!(
-                    buf,
-                    "- {} — {} occurrence{} across {} file{}",
-                    humanize_rule_name(&rule),
-                    files.len(),
-                    if files.len() == 1 { "" } else { "s" },
-                    unique_files.len(),
-                    if unique_files.len() == 1 { "" } else { "s" }
-                );
-                for (file, repo, start, end, expl) in files {
-                    let basename = file.rsplit('/').next().unwrap_or(&file);
-                    let label = format!("`{}`", md_escape(basename));
-                    let line_suffix = format_line_suffix(start, end);
-                    let url_anchor = format_url_line_anchor(start, end);
-                    let cell = match github_file_url(&repo, &file) {
-                        Some(url) => format!(
-                            "[{}{}]({}{} \"{}\")",
-                            label,
-                            line_suffix,
-                            url,
-                            url_anchor,
-                            md_escape(&file)
-                        ),
-                        None => {
-                            format!("{}{} (`{}`)", label, line_suffix, md_escape(&file))
-                        }
-                    };
-                    let _ = writeln!(buf, "  - {}", cell);
-                    if let Some(prose) = expl.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                        let _ = writeln!(buf, "    - {}", md_escape(prose));
-                    }
-                }
-            }
-            buf.push('\n');
+        // Stub for violations whose offending region has no surviving
+        // authorship — they appear nowhere in Section B because there is
+        // no student to blame. Surface the count here so the team total
+        // is reconcilable with the per-student breakdowns.
+        let unattributed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM architecture_violations av
+                 JOIN sprints s ON s.id = av.sprint_id
+                 WHERE s.project_id = ? AND av.sprint_id = ?
+                   AND NOT EXISTS (
+                     SELECT 1 FROM architecture_violation_attribution a
+                     WHERE a.violation_rowid = av.rowid
+                       AND a.weight > 0
+                   )",
+                rusqlite::params![project_id, sprint_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if unattributed > 0 {
+            let _ = writeln!(
+                buf,
+                "**Unattributed violations:** {} — offending lines have no \
+surviving authorship in this sprint, so they are not assigned to any \
+student in Section B.\n",
+                unattributed
+            );
         }
     }
 
@@ -1304,13 +1233,10 @@ struct AttributedArchViolation {
     start_line: Option<i64>,
     end_line: Option<i64>,
     explanation: Option<String>,
-}
-
-/// Normalize a repo_full_name to its trailing component. The architecture
-/// stage stores `<repo>` while survival/blame stores `<org>/<repo>`; this
-/// strips any leading `<org>/` so both sources can be matched by basename.
-fn repo_basename(repo: &str) -> &str {
-    repo.rsplit('/').next().unwrap_or(repo)
+    /// Blame share in [0, 1] of the violation's line range owned by this
+    /// student. Sourced from `architecture_violation_attribution.weight`.
+    /// Rows with weight ≤ 0 are dropped before reaching this struct.
+    weight: f64,
 }
 
 /// Plain-English explanations for the AST + forbidden-import rule keys
@@ -1424,43 +1350,44 @@ fn humanize_rule_name(rule: &str) -> String {
     md_escape(&humanize_unknown_rule_key(rule))
 }
 
+/// Build the per-student architecture-violation map from
+/// `architecture_violation_attribution`. Rows are filtered to students
+/// who fired `ARCHITECTURE_HOTSPOT` this sprint (consolidation: per-student
+/// detail only appears when the flag is on) and to attributions whose
+/// `weight > 0` (a 0-share row would render as "0% of lines", which is
+/// the same as not authoring the offending region — pure noise).
+///
+/// `weight` here is a true blame share: `lines_authored / total_lines`
+/// over the violation's start/end range, computed by the architecture
+/// stage's blame attribution pass. A weight of 1.0 means the student owns
+/// every line of the offending region; 0.5 means half of them.
 fn architecture_violations_per_student(
     conn: &Connection,
     sprint_id: i64,
     project_id: i64,
 ) -> rusqlite::Result<HashMap<String, Vec<AttributedArchViolation>>> {
-    let ownership =
-        sprint_grader_repo_analysis::file_ownership_for_project(conn, sprint_id, project_id)
-            .unwrap_or_default();
-    // (file_path, repo_basename) → (student_id, repo_full_qualified). The
-    // ownership query already collapsed authors per file and resolved login
-    // → student_id where possible, so we only have to index it. Keying by
-    // repo basename keeps the lookup robust to the org-prefix mismatch
-    // between `architecture_violations` and `fingerprints`; we keep the
-    // org-qualified name alongside so URLs can be built later.
-    let mut owner_by_file: HashMap<(String, String), (String, String)> = HashMap::new();
-    for f in ownership {
-        let repo = f.repo_full_name.unwrap_or_default();
-        let key = (f.file_path, repo_basename(&repo).to_string());
-        owner_by_file.insert(key, (f.dominant_author, repo));
-    }
-
-    // Limit to student_ids that actually belong to this team — keeps
-    // anonymous logins or stale identities from leaking into the report.
-    let mut team_stmt = conn.prepare("SELECT id FROM students WHERE team_project_id = ?")?;
-    let team: HashSet<String> = team_stmt
-        .query_map([project_id], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(team_stmt);
-
+    let qualified_by_basename = qualified_repo_names_by_basename(conn);
     let mut stmt = conn.prepare(
-        "SELECT av.rule_name, av.file_path, av.repo_full_name, av.severity,
-                av.offending_import, av.start_line, av.end_line, av.explanation
-         FROM architecture_violations av
-         JOIN sprints s ON s.id = av.sprint_id
-         WHERE s.project_id = ? AND av.sprint_id = ?",
+        "SELECT a.student_id,
+                av.rule_name, av.file_path, av.repo_full_name, av.severity,
+                av.offending_import, av.start_line, av.end_line, av.explanation,
+                a.weight
+         FROM architecture_violation_attribution a
+         JOIN architecture_violations av ON av.rowid = a.violation_rowid
+         JOIN students s ON s.id = a.student_id
+         WHERE a.sprint_id = ?
+           AND s.team_project_id = ?
+           AND a.weight > 0
+           AND EXISTS (
+             SELECT 1 FROM flags f
+             WHERE f.sprint_id = a.sprint_id
+               AND f.student_id = a.student_id
+               AND f.flag_type = 'ARCHITECTURE_HOTSPOT'
+           )
+         ORDER BY a.weight DESC, av.file_path, av.start_line",
     )?;
-    type AttrRow = (
+    type Row = (
+        String,
         String,
         String,
         String,
@@ -1469,46 +1396,56 @@ fn architecture_violations_per_student(
         Option<i64>,
         Option<i64>,
         Option<String>,
+        f64,
     );
-    let rows: Vec<AttrRow> = stmt
-        .query_map(rusqlite::params![project_id, sprint_id], |r| {
+    let rows: Vec<Row> = stmt
+        .query_map(rusqlite::params![sprint_id, project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
-                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, String>(5)?,
                 r.get::<_, Option<i64>>(6)?,
-                r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<i64>>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, f64>(9)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
     let mut out: HashMap<String, Vec<AttributedArchViolation>> = HashMap::new();
-    for (rule, file, repo, severity, import, start, end, expl) in rows {
-        let key = (file.clone(), repo_basename(&repo).to_string());
-        let Some((owner, repo_fqn)) = owner_by_file.get(&key) else {
-            continue;
-        };
-        if !team.contains(owner) {
-            continue;
-        }
-        out.entry(owner.clone())
-            .or_default()
-            .push(AttributedArchViolation {
-                rule_name: rule,
-                file_path: file,
-                severity,
-                offending_import: import,
-                repo_full_qualified: repo_fqn.clone(),
-                start_line: start,
-                end_line: end,
-                explanation: expl,
-            });
+    for (sid, rule, file, repo, severity, import, start, end, expl, weight) in rows {
+        let repo_fqn = qualify_repo_name(&repo, &qualified_by_basename);
+        out.entry(sid).or_default().push(AttributedArchViolation {
+            rule_name: rule,
+            file_path: file,
+            severity,
+            offending_import: import,
+            repo_full_qualified: repo_fqn,
+            start_line: start,
+            end_line: end,
+            explanation: expl,
+            weight,
+        });
     }
     Ok(out)
+}
+
+/// Render a blame-share weight as ` · 72% of lines`. The leading
+/// separator is part of the suffix so callers can append it directly to
+/// any bullet without conditional spacing. Returns an empty string when
+/// `weight ≤ 0` (which we already filter out at the SQL layer, but this
+/// keeps the helper safe to call unconditionally).
+fn format_blame_weight_suffix(weight: f64) -> String {
+    if weight <= 0.0 {
+        return String::new();
+    }
+    let pct = (weight * 100.0).round() as i64;
+    let pct = pct.clamp(1, 100);
+    format!(" · {}% of lines", pct)
 }
 
 /// Build a clickable GitHub URL for a file at the default branch (`HEAD`).
@@ -1629,6 +1566,8 @@ fn write_section_b(
     let task_stmts = task_stmts_for_team(conn, sprint_id, project_id)?;
     let pr_stmts = pr_stmts_for_team(conn, sprint_id, project_id)?;
     let arch_per_student = architecture_violations_per_student(conn, sprint_id, project_id)?;
+    let complexity_per_student = complexity_findings_per_student(conn, sprint_id, project_id)?;
+    let qualified_by_basename = qualified_repo_names_by_basename(conn);
 
     // Per-PR documentation score (heuristic title+description rubric or
     // LLM judge). Populates a single column in the per-PR table below.
@@ -2017,6 +1956,12 @@ fn write_section_b(
             }
         }
 
+        if let Some(findings) = complexity_per_student.get(sid) {
+            if !findings.is_empty() {
+                write_student_complexity_block(buf, findings, &qualified_by_basename);
+            }
+        }
+
         if let Some((sa_data, top_n)) = sa_per_student {
             if let Some(findings) = sa_data.get(sid) {
                 if !findings.is_empty() {
@@ -2030,10 +1975,16 @@ fn write_section_b(
     Ok(())
 }
 
-/// Per-student architecture detail. Aggregates violations by rule, lists the
-/// top files for each rule, and emits a compact severity breakdown so each
-/// student sees their own architectural debt as an individual signal.
+/// Per-student architecture-violation block. One bullet per attributed
+/// violation, sorted by descending blame-share. Each bullet carries the
+/// humanised rule prose, the violation's severity, and a `· N% of lines`
+/// suffix derived from `architecture_violation_attribution.weight`.
+/// Optional LLM-supplied explanation renders as a child bullet so the
+/// reader sees the *why*, not just the tag.
 fn write_student_architecture_block(buf: &mut String, violations: &[AttributedArchViolation]) {
+    if violations.is_empty() {
+        return;
+    }
     let total = violations.len();
     let crit = violations
         .iter()
@@ -2054,78 +2005,48 @@ fn write_student_architecture_block(buf: &mut String, violations: &[AttributedAr
         total, crit, warn, info_n
     );
 
-    // Group by rule_name. Each grouped row keeps everything needed to render
-    // a self-contained explanation: file, qualified repo, offending import,
-    // line range, and any LLM-supplied prose. Rule order: descending count,
-    // tie-break alphabetical for determinism.
-    let mut by_rule: HashMap<String, Vec<&AttributedArchViolation>> = HashMap::new();
-    for v in violations {
-        by_rule.entry(v.rule_name.clone()).or_default().push(v);
-    }
-    let mut rules: Vec<(String, Vec<&AttributedArchViolation>)> = by_rule.into_iter().collect();
-    rules.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    let mut sorted: Vec<&AttributedArchViolation> = violations.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.weight
+            .partial_cmp(&a.weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.offending_import.cmp(&b.offending_import))
+    });
 
-    for (rule, files) in rules {
-        let unique_files: HashSet<&str> = files.iter().map(|v| v.file_path.as_str()).collect();
+    for v in sorted {
+        let basename = v.file_path.rsplit('/').next().unwrap_or(&v.file_path);
+        let label = format!("`{}`", md_escape(basename));
+        let line_suffix = format_line_suffix(v.start_line, v.end_line);
+        let url_anchor = format_url_line_anchor(v.start_line, v.end_line);
+        let file_cell = match github_file_url(&v.repo_full_qualified, &v.file_path) {
+            Some(url) => format!(
+                "[{}{}]({}{} \"{}\")",
+                label,
+                line_suffix,
+                url,
+                url_anchor,
+                md_escape(&v.file_path)
+            ),
+            None => format!("{}{}", label, line_suffix),
+        };
+        let weight_suffix = format_blame_weight_suffix(v.weight);
         let _ = writeln!(
             buf,
-            "- {} — {} occurrence(s) across {} file(s)",
-            humanize_rule_name(&rule),
-            files.len(),
-            unique_files.len()
+            "- {} — {} _({})_{}",
+            file_cell,
+            humanize_rule_name(&v.rule_name),
+            v.severity.to_lowercase(),
+            weight_suffix
         );
-        // Show up to 3 examples per rule. The file appears as a
-        // [basename:Lstart-Lend](github-url#L…) link with the full path in
-        // the title attribute, so the visible text stays short while the
-        // exact location is one click away. The optional LLM explanation is
-        // emitted as a child bullet so students see the *why*, not just the
-        // tag.
-        let mut shown: Vec<&&AttributedArchViolation> = files.iter().collect();
-        shown.sort_by(|a, b| {
-            a.file_path
-                .cmp(&b.file_path)
-                .then_with(|| a.start_line.cmp(&b.start_line))
-                .then_with(|| a.offending_import.cmp(&b.offending_import))
-        });
-        shown.dedup_by(|a, b| {
-            a.file_path == b.file_path
-                && a.start_line == b.start_line
-                && a.end_line == b.end_line
-                && a.offending_import == b.offending_import
-        });
-        for v in shown.iter().take(3) {
-            let basename = v.file_path.rsplit('/').next().unwrap_or(&v.file_path);
-            let label = format!("`{}`", basename);
-            let line_suffix = format_line_suffix(v.start_line, v.end_line);
-            let url_anchor = format_url_line_anchor(v.start_line, v.end_line);
-            let file_cell = match github_file_url(&v.repo_full_qualified, &v.file_path) {
-                Some(url) => format!(
-                    "[{}{}]({}{} \"{}\")",
-                    label,
-                    line_suffix,
-                    url,
-                    url_anchor,
-                    md_escape(&v.file_path)
-                ),
-                None => format!("{}{}", label, line_suffix),
-            };
-            let _ = writeln!(
-                buf,
-                "  - {} ← `{}`",
-                file_cell,
-                html_escape(&v.offending_import)
-            );
-            if let Some(prose) = v
-                .explanation
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                let _ = writeln!(buf, "    - {}", md_escape(prose));
-            }
-        }
-        if shown.len() > 3 {
-            let _ = writeln!(buf, "  - … and {} more", shown.len() - 3);
+        if let Some(prose) = v
+            .explanation
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let _ = writeln!(buf, "  - {}", md_escape(prose));
         }
     }
     buf.push('\n');
@@ -2193,11 +2114,7 @@ fn static_analysis_per_student(
     Ok(result)
 }
 
-fn write_student_static_analysis_block(
-    buf: &mut String,
-    findings: &[SaFinding],
-    top_n: usize,
-) {
+fn write_student_static_analysis_block(buf: &mut String, findings: &[SaFinding], top_n: usize) {
     use sprint_grader_static_analysis::i18n;
 
     let total = findings.len();
@@ -2230,8 +2147,9 @@ fn write_student_static_analysis_block(
         total_weight,
     );
 
-    let cap = top_n.max(1);
-    for f in findings.iter().take(cap) {
+    let _ = top_n;
+    let _ = i18n::MORE_LABEL;
+    for f in findings.iter() {
         let basename = f.file_path.rsplit('/').next().unwrap_or(&f.file_path);
         let label = format!("`{}`", basename);
         let line_suffix = format_line_suffix(f.start_line, f.end_line);
@@ -2240,154 +2158,167 @@ fn write_student_static_analysis_block(
             Some(url) => format!("[{}{}]({}{})", label, line_suffix, url, url_anchor),
             None => format!("{}{}", label, line_suffix),
         };
+        let weight_suffix = format_blame_weight_suffix(f.weight);
         let _ = writeln!(
             buf,
-            "- {} — `{}:{}` · _{}_ — {}",
+            "- {} — `{}:{}` · _{}_ — {}{}",
             file_cell,
             f.analyzer,
             f.rule_id,
             f.severity.to_lowercase(),
             md_escape(f.message.lines().next().unwrap_or("")),
+            weight_suffix,
         );
-    }
-    if findings.len() > cap {
-        let _ = writeln!(buf, "- … {} {}", findings.len() - cap, i18n::MORE_LABEL);
     }
     buf.push('\n');
 }
 
-// ── Section: complexity & testability hotspots (T-CX) ────────────────────────
+// ── Per-student complexity & testability block ──────────────────────────────
+//
+// Folded into Section B alongside the architecture block: one consecutive
+// per-student section covering Flags + Architecture + Complexity. Gated by
+// `COMPLEXITY_HOTSPOT` firing for the student so the block only appears when
+// the flag is on, and by `weight > 0` so we never render rows the student
+// did not author.
 
-/// Student-facing complexity / testability section. Lists every method
-/// flagged by the testability scan, grouped by file, with a clickable
-/// `[Class.method()](github_url#L<start>-L<end>)` anchor and the rule's
-/// student-facing prose. **No** weights, severity tallies, attribution
-/// percentages, or flag rendering — those are the professor view (step 7).
-fn write_section_complexity_hotspots(
-    buf: &mut String,
+struct ComplexityFinding {
+    repo_full_name: String,
+    file_path: String,
+    class_name: Option<String>,
+    method_name: String,
+    start_line: i64,
+    end_line: i64,
+    rule_key: String,
+    severity: String,
+    measured_value: Option<f64>,
+    threshold: Option<f64>,
+    weight: f64,
+}
+
+fn complexity_findings_per_student(
     conn: &Connection,
     sprint_id: i64,
     project_id: i64,
-    depth: usize,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<HashMap<String, Vec<ComplexityFinding>>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.student_id,
+                f.repo_full_name, f.file_path, f.class_name, f.method_name,
+                f.start_line, f.end_line, f.rule_key, f.severity,
+                f.measured_value, f.threshold,
+                a.weight
+         FROM method_complexity_attribution a
+         JOIN method_complexity_findings f ON f.id = a.finding_id
+         JOIN students s ON s.id = a.student_id
+         WHERE a.sprint_id = ?
+           AND s.team_project_id = ?
+           AND a.weight > 0
+           AND EXISTS (
+             SELECT 1 FROM flags fl
+             WHERE fl.sprint_id = a.sprint_id
+               AND fl.student_id = a.student_id
+               AND fl.flag_type = 'COMPLEXITY_HOTSPOT'
+           )
+         ORDER BY a.weight DESC, f.file_path, f.start_line",
+    )?;
+    let mut result: HashMap<String, Vec<ComplexityFinding>> = HashMap::new();
+    let rows = stmt.query_map(rusqlite::params![sprint_id, project_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            ComplexityFinding {
+                repo_full_name: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                file_path: r.get(2)?,
+                class_name: r.get(3)?,
+                method_name: r.get(4)?,
+                start_line: r.get(5)?,
+                end_line: r.get(6)?,
+                rule_key: r.get(7)?,
+                severity: r.get(8)?,
+                measured_value: r.get(9)?,
+                threshold: r.get(10)?,
+                weight: r.get(11)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (sid, finding) = row?;
+        result.entry(sid).or_default().push(finding);
+    }
+    Ok(result)
+}
+
+fn write_student_complexity_block(
+    buf: &mut String,
+    findings: &[ComplexityFinding],
+    qualified_by_basename: &HashMap<String, String>,
+) {
     use sprint_grader_quality::i18n as cxi18n;
 
-    let h2 = "#".repeat(depth);
-    let _ = writeln!(buf, "{} {}\n", h2, cxi18n::SECTION_HEADER);
+    if findings.is_empty() {
+        return;
+    }
+    let total = findings.len();
+    let crit = findings
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("CRITICAL"))
+        .count();
+    let warn = findings
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("WARNING"))
+        .count();
+    let info_n = findings
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("INFO"))
+        .count();
 
-    type Row = (
-        i64,            // finding_id
-        String,         // repo_full_name
-        String,         // file_path
-        Option<String>, // class_name
-        String,         // method_name
-        i64,            // start_line
-        i64,            // end_line
-        String,         // rule_key
-        String,         // severity
-        Option<f64>,    // measured_value
-        Option<f64>,    // threshold
-        Option<String>, // detail
+    let _ = writeln!(
+        buf,
+        "**Complexity & testability:** {} ({} critical · {} warning · {} info)\n",
+        total, crit, warn, info_n
     );
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT f.id, f.repo_full_name, f.file_path, f.class_name,
-                f.method_name, f.start_line, f.end_line, f.rule_key, f.severity,
-                f.measured_value, f.threshold, f.detail
-         FROM method_complexity_findings f
-         WHERE f.sprint_id = ?
-           AND (
-             f.project_id = ?
-             OR EXISTS (
-               SELECT 1 FROM pull_requests pr
-               WHERE pr.repo_full_name = f.repo_full_name
-                 AND EXISTS (
-                   SELECT 1 FROM tasks t
-                   JOIN task_pull_requests tpr ON tpr.task_id = t.id
-                   WHERE tpr.pr_id = pr.id AND t.sprint_id = ?
-                 )
-             )
-           )
-         ORDER BY f.file_path, f.start_line, f.rule_key",
-    )?;
-    let rows: Vec<Row> = stmt
-        .query_map(rusqlite::params![sprint_id, project_id, sprint_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, i64>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, String>(8)?,
-                r.get::<_, Option<f64>>(9)?,
-                r.get::<_, Option<f64>>(10)?,
-                r.get::<_, Option<String>>(11)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(stmt);
 
-    if rows.is_empty() {
-        let _ = writeln!(buf, "{}\n", cxi18n::NO_FINDINGS);
-        return Ok(());
-    }
-
-    let _ = writeln!(buf, "{}", cxi18n::INTRO_BLURB);
-
-    use std::collections::BTreeMap;
-    type FileKey = (String, String);
-    type MethodKey = (Option<String>, String, i64, i64);
-    let mut by_file: BTreeMap<FileKey, BTreeMap<MethodKey, Vec<Row>>> = BTreeMap::new();
-    for r in rows {
-        let file_key = (r.1.clone(), r.2.clone());
-        let method_key = (r.3.clone(), r.4.clone(), r.5, r.6);
-        by_file
-            .entry(file_key)
-            .or_default()
-            .entry(method_key)
-            .or_default()
-            .push(r);
-    }
-
-    let qualified_by_basename = qualified_repo_names_by_basename(conn);
-    for ((repo_raw, file_path), methods) in by_file {
-        let repo = qualify_repo_name(&repo_raw, &qualified_by_basename);
-        let basename = file_path.rsplit('/').next().unwrap_or(&file_path);
-        let file_label = format!("`{}`", basename);
-        let file_link = match github_file_url(&repo, &file_path) {
-            Some(url) => format!("[{}]({} \"{}\")", file_label, url, file_path),
-            None => file_label,
+    for f in findings {
+        let repo = qualify_repo_name(&f.repo_full_name, qualified_by_basename);
+        let class_prefix = f
+            .class_name
+            .as_deref()
+            .filter(|s| !s.is_empty() && *s != "<unknown>")
+            .map(|c| format!("{c}."))
+            .unwrap_or_default();
+        let label = format!("`{}{}()`", class_prefix, f.method_name);
+        let url_anchor = format_url_line_anchor(Some(f.start_line), Some(f.end_line));
+        let line_suffix = format_line_suffix(Some(f.start_line), Some(f.end_line));
+        let file_cell = match github_file_url(&repo, &f.file_path) {
+            Some(url) => format!(
+                "[{}{}]({}{} \"{}\")",
+                label,
+                line_suffix,
+                url,
+                url_anchor,
+                md_escape(&f.file_path)
+            ),
+            None => format!("{}{}", label, line_suffix),
         };
-        let _ = writeln!(buf, "- {}", file_link);
-        for ((class_name, method_name, start, end), rules) in methods {
-            let class_prefix = class_name
-                .as_deref()
-                .filter(|s| !s.is_empty() && *s != "<unknown>")
-                .map(|c| format!("{c}."))
-                .unwrap_or_default();
-            let method_label = format!("`{}{}()`", class_prefix, method_name);
-            let url_anchor = format_url_line_anchor(Some(start), Some(end));
-            let method_link = match github_file_url(&repo, &file_path) {
-                Some(url) => format!("[{}]({}{})", method_label, url, url_anchor),
-                None => method_label,
-            };
-            let _ = writeln!(buf, "  - {}", method_link);
-            for r in rules {
-                let prose = cxi18n::rule_prose(&r.7);
-                let measured_tail = match (r.9, r.10) {
-                    (Some(m), Some(t)) => {
-                        format!(" ({} > {})", round_to_int_if_integer(m), round_to_int_if_integer(t))
-                    }
-                    _ => String::new(),
-                };
-                let _ = writeln!(buf, "    - {}{}", prose, measured_tail);
-            }
-        }
+        let prose = cxi18n::rule_prose(&f.rule_key);
+        let measured_tail = match (f.measured_value, f.threshold) {
+            (Some(m), Some(t)) => format!(
+                " ({} > {})",
+                round_to_int_if_integer(m),
+                round_to_int_if_integer(t)
+            ),
+            _ => String::new(),
+        };
+        let weight_suffix = format_blame_weight_suffix(f.weight);
+        let _ = writeln!(
+            buf,
+            "- {} — {} _({})_{}{}",
+            file_cell,
+            prose,
+            f.severity.to_lowercase(),
+            measured_tail,
+            weight_suffix,
+        );
     }
     buf.push('\n');
-    Ok(())
 }
 
 /// Professor-only attribution + flag block (T-CX, step 7). Renders
@@ -2458,7 +2389,8 @@ fn write_section_complexity_attribution(
     let _ = writeln!(
         buf,
         "{} {} — grading attribution (instructor view)\n",
-        h2, cxi18n::SECTION_HEADER
+        h2,
+        cxi18n::SECTION_HEADER
     );
     let _ = writeln!(buf, "{}", cxi18n::PROF_DISCLAIMER);
     let _ = writeln!(buf, "{} {}\n", h3, cxi18n::PROF_PER_STUDENT_HEADER);
@@ -2553,12 +2485,11 @@ fn write_section_complexity_attribution(
             let r = &rows[idx];
             let repo = qualify_repo_name(&r.10, &qualified_by_basename);
             let basename = r.5.rsplit('/').next().unwrap_or(&r.5);
-            let class_prefix = r
-                .6
-                .as_deref()
-                .filter(|s| !s.is_empty() && *s != "<unknown>")
-                .map(|c| format!("{c}."))
-                .unwrap_or_default();
+            let class_prefix =
+                r.6.as_deref()
+                    .filter(|s| !s.is_empty() && *s != "<unknown>")
+                    .map(|c| format!("{c}."))
+                    .unwrap_or_default();
             let method_label = format!("`{}{}()`", class_prefix, r.7);
             let url_anchor = format_url_line_anchor(Some(r.8), Some(r.9));
             let method_link = match github_file_url(&repo, &r.5) {
@@ -2638,13 +2569,13 @@ fn write_orphan_pr_annex(
          ORDER BY pr.merged_at, pr.pr_number"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(1 + sprint_ids_ordered.len());
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> =
+        Vec::with_capacity(1 + sprint_ids_ordered.len());
     params_vec.push(Box::new(project_id));
     for sid in sprint_ids_ordered {
         params_vec.push(Box::new(*sid));
     }
-    let params_refs: Vec<&dyn rusqlite::ToSql> =
-        params_vec.iter().map(|b| b.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
     let rows = stmt
         .query_map(&params_refs[..], |r| {
             Ok((
@@ -3143,6 +3074,115 @@ fn insert_glossary(buf: &mut String) {
     }
 }
 
+/// Build a "Team identity map" markdown section linking each TrackDev
+/// student to their resolved GitHub identity. Returns `None` when the
+/// project has no enrolled students. The caller is responsible for
+/// splicing the returned block into the right place in the report.
+fn render_team_identity_map(
+    conn: &Connection,
+    project_id: i64,
+    depth: usize,
+) -> rusqlite::Result<Option<String>> {
+    let mut buf = String::new();
+    write_team_identity_map_into(&mut buf, conn, project_id, depth)?;
+    Ok(if buf.is_empty() { None } else { Some(buf) })
+}
+
+/// Splice the team identity map immediately before the first H2 heading
+/// in `buf`, mirroring `insert_glossary`. Order of operations: call this
+/// **after** `insert_glossary` so the map ends up before the glossary
+/// (i.e. is the first level-2 section the reader sees).
+fn insert_team_identity_map(buf: &mut String, conn: &Connection, project_id: i64) {
+    let block = match render_team_identity_map(conn, project_id, 2) {
+        Ok(Some(b)) => b,
+        _ => return,
+    };
+    if buf.starts_with("## ") {
+        buf.insert_str(0, &block);
+        return;
+    }
+    if let Some(i) = buf.find("\n## ") {
+        buf.insert_str(i + 1, &block);
+    }
+}
+
+fn write_team_identity_map_into(
+    buf: &mut String,
+    conn: &Connection,
+    project_id: i64,
+    depth: usize,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT s.username, s.full_name, s.email,
+                COALESCE(gu.login, s.github_login),
+                gu.email
+         FROM students s
+         LEFT JOIN github_users gu ON gu.student_id = s.id
+         WHERE s.team_project_id = ?
+         ORDER BY COALESCE(s.full_name, s.username, s.id)",
+    )?;
+    type Row = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<Row> = stmt
+        .query_map([project_id], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let h = "#".repeat(depth);
+    let _ = writeln!(buf, "{} Team identity map\n", h);
+    push_table_header(
+        buf,
+        &[
+            "TrackDev user",
+            "Full name",
+            "TrackDev email",
+            "GitHub",
+            "GitHub email",
+        ],
+    );
+    for (username, full_name, td_email, gh_login, gh_email) in rows {
+        let user_cell = username.unwrap_or_default();
+        let name_cell = full_name.unwrap_or_default();
+        let td_email_cell = td_email.unwrap_or_default();
+        let gh_cell = match gh_login.as_deref().filter(|s| !s.is_empty()) {
+            Some(login) => github_cell(login),
+            None => "—".to_string(),
+        };
+        let gh_email_cell = gh_email
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "—".to_string());
+        push_table_row(
+            buf,
+            &[
+                md_escape(&user_cell),
+                md_escape(&name_cell),
+                md_escape(&td_email_cell),
+                gh_cell,
+                md_escape(&gh_email_cell),
+            ],
+        );
+    }
+    buf.push('\n');
+    Ok(())
+}
+
 pub fn generate_markdown_report(
     conn: &Connection,
     sprint_id: i64,
@@ -3243,7 +3283,6 @@ pub fn generate_markdown_report_to_path_ex2(
         2,
         sa_data.as_ref().map(|d| (d, DEFAULT_TOP_N_PER_STUDENT)),
     )?;
-    write_section_complexity_hotspots(&mut buf, conn, sprint_id, project_id, 2)?;
     write_section_c(&mut buf, conn, sprint_id, project_id, 2)?;
     if let Some(sids) = cumulative_sprint_ids {
         if !sids.is_empty() {
@@ -3251,8 +3290,11 @@ pub fn generate_markdown_report_to_path_ex2(
         }
     }
     // Glossary must land before the TOC builder runs so its heading is
-    // surfaced as the first TOC entry.
+    // surfaced as the first TOC entry. Team identity map is injected
+    // **after** the glossary so it ends up before it in the final order
+    // (each insert places itself before the current first H2).
     insert_glossary(&mut buf);
+    insert_team_identity_map(&mut buf, conn, project_id);
     insert_toc(&mut buf, TOC_MAX_DEPTH);
 
     std::fs::write(output_path, buf)
@@ -3468,7 +3510,6 @@ fn generate_markdown_report_multi_to_path_inner(
             3,
             sa_data.as_ref().map(|d| (d, DEFAULT_TOP_N_PER_STUDENT)),
         )?;
-        write_section_complexity_hotspots(&mut buf, conn, *sid, project_id, 3)?;
         if professor_view {
             write_section_complexity_attribution(&mut buf, conn, *sid, project_id, 3)?;
         }
@@ -3480,6 +3521,7 @@ fn generate_markdown_report_multi_to_path_inner(
     }
     write_orphan_pr_annex(&mut buf, conn, project_id, sprint_ids_ordered, 2)?;
     insert_glossary(&mut buf);
+    insert_team_identity_map(&mut buf, conn, project_id);
     insert_toc(&mut buf, TOC_MAX_DEPTH);
 
     std::fs::write(output_path, &buf)
@@ -3748,8 +3790,8 @@ mod tests {
             "CREATE TABLE sprints (id INTEGER PRIMARY KEY, project_id INTEGER, name TEXT,
                 start_date TEXT, end_date TEXT);
              CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT);
-             CREATE TABLE students (id TEXT PRIMARY KEY, full_name TEXT, github_login TEXT,
-                team_project_id INTEGER, email TEXT);
+             CREATE TABLE students (id TEXT PRIMARY KEY, username TEXT, full_name TEXT,
+                github_login TEXT, team_project_id INTEGER, email TEXT);
              CREATE TABLE tasks (id INTEGER PRIMARY KEY, task_key TEXT, name TEXT, type TEXT,
                 status TEXT, estimation_points INTEGER, assignee_id TEXT, sprint_id INTEGER,
                 parent_task_id INTEGER);
@@ -3801,6 +3843,11 @@ mod tests {
                 start_line INTEGER, end_line INTEGER,
                 rule_kind TEXT, rule_version TEXT, explanation TEXT,
                 PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import));
+             CREATE TABLE architecture_violation_attribution (
+                violation_rowid INTEGER NOT NULL, student_id TEXT NOT NULL,
+                lines_authored INTEGER NOT NULL, total_lines INTEGER NOT NULL,
+                weight REAL NOT NULL, sprint_id INTEGER NOT NULL,
+                PRIMARY KEY (violation_rowid, student_id));
              CREATE TABLE static_analysis_findings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 repo_full_name TEXT NOT NULL, sprint_id INTEGER NOT NULL,
@@ -3847,7 +3894,8 @@ mod tests {
              INSERT INTO projects VALUES (1, 'pds26-1a');
              INSERT INTO sprints VALUES (10, 1, 'Sprint 1', '2026-02-16', '2026-03-08');
              INSERT INTO sprints VALUES (11, 1, 'Sprint 2', '2026-03-09', '2026-03-29');
-             INSERT INTO students VALUES ('u1', 'Alice Bob', 'alice-gh', 1, 'a@ex.com');
+             INSERT INTO students (id, full_name, github_login, team_project_id, email)
+                VALUES ('u1', 'Alice Bob', 'alice-gh', 1, 'a@ex.com');
              INSERT INTO student_sprint_metrics
                 (student_id, sprint_id, points_delivered, points_share,
                  weighted_pr_lines, commit_count, files_touched, reviews_given,
@@ -3910,6 +3958,57 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn team_identity_map_renders_after_h1_before_glossary() {
+        // The team identity map must surface the GitHub login + GitHub-side
+        // email resolved by `github_users` for each enrolled student, and
+        // must land directly after the H1 banner — before the glossary so
+        // it's the first section the reader sees.
+        let conn = mk_conn();
+        conn.execute_batch(
+            "UPDATE students SET username = 'alice-td' WHERE id = 'u1';
+             INSERT INTO github_users (login, name, email, student_id)
+                VALUES ('alice-gh', 'Alice on GitHub', 'alice@gh.example', 'u1');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let map_idx = body
+            .find("## Team identity map")
+            .expect("team identity map heading missing");
+        let glossary_idx = body
+            .find("## 0. Glossary")
+            .expect("glossary heading missing");
+        assert!(
+            map_idx < glossary_idx,
+            "team identity map must precede the glossary: {body}"
+        );
+        let h1_idx = body.find("# Sprint report").expect("H1 banner missing");
+        assert!(
+            h1_idx < map_idx,
+            "H1 banner must precede the team identity map: {body}"
+        );
+        // GitHub identity is shown via the embedded github_cell helper
+        // (link + login text).
+        assert!(
+            body.contains("[alice-gh](https://github.com/alice-gh)"),
+            "GitHub login link missing from identity map: {body}"
+        );
+        assert!(
+            body.contains("alice@gh.example"),
+            "GitHub-side email missing from identity map: {body}"
+        );
+        assert!(
+            body.contains("alice-td"),
+            "TrackDev username missing from identity map: {body}"
+        );
+        assert!(
+            body.contains("Alice Bob"),
+            "full name missing from identity map: {body}"
+        );
     }
 
     #[test]
@@ -4140,6 +4239,71 @@ mod tests {
     }
 
     #[test]
+    fn architecture_hotspot_flag_pointer_text_references_per_student_block() {
+        // ARCHITECTURE_HOTSPOT flag bullet renders as a one-liner pointing
+        // the reader to the per-student Architecture violations sub-block.
+        let conn = mk_conn();
+        conn.execute_batch(
+            "INSERT INTO architecture_violations
+                (repo_full_name, sprint_id, file_path, rule_name,
+                 violation_kind, offending_import, severity, start_line, end_line)
+             VALUES
+                ('udg/spring-foo', 10, 'X.java', 'SERVICE_RETURNS_ENTITY',
+                 'llm', 'X@L13', 'CRITICAL', 13, 13);
+             INSERT INTO architecture_violation_attribution
+                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
+                SELECT rowid, 'u1', 1, 1, 1.0, 10 FROM architecture_violations
+                WHERE sprint_id = 10;
+             INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
+                VALUES ('u1', 10, 'ARCHITECTURE_HOTSPOT', 'CRITICAL',
+                        '{\"weighted\":2.0,\"min_weighted\":1.5}');",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains(
+                "Architecture weighted contribution reached 2 (threshold 1.5). \
+See the Architecture violations block in this dashboard for the attributed offenders."
+            ),
+            "flag pointer line missing or stale: {body}"
+        );
+        // The standalone "## Architecture hotspots" section is gone.
+        assert!(
+            !body.contains("## Architecture hotspots"),
+            "standalone arch hotspot section must be removed: {body}"
+        );
+    }
+
+    #[test]
+    fn per_student_architecture_block_silent_when_hotspot_flag_did_not_fire() {
+        // Violations and attribution exist but no ARCHITECTURE_HOTSPOT flag
+        // → the per-student arch block must not render at all.
+        let conn = mk_conn();
+        conn.execute_batch(
+            "INSERT INTO architecture_violations
+                (repo_full_name, sprint_id, file_path, rule_name,
+                 violation_kind, offending_import, severity)
+             VALUES
+                ('udg/spring-foo', 10, 'X.java', 'SOMETHING',
+                 'llm', 'X@L1', 'WARNING');
+             INSERT INTO architecture_violation_attribution
+                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
+                SELECT rowid, 'u1', 1, 1, 1.0, 10 FROM architecture_violations
+                WHERE sprint_id = 10;",
+        )
+        .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains("**Architecture violations:**"),
+            "per-student arch block must be gated by ARCHITECTURE_HOTSPOT firing: {body}"
+        );
+    }
+
+    #[test]
     fn truck_factor_humanizes_owner_csv_to_full_names() {
         let conn = mk_conn();
         conn.execute_batch(
@@ -4198,7 +4362,10 @@ mod tests {
     }
 
     #[test]
-    fn architecture_section_renders_when_violations_exist() {
+    fn architecture_section_a_renders_total_only_no_per_rule_listing() {
+        // Section A summarises architecture conformance with a heading and
+        // a total-count line; the per-rule + per-file listing now lives
+        // exclusively in Section B's per-student block.
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO architecture_violations
@@ -4218,46 +4385,26 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("### Architecture conformance"));
         assert!(body.contains("**Total violations:** 3"));
-        // Layer rules render as prose, not as the raw arrow form.
         assert!(
-            body.contains("**presentation** must not depend on **infrastructure**"),
-            "layer rule must humanize: {body}"
+            !body.contains("**Violations by rule:**"),
+            "per-rule block must no longer render in Section A: {body}"
         );
+        // With no fingerprints seeded, no Section B per-student block exists,
+        // so file-level links must not leak from a removed Section A renderer.
         assert!(
-            !body.contains("presentation-&gt;!infrastructure")
-                && !body.contains("presentation->!infrastructure"),
-            "raw arrow form must not leak into report",
-        );
-        // Each violating file appears as a clickable basename link
-        // (the `udg/spring-foo` repo is org-qualified, so URLs are built).
-        assert!(
-            body.contains("[`A.java`](https://github.com/udg/spring-foo/blob/HEAD/A.java"),
-            "A.java must render as a github-linked basename: {body}"
-        );
-        assert!(
-            body.contains("[`B.java`](https://github.com/udg/spring-foo/blob/HEAD/B.java"),
-            "B.java must render as a github-linked basename: {body}"
-        );
-        assert!(
-            body.contains("[`C.java`](https://github.com/udg/spring-foo/blob/HEAD/C.java"),
-            "C.java must render as a github-linked basename: {body}"
-        );
-        // Forbidden-import rule: prose description, no machine key.
-        assert!(
-            body.contains("Domain / model classes must not depend on Spring web"),
-            "forbidden rule must humanize: {body}"
-        );
-        assert!(
-            !body.contains("`domain-no-spring-web`"),
-            "machine rule key must not leak into team-facing prose: {body}"
+            !body.contains("[`A.java`](https://github.com/udg/spring-foo/blob/HEAD/A.java"),
+            "no per-file listing must appear in Section A anymore: {body}"
         );
     }
 
     #[test]
-    fn architecture_section_renders_line_ranges_and_explanation() {
-        // start_line / end_line / explanation must surface in section A:
-        // basename gets a `:Lstart-Lend` suffix, the github URL gets a
-        // `#Lstart-Lend` anchor, and the LLM prose is a child bullet.
+    fn per_student_architecture_block_lists_every_attributed_violation_with_weight_and_explanation()
+    {
+        // Section B per-student arch block fires once ARCHITECTURE_HOTSPOT
+        // is on for the student. Every (student, violation) attribution row
+        // with weight > 0 renders as one bullet with: clickable file link
+        // (line anchor where known), humanised rule prose, severity badge,
+        // and a `· N% of lines` suffix derived from the blame weight.
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO architecture_violations
@@ -4268,92 +4415,100 @@ mod tests {
                 ('udg/spring-foo', 10, 'A.java', 'HARDCODED_API_URL',
                  'llm', 'HARDCODED_API_URL@L13', 'WARNING', 13, 13, 'llm',
                  'API URL should use BuildConfig instead of a literal string.'),
-                ('udg/spring-foo', 10, 'B.java', 'REPOSITORY_NO_CACHING',
-                 'llm', 'REPOSITORY_NO_CACHING@L26', 'WARNING', 26, 49, 'llm',
-                 'Repository hits the network without checking the cache.');",
+                ('udg/spring-foo', 10, 'B.java', 'HARDCODED_API_URL',
+                 'llm', 'HARDCODED_API_URL@L26', 'WARNING', 26, 49, 'llm',
+                 'Repository hits the network without checking the cache.'),
+                ('udg/spring-foo', 10, 'C.java', 'HARDCODED_API_URL',
+                 'llm', 'HARDCODED_API_URL@L7', 'WARNING', 7, 7, 'llm',
+                 'Third hard-coded URL.'),
+                ('udg/spring-foo', 10, 'D.java', 'HARDCODED_API_URL',
+                 'llm', 'HARDCODED_API_URL@L9', 'WARNING', 9, 9, 'llm',
+                 'Fourth hard-coded URL.');
+             INSERT INTO architecture_violation_attribution
+                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
+                SELECT rowid, 'u1',
+                       CASE file_path WHEN 'A.java' THEN 1 WHEN 'B.java' THEN 12 ELSE 1 END,
+                       CASE file_path WHEN 'A.java' THEN 1 WHEN 'B.java' THEN 24 ELSE 1 END,
+                       CASE file_path WHEN 'A.java' THEN 1.0 WHEN 'B.java' THEN 0.5 ELSE 1.0 END,
+                       10
+                FROM architecture_violations WHERE sprint_id = 10;
+             INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
+                VALUES ('u1', 10, 'ARCHITECTURE_HOTSPOT', 'WARNING',
+                        '{\"weighted\":3.5,\"min_weighted\":2.0}');",
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
         let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        // Single-line violation: `:L13` suffix and `#L13` anchor.
+        // Single-line violation: `:L13` suffix and `#L13` anchor + 100% suffix.
         assert!(
             body.contains("[`A.java` :L13](https://github.com/udg/spring-foo/blob/HEAD/A.java#L13"),
             "single-line link must carry :L13 suffix and #L13 anchor; got:\n{body}"
         );
-        // Range violation: `:L26-L49` suffix and `#L26-L49` anchor.
+        // Range violation: `:L26-L49` suffix + 50% suffix from weight 0.5.
         assert!(
             body.contains(
                 "[`B.java` :L26-L49](https://github.com/udg/spring-foo/blob/HEAD/B.java#L26-L49"
             ),
             "range link must carry :L26-L49 suffix and #L26-L49 anchor; got:\n{body}"
         );
+        assert!(
+            body.contains(" · 50% of lines"),
+            "blame weight 0.5 must render as 50% suffix; got:\n{body}"
+        );
+        assert!(
+            body.contains(" · 100% of lines"),
+            "blame weight 1.0 must render as 100% suffix; got:\n{body}"
+        );
+        // Every attributed violation renders — no top-N cap.
+        assert!(
+            body.contains("[`C.java` :L7](https://github.com/udg/spring-foo/blob/HEAD/C.java#L7"),
+            "third violation must render — no top-N cap; got:\n{body}"
+        );
+        assert!(
+            body.contains("[`D.java` :L9](https://github.com/udg/spring-foo/blob/HEAD/D.java#L9"),
+            "fourth violation must render — no top-N cap; got:\n{body}"
+        );
         // Explanation prose surfaces as a nested bullet.
         assert!(
-            body.contains("    - API URL should use BuildConfig instead of a literal string."),
-            "first explanation must render as a nested bullet; got:\n{body}"
+            body.contains("  - API URL should use BuildConfig instead of a literal string."),
+            "explanation must render as a nested bullet; got:\n{body}"
         );
+        // Per-student headline reports the four attributed violations.
         assert!(
-            body.contains("    - Repository hits the network without checking the cache."),
-            "range explanation must render as a nested bullet; got:\n{body}"
+            body.contains("**Architecture violations:** 4 (0 critical · 4 warning · 0 info)"),
+            "per-student headline missing or wrong: {body}"
         );
-        // Headline now reports occurrences and unique files.
+        // The legacy rule-grouped phrasing must not reappear.
         assert!(
-            body.contains("— 1 occurrence across 1 file"),
-            "rule headline must use occurrence/file phrasing; got:\n{body}"
+            !body.contains("occurrence(s) across"),
+            "rule grouping must be gone — bullet per violation now: {body}"
         );
     }
 
     #[test]
-    fn architecture_section_resolves_bare_repo_name_via_pull_requests() {
-        // Legacy `architecture_violations` rows wrote only the bare repo
-        // basename (e.g. `spring-foo`), which makes `github_file_url` fall
-        // back to a non-link form. The team-level "Violations by rule"
-        // renderer must look the qualified name up in `pull_requests` so
-        // every file reference becomes a clickable github link.
+    fn per_student_architecture_attribution_resolves_bare_repo_basename_to_qualified_url() {
+        // Regression: the architecture stage may write `repo_full_name` as a
+        // bare repo (e.g. `spring-foo`) on legacy rows. The per-student arch
+        // block must resolve the qualified `<org>/<repo>` from `pull_requests`
+        // so the file URL is clickable.
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO pull_requests (id, repo_full_name)
-             VALUES ('pr1', 'udg-pds/spring-foo');
+                VALUES ('pr1', 'udg-pds/spring-foo');
              INSERT INTO architecture_violations
                 (repo_full_name, sprint_id, file_path, rule_name,
                  violation_kind, offending_import, severity)
              VALUES
                 ('spring-foo', 10, 'A.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING');",
-        )
-        .unwrap();
-        let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
-        let body = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            body.contains("[`A.java`](https://github.com/udg-pds/spring-foo/blob/HEAD/A.java"),
-            "bare repo name must be resolved against pull_requests so the file link is clickable: {body}"
-        );
-        assert!(
-            !body.contains("`A.java` (`A.java`)"),
-            "non-link fallback must not survive the bare-name resolution: {body}"
-        );
-    }
-
-    #[test]
-    fn per_student_architecture_attribution_matches_on_repo_basename() {
-        // Regression: the architecture stage writes `repo_full_name` as a
-        // bare repo (e.g. `spring-foo`) while fingerprints store `org/repo`
-        // (e.g. `udg-pds/spring-foo`). Attribution must match on basename.
-        let conn = mk_conn();
-        conn.execute_batch(
-            "INSERT INTO github_users (login, student_id) VALUES ('alice-gh', 'u1');
-             INSERT INTO fingerprints (file_path, repo_full_name, statement_index,
-                raw_fingerprint, normalized_fingerprint, blame_author_login, sprint_id)
-                VALUES ('A.java', 'udg-pds/spring-foo', 0, 'r0', 'n0', 'alice-gh', 10),
-                       ('A.java', 'udg-pds/spring-foo', 1, 'r1', 'n1', 'alice-gh', 10);
-             INSERT INTO architecture_violations
-                (repo_full_name, sprint_id, file_path, rule_name,
-                 violation_kind, offending_import, severity)
-             VALUES
-                ('spring-foo', 10, 'A.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING');",
+                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING');
+             INSERT INTO architecture_violation_attribution
+                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
+                SELECT rowid, 'u1', 1, 1, 1.0, 10 FROM architecture_violations
+                WHERE sprint_id = 10;
+             INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
+                VALUES ('u1', 10, 'ARCHITECTURE_HOTSPOT', 'WARNING',
+                        '{\"weighted\":1.0,\"min_weighted\":0.5}');",
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
@@ -4361,23 +4516,22 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(
             body.contains("**Architecture violations:** 1 (0 critical · 1 warning · 0 info)"),
-            "violation must be attributed to Alice despite the org-prefix mismatch",
+            "missing per-student arch headline; got: {body}"
+        );
+        assert!(
+            body.contains("[`A.java`](https://github.com/udg-pds/spring-foo/blob/HEAD/A.java"),
+            "bare repo name must be resolved against pull_requests so the file link is clickable: {body}"
         );
     }
 
     #[test]
-    fn per_student_architecture_block_attributes_to_dominant_owner() {
-        // Two violated files. Alice (`u1`) owns A.java via fingerprints; the
-        // C.java file has no fingerprints so it must stay unattributed and
-        // therefore not show up in Alice's per-student block.
+    fn per_student_architecture_block_uses_attribution_table_and_skips_zero_weight() {
+        // Two violated files. u1 has attribution rows for A.java (weight=1.0
+        // for two violations) but no row for C.java → C.java is unattributed
+        // and falls into Section A's "Unattributed violations" stub instead.
         let conn = mk_conn();
         conn.execute_batch(
-            "INSERT INTO github_users (login, student_id) VALUES ('alice-gh', 'u1');
-             INSERT INTO fingerprints (file_path, repo_full_name, statement_index,
-                raw_fingerprint, normalized_fingerprint, blame_author_login, sprint_id)
-                VALUES ('A.java', 'udg/spring-foo', 0, 'r0', 'n0', 'alice-gh', 10),
-                       ('A.java', 'udg/spring-foo', 1, 'r1', 'n1', 'alice-gh', 10);
-             INSERT INTO architecture_violations
+            "INSERT INTO architecture_violations
                 (repo_full_name, sprint_id, file_path, rule_name,
                  violation_kind, offending_import, severity)
              VALUES
@@ -4386,7 +4540,14 @@ mod tests {
                 ('udg/spring-foo', 10, 'A.java', 'domain-no-spring-web',
                  'forbidden_import', 'org.springframework.web.RestController', 'CRITICAL'),
                 ('udg/spring-foo', 10, 'C.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repo.OtherRepo', 'WARNING');",
+                 'layer_dependency', 'com.x.repo.OtherRepo', 'WARNING');
+             INSERT INTO architecture_violation_attribution
+                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
+                SELECT rowid, 'u1', 1, 1, 1.0, 10 FROM architecture_violations
+                WHERE sprint_id = 10 AND file_path = 'A.java';
+             INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
+                VALUES ('u1', 10, 'ARCHITECTURE_HOTSPOT', 'WARNING',
+                        '{\"weighted\":2.0,\"min_weighted\":1.0}');",
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
@@ -4395,26 +4556,25 @@ mod tests {
         // Section B per-student block under Alice.
         assert!(
             body.contains("**Architecture violations:** 2 (1 critical · 1 warning · 0 info)"),
-            "missing per-student arch headline; got: {}",
-            body
+            "missing per-student arch headline; got: {body}"
         );
+        // Layer-rule prose still humanises.
         assert!(
-            body.contains(
-                "- **presentation** must not depend on **infrastructure** \
-— 1 occurrence(s) across 1 file(s)"
-            ),
-            "missing rule-grouped breakdown; got:\n{body}",
+            body.contains("**presentation** must not depend on **infrastructure**"),
+            "layer rule must humanise; got:\n{body}"
         );
-        assert!(
-            body.contains(
-                "[`A.java`](https://github.com/udg/spring-foo/blob/HEAD/A.java \"A.java\") \
-← `com.x.repo.UserRepo`"
-            ),
-            "missing linked example offending-import line; got body:\n{body}",
-        );
-        // Team-level severity breakdown reflects all three (including the
-        // unattributed one).
+        // Team-level severity breakdown reflects all three rows.
         assert!(body.contains("**Total violations:** 3 (1 critical · 2 warning · 0 info)"));
+        // Unattributed stub picks up C.java.
+        assert!(
+            body.contains("**Unattributed violations:** 1"),
+            "unattributed stub missing; got:\n{body}"
+        );
+        // C.java does not appear under any per-student block.
+        assert!(
+            !body.contains("[`C.java`]"),
+            "unattributed C.java must not surface in Section B; got:\n{body}"
+        );
     }
 
     #[test]
@@ -4497,7 +4657,8 @@ mod tests {
         )
         .unwrap();
         conn.execute_batch(
-            "INSERT INTO students VALUES ('u2', 'Fallback User', '', 1, 'f@ex.com');
+            "INSERT INTO students (id, full_name, github_login, team_project_id, email)
+                VALUES ('u2', 'Fallback User', '', 1, 'f@ex.com');
              INSERT INTO pull_requests
                 (id, pr_number, repo_full_name, title, url, author_id,
                  additions, deletions, changed_files, created_at, merged, merged_at, body,
@@ -4666,10 +4827,10 @@ mod tests {
     }
 
     #[test]
-    fn static_analysis_caps_per_student_at_top_n() {
+    fn static_analysis_lists_every_finding_per_student_no_cap() {
         let conn = mk_conn();
-        // Seed 8 findings for one student. Default cap is 5, so 3 should
-        // be rolled up into the "… N more" line.
+        // Seed 8 findings for one student — every one of them must render;
+        // the legacy "… N more" rollup is gone.
         for i in 0..8 {
             seed_static_analysis_finding(
                 &conn,
@@ -4681,22 +4842,24 @@ mod tests {
                 &format!("F{}.java", i),
                 1 + i,
                 1 + i,
-                // descending weights so the highest-weight ones stay in
-                // the top-5 deterministically
                 1.0 - (i as f64) * 0.05,
             );
         }
         let tmp = TempDir::new().unwrap();
         let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
+        for i in 0..8 {
+            let needle = format!("`pmd:Rule{}`", i);
+            assert!(
+                body.contains(&needle),
+                "Rule{} must appear — no top-N cap; got:\n{}",
+                i,
+                body
+            );
+        }
         assert!(
-            body.contains("… 3 more"),
-            "rollup line must surface the 3 truncated findings; got:\n{body}"
-        );
-        // Top 5 must still show; rule 0 is the highest weight.
-        assert!(
-            body.contains("`pmd:Rule0`"),
-            "top-weighted finding must remain in the cap; got:\n{body}"
+            !body.contains("- … "),
+            "no '… N more' rollup may remain; got:\n{body}"
         );
     }
 
@@ -4765,37 +4928,27 @@ mod tests {
     }
 
     #[test]
-    fn complexity_section_shows_no_findings_placeholder_on_empty_db() {
+    fn per_student_complexity_block_silent_on_empty_db() {
         let conn = mk_conn();
         let tmp = TempDir::new().unwrap();
         let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("Code complexity & testability"));
-        assert!(body.contains("_No complex or hard-to-test methods detected this sprint._"));
+        assert!(
+            !body.contains("## Code complexity & testability"),
+            "standalone complexity section must be removed: {body}"
+        );
+        assert!(
+            !body.contains("**Complexity & testability:**"),
+            "per-student complexity block must not render on empty DB: {body}"
+        );
     }
 
     #[test]
-    fn complexity_section_renders_method_link_with_blob_anchor() {
+    fn per_student_complexity_block_renders_method_link_with_weight_and_anchor() {
+        // COMPLEXITY_HOTSPOT fires for u1 → the per-student complexity block
+        // surfaces every finding attributed to u1 with its method link, line
+        // anchor, severity, threshold tail, and `· N% of lines` blame suffix.
         let conn = mk_conn();
-        conn.execute(
-            "INSERT INTO pull_requests (id, pr_number, repo_full_name, title, url,
-                author_id, additions, deletions, changed_files, created_at, merged, merged_at, body)
-             VALUES ('pr1', 1, 'udg-pds/spring-foo', 't', 'u', 'u1', 0, 0, 0,
-                     '2026-02-20', 1, '2026-02-22', '')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO tasks (id, task_key, name, type, status, estimation_points,
-                assignee_id, sprint_id) VALUES (1, 'T-1', 'x', 'TASK', 'DONE', 3, 'u1', 10)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (1, 'pr1')",
-            [],
-        )
-        .unwrap();
         seed_complexity_finding(
             &conn,
             1,
@@ -4810,51 +4963,28 @@ mod tests {
             Some(17.0),
             Some(15.0),
         );
+        seed_complexity_attribution(&conn, 1, "u1", 0.6);
+        seed_complexity_flag(&conn, "u1", "WARNING");
         let tmp = TempDir::new().unwrap();
         let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("**Complexity & testability:** 1"));
         assert!(body.contains("`UserController.register()`"));
-        assert!(body.contains(
-            "blob/HEAD/src/main/java/com/x/UserController.java#L42-L90"
-        ));
+        assert!(body.contains("blob/HEAD/src/main/java/com/x/UserController.java#L42-L90"));
         assert!(body.contains("Cyclomatic complexity above the ceiling"));
         assert!(body.contains("(17 > 15)"));
-        // Student-facing report MUST NOT leak grading information *inside
-        // the complexity section*.
-        let section_start = body
-            .find("## Code complexity & testability")
-            .expect("section header present");
-        let section_end = body[section_start + 1..]
-            .find("\n## ")
-            .map(|i| section_start + 1 + i)
-            .unwrap_or(body.len());
-        let section = &body[section_start..section_end];
-        assert!(!section.contains("weight"));
-        assert!(!section.contains("COMPLEXITY_HOTSPOT"));
+        assert!(
+            body.contains(" · 60% of lines"),
+            "blame weight 0.6 must render as 60% suffix; got:\n{body}"
+        );
     }
 
     #[test]
-    fn complexity_section_groups_multiple_rules_under_same_method() {
+    fn per_student_complexity_block_one_bullet_per_finding_no_grouping() {
+        // Two findings on the same method must render as TWO bullets in the
+        // per-student block — one per (file, method, rule) tuple — because
+        // weights can differ per rule.
         let conn = mk_conn();
-        conn.execute(
-            "INSERT INTO pull_requests (id, pr_number, repo_full_name, title, url,
-                author_id, additions, deletions, changed_files, created_at, merged, merged_at, body)
-             VALUES ('pr1', 1, 'udg-pds/spring-foo', 't', 'u', 'u1', 0, 0, 0,
-                     '2026-02-20', 1, '2026-02-22', '')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO tasks (id, task_key, name, type, status, estimation_points,
-                assignee_id, sprint_id) VALUES (1, 'T-1', 'x', 'TASK', 'DONE', 3, 'u1', 10)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (1, 'pr1')",
-            [],
-        )
-        .unwrap();
         seed_complexity_finding(
             &conn,
             1,
@@ -4883,13 +5013,21 @@ mod tests {
             None,
             None,
         );
+        seed_complexity_attribution(&conn, 1, "u1", 1.0);
+        seed_complexity_attribution(&conn, 2, "u1", 0.5);
+        seed_complexity_flag(&conn, "u1", "CRITICAL");
         let tmp = TempDir::new().unwrap();
         let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let method_occurrences = body.matches("`A.f()`").count();
-        assert_eq!(method_occurrences, 1);
+        assert_eq!(
+            method_occurrences, 2,
+            "one bullet per finding (no grouping); got:\n{body}"
+        );
         assert!(body.contains("Cyclomatic complexity above the ceiling"));
         assert!(body.contains("Catches `Exception`/`Throwable` without rethrowing"));
+        assert!(body.contains(" · 100% of lines"));
+        assert!(body.contains(" · 50% of lines"));
     }
 
     #[test]
@@ -4946,15 +5084,21 @@ mod tests {
         )
         .unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("## Code complexity & testability"));
+        // The standalone "## Code complexity & testability" section is gone
+        // (folded into Section B per-student blocks). The professor-only
+        // "### Code complexity & testability — grading attribution" block
+        // still renders. Use a newline anchor so the H2 check is not
+        // satisfied by the surviving H3.
+        assert!(
+            !body.contains("\n## Code complexity & testability\n"),
+            "standalone H2 complexity section must be removed even in professor view: {body}"
+        );
         assert!(body.contains("grading attribution"));
         assert!(body.contains("Alice Bob") && body.contains("score"));
         assert!(body.contains("COMPLEXITY_HOTSPOT band: `WARNING`"));
         let prof_section_start = body.find("grading attribution").unwrap();
         let prof_section = &body[prof_section_start..];
-        assert!(prof_section.contains(
-            "blob/HEAD/src/main/java/com/x/UserController.java#L42-L90"
-        ));
+        assert!(prof_section.contains("blob/HEAD/src/main/java/com/x/UserController.java#L42-L90"));
     }
 
     #[test]
@@ -4999,7 +5143,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("## Code complexity & testability"));
+        assert!(
+            !body.contains("\n## Code complexity & testability\n"),
+            "standalone H2 complexity section is removed: {body}"
+        );
         assert!(!body.contains("grading attribution"));
         assert!(!body.contains("COMPLEXITY_HOTSPOT band"));
     }
