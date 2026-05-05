@@ -995,3 +995,36 @@ CREATE TABLE IF NOT EXISTS static_analysis_runs (
     ran_at         TEXT    NOT NULL,         -- ISO-8601 UTC
     PRIMARY KEY (repo_full_name, sprint_id, analyzer)
 );
+
+-- Computed mapping from a github identity (login or commit email) to the
+-- TrackDev student it most likely belongs to. Built by
+-- collect::identity_resolver from per-PR task-assignee evidence:
+-- for each PR p, each linked-task assignee s receives weight count(s in tasks(p))/total_tasks(p),
+-- multiplied by source_weight (commits=1.0, pre_squash=1.0, pr_submitter=0.5),
+-- accumulated across all PRs of every sprint. The mapping is accepted iff
+-- confidence = acc[(s*,i)] / sum_s(acc[(s,i)]) >= 0.7. Rejected identities
+-- are recorded in identity_resolution_warnings instead.
+CREATE TABLE IF NOT EXISTS student_github_identity (
+    student_id     TEXT NOT NULL,
+    identity_kind  TEXT NOT NULL CHECK(identity_kind IN ('login','email')),
+    identity_value TEXT NOT NULL,           -- lowercased
+    weight         REAL NOT NULL,           -- accumulated evidence on (student, identity)
+    confidence     REAL NOT NULL,           -- accepted-share at convergence
+    first_seen_pr  TEXT,
+    last_seen_pr   TEXT,
+    PRIMARY KEY (student_id, identity_kind, identity_value)
+);
+
+CREATE INDEX IF NOT EXISTS idx_student_github_identity_value
+    ON student_github_identity(identity_kind, identity_value);
+
+-- Per-identity warnings for ambiguous resolution. One row per (kind, value)
+-- whose top-candidate confidence stayed below the threshold.
+CREATE TABLE IF NOT EXISTS identity_resolution_warnings (
+    identity_kind  TEXT NOT NULL CHECK(identity_kind IN ('login','email')),
+    identity_value TEXT NOT NULL,
+    kind           TEXT NOT NULL,           -- e.g. 'AMBIGUOUS_IDENTITY'
+    candidates     TEXT NOT NULL,           -- JSON: [{student_id, weight, share}, …]
+    observed_at    TEXT NOT NULL,
+    PRIMARY KEY (identity_kind, identity_value, kind)
+);

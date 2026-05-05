@@ -2600,6 +2600,105 @@ fn round_to_int_if_integer(value: f64) -> String {
     }
 }
 
+// ── Annex: orphan PRs (no linked tasks) ──────────────────────────────────────
+
+/// Lists PRs that have no linked tasks and therefore have no TrackDev
+/// authors under the task-assignee-derived authorship model. These PRs
+/// contribute zero evidence to identity resolution and are excluded from
+/// every author-keyed metric/flag — surfacing them here lets professors
+/// follow up.
+fn write_orphan_pr_annex(
+    buf: &mut String,
+    conn: &Connection,
+    project_id: i64,
+    sprint_ids_ordered: &[i64],
+    depth: usize,
+) -> rusqlite::Result<()> {
+    if sprint_ids_ordered.is_empty() {
+        return Ok(());
+    }
+    let h2 = "#".repeat(depth);
+    let placeholders: String = std::iter::repeat("?")
+        .take(sprint_ids_ordered.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT DISTINCT pr.id, pr.pr_number, pr.repo_full_name, pr.title, pr.url,
+                pr.merged_at
+         FROM pull_requests pr
+         WHERE pr.repo_full_name IN (
+                 SELECT DISTINCT pr2.repo_full_name FROM pull_requests pr2
+                 JOIN task_pull_requests tpr ON tpr.pr_id = pr2.id
+                 JOIN tasks t ON t.id = tpr.task_id
+                 JOIN students s ON s.id = t.assignee_id
+                 WHERE s.team_project_id = ?
+                   AND t.sprint_id IN ({placeholders})
+               )
+           AND pr.id NOT IN (SELECT pr_id FROM task_pull_requests)
+         ORDER BY pr.merged_at, pr.pr_number"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(1 + sprint_ids_ordered.len());
+    params_vec.push(Box::new(project_id));
+    for sid in sprint_ids_ordered {
+        params_vec.push(Box::new(*sid));
+    }
+    let params_refs: Vec<&dyn rusqlite::ToSql> =
+        params_vec.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt
+        .query_map(&params_refs[..], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let _ = writeln!(buf, "{} Annex: orphan pull requests\n", h2);
+    let _ = writeln!(
+        buf,
+        "PRs without linked tasks have no TrackDev authors and are excluded \
+         from every author-keyed metric (the task-assignee model has no \
+         author to attribute them to). Listed for review.\n"
+    );
+    push_table_header(buf, &["#", "Repo", "Title", "Merged"]);
+    for (_id, num, repo, title, url, merged_at) in rows {
+        let repo_short = repo
+            .as_deref()
+            .and_then(|s| s.rsplit('/').next())
+            .unwrap_or("")
+            .to_string();
+        let title_str = title.unwrap_or_default();
+        let (num_cell, linked_title) = match url.as_deref() {
+            Some(u) if u.starts_with("http") => {
+                (md_link(&format!("#{}", num), u), md_link(&title_str, u))
+            }
+            _ => (format!("#{}", num), md_escape(&title_str)),
+        };
+        let merged = merged_at
+            .as_deref()
+            .map(humanize_local_dt)
+            .unwrap_or_default();
+        let _ = writeln!(
+            buf,
+            "| {} | {} | {} | {} |",
+            num_cell,
+            md_escape(&repo_short),
+            linked_title.replace('|', "\\|"),
+            md_escape(&merged),
+        );
+    }
+    buf.push('\n');
+    Ok(())
+}
+
 // ── Section C: peer-group analysis ───────────────────────────────────────────
 
 fn write_section_c(
@@ -3379,6 +3478,7 @@ fn generate_markdown_report_multi_to_path_inner(
     if !sprint_ids_ordered.is_empty() {
         write_cumulative_summary(&mut buf, conn, project_id, sprint_ids_ordered, 2)?;
     }
+    write_orphan_pr_annex(&mut buf, conn, project_id, sprint_ids_ordered, 2)?;
     insert_glossary(&mut buf);
     insert_toc(&mut buf, TOC_MAX_DEPTH);
 

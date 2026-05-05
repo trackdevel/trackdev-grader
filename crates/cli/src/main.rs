@@ -325,6 +325,24 @@ enum Command {
         #[arg(long)]
         require_clean_tree: bool,
     },
+    /// Iterative re-run: collect new PRs, compile only the new ones, recompute
+    /// every other metric, and skip the architecture LLM rubric. Same compile
+    /// cache as `run-all` (PRs whose merge_sha already has a row in
+    /// `pr_compilation` are not rebuilt). No AI detection. No LLM PR review.
+    Iterate {
+        #[command(flatten)]
+        projects: ProjectsArg,
+        #[arg(long)]
+        skip_github: bool,
+        #[arg(long)]
+        skip_repos: bool,
+        /// Skip the Java static-analysis (PMD/Checkstyle/SpotBugs) stage.
+        /// Default: stage runs when `config/static_analysis.toml` exists.
+        #[arg(long)]
+        skip_static_analysis: bool,
+        #[arg(long)]
+        force_pr_refresh: bool,
+    },
     /// Like `go` but skips the Section-3 LLM code review.
     GoQuick {
         #[command(flatten)]
@@ -1019,6 +1037,7 @@ fn main() -> Result<()> {
                 skip_repos,
                 skip_reports: false,
                 skip_static_analysis,
+                skip_arch_llm: false,
                 force_pr_refresh,
                 max_workers: None,
             };
@@ -1029,6 +1048,35 @@ fn main() -> Result<()> {
                 &opts,
             )
             .context("run-all pipeline failed")?;
+        }
+        Command::Iterate {
+            projects,
+            skip_github,
+            skip_repos,
+            skip_static_analysis,
+            force_pr_refresh,
+        } => {
+            drop(db);
+            let opts = sprint_grader_orchestration::pipeline::PipelineOptions {
+                today: today.clone(),
+                project_filter: parse_project_filter(projects.projects),
+                entregues_dir: entregues_dir.clone(),
+                config_dir: config_dir.clone(),
+                skip_github,
+                skip_repos,
+                skip_reports: false,
+                skip_static_analysis,
+                skip_arch_llm: true,
+                force_pr_refresh,
+                max_workers: None,
+            };
+            sprint_grader_orchestration::run_pipeline(
+                &config,
+                &db_path,
+                sprint_grader_orchestration::PipelineVariant::RunAll,
+                &opts,
+            )
+            .context("iterate pipeline failed")?;
         }
         Command::Go {
             projects,
@@ -1063,6 +1111,7 @@ fn main() -> Result<()> {
                 skip_repos,
                 skip_reports: false,
                 skip_static_analysis,
+                skip_arch_llm: false,
                 force_pr_refresh,
                 max_workers: None,
             };
@@ -1109,6 +1158,7 @@ fn main() -> Result<()> {
                 // go-quick skips static analysis by default; --run-static-analysis
                 // overrides. Mirrors how go-quick skips the LLM judge by default.
                 skip_static_analysis: !run_static_analysis,
+                skip_arch_llm: false,
                 force_pr_refresh,
                 max_workers: None,
             };

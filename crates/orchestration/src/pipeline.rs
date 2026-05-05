@@ -67,6 +67,12 @@ pub struct PipelineOptions {
     /// this run. CLI defaults: `false` for run-all and go, `true` for
     /// go-quick (parallels how go-quick skips the LLM judge).
     pub skip_static_analysis: bool,
+    /// Bypass the architecture LLM-judge rubric (T-P3.3) for this run, even
+    /// when `config.architecture.llm_review = true`. Set by the `iterate`
+    /// CLI subcommand: lets the AST-based architecture stage continue to
+    /// populate `architecture_violations` while skipping the slow per-file
+    /// LLM rubric.
+    pub skip_arch_llm: bool,
     pub force_pr_refresh: bool,
     pub max_workers: Option<usize>,
 }
@@ -82,6 +88,7 @@ impl PipelineOptions {
             skip_repos: false,
             skip_reports: false,
             skip_static_analysis: false,
+            skip_arch_llm: false,
             force_pr_refresh: false,
             max_workers: None,
         }
@@ -470,6 +477,15 @@ pub fn rerun_post_collection_for_sprint_ids(
     let db = Database::open(db_path).context("opening grading DB")?;
     db.create_tables().context("schema migration")?;
     let data_dir = entregues_dir.parent().unwrap_or(entregues_dir);
+
+    // Refresh the identity mapping before survival so blame uses the
+    // task-derived (not github-derived) email→student resolution.
+    if let Err(e) = sprint_grader_collect::resolve_identities(
+        &db.conn,
+        &sprint_grader_collect::IdentityResolverConfig::default(),
+    ) {
+        warn!(error = %e, "identity resolver failed — continuing with degraded blame map");
+    }
 
     // Survival is per-sprint — each call needs the sprint's ordinal so that
     // its inner `sprint_id_for_project(ord)` lookup hits the same sprint.
@@ -863,6 +879,16 @@ pub fn run_pipeline(
     sprint_grader_collect::run_collection(config, &db, &collect_opts)
         .context("collection failed")?;
 
+    // Build the trackdev-id ↔ github (login,email) mapping from
+    // task-assignee-derived evidence. Runs after collect (PRs + commits +
+    // task links populated) and before survival (blame reads the mapping).
+    if let Err(e) = sprint_grader_collect::resolve_identities(
+        &db.conn,
+        &sprint_grader_collect::IdentityResolverConfig::default(),
+    ) {
+        warn!(error = %e, "identity resolver failed — continuing with degraded blame map");
+    }
+
     // Resolve `--projects` slug filter to project_ids ONCE; from here on
     // every globally-iterating stage takes this list so `--projects`
     // strictly scopes the run.
@@ -1203,7 +1229,10 @@ pub fn run_pipeline(
     //     binary on `$PATH` (or via `claude_cli_path`). No API key.
     //   - `judge = "anthropic-api"` requires `ANTHROPIC_API_KEY`.
     // Either way, missing prerequisite → silent skip; never hard-fail.
-    if config.architecture.llm_review {
+    if config.architecture.llm_review && opts.skip_arch_llm {
+        info!("[architecture] LLM rubric skipped via --skip-arch-llm");
+    }
+    if config.architecture.llm_review && !opts.skip_arch_llm {
         let judge_kind = config.architecture.judge.as_str();
         let judge_box: Option<Box<dyn sprint_grader_architecture_llm::Judge + Send + Sync>> =
             match judge_kind {
