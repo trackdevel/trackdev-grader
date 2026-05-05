@@ -30,7 +30,9 @@ use sprint_grader_core::Config;
 use tracing::{info, warn};
 
 use crate::claude_cli_client::ClaudeCliClient;
+use crate::deepseek_client::DeepseekClient;
 use crate::llm_client::{AnthropicClient, Conversation};
+use crate::llm_trait::LlmClient;
 
 type LlmPrRow = (
     String,
@@ -351,10 +353,27 @@ pub fn run_pr_doc_evaluation_for_sprint_id(
                     }
                 }
             }
+            "deepseek-api" => {
+                let api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+                if api_key.is_empty() {
+                    info!(
+                        "judge=deepseek-api but DEEPSEEK_API_KEY not set — heuristic PR doc scoring fallback"
+                    );
+                    count += evaluate_prs_heuristic(conn, sprint_id)?;
+                } else {
+                    match DeepseekClient::new(&api_key, config.evaluate.model_id.clone()) {
+                        Ok(client) => count += evaluate_prs_llm(conn, sprint_id, &client)?,
+                        Err(e) => {
+                            warn!(error = %e, "DeepSeek client init failed — heuristic fallback");
+                            count += evaluate_prs_heuristic(conn, sprint_id)?;
+                        }
+                    }
+                }
+            }
             other => {
                 warn!(
                     judge = %other,
-                    "unknown [evaluate] judge — heuristic PR doc scoring fallback"
+                    "unknown [evaluate] judge — expected \"claude-cli\", \"anthropic-api\", or \"deepseek-api\"; heuristic PR doc scoring fallback"
                 );
                 count += evaluate_prs_heuristic(conn, sprint_id)?;
             }
@@ -378,7 +397,7 @@ pub fn run_llm_evaluation_for_sprint_id(
 fn evaluate_prs_llm(
     conn: &Connection,
     sprint_id: i64,
-    client: &AnthropicClient,
+    client: &dyn LlmClient,
 ) -> rusqlite::Result<usize> {
     // Group PRs by project — one conversation per team.
     let mut stmt = conn.prepare(
@@ -809,8 +828,21 @@ pub fn score_task_descriptions_for_sprint_id(
                 }
             }
         }
+        "deepseek-api" => {
+            let api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+            if api_key.is_empty() {
+                return evaluate_tasks_heuristic(conn, sprint_id);
+            }
+            match DeepseekClient::new(&api_key, config.evaluate.model_id.clone()) {
+                Ok(client) => evaluate_tasks_llm(conn, sprint_id, &client),
+                Err(e) => {
+                    warn!(error = %e, "DeepSeek client init failed — heuristic task scoring");
+                    evaluate_tasks_heuristic(conn, sprint_id)
+                }
+            }
+        }
         other => {
-            warn!(judge = %other, "unknown [evaluate] judge — heuristic task scoring");
+            warn!(judge = %other, "unknown [evaluate] judge — expected \"claude-cli\", \"anthropic-api\", or \"deepseek-api\"; heuristic task scoring");
             evaluate_tasks_heuristic(conn, sprint_id)
         }
     }
@@ -819,7 +851,7 @@ pub fn score_task_descriptions_for_sprint_id(
 fn evaluate_tasks_llm(
     conn: &Connection,
     sprint_id: i64,
-    client: &AnthropicClient,
+    client: &dyn LlmClient,
 ) -> rusqlite::Result<usize> {
     let mut stmt = conn.prepare(
         "SELECT id, task_key, name, parent_task_id FROM tasks
@@ -1306,6 +1338,63 @@ model_id = "claude-haiku-4-5-20251001"
             .unwrap();
         assert!(avg.is_some(), "avg_doc_score must be populated");
         assert!((avg.unwrap() - total as f64).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pr_doc_deepseek_judge_falls_back_to_heuristic_when_api_key_missing() {
+        // judge = "deepseek-api" + DEEPSEEK_API_KEY unset → heuristic
+        // fallback. Mirrors the anthropic-api missing-key contract.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE students (id TEXT PRIMARY KEY, full_name TEXT,
+                github_login TEXT, team_project_id INTEGER);
+             CREATE TABLE tasks (id INTEGER PRIMARY KEY, task_key TEXT, name TEXT,
+                type TEXT, status TEXT, estimation_points INTEGER,
+                assignee_id TEXT, sprint_id INTEGER, parent_task_id INTEGER);
+             CREATE TABLE pull_requests (id TEXT PRIMARY KEY, pr_number INTEGER,
+                repo_full_name TEXT, title TEXT, body TEXT, author_id TEXT);
+             CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT,
+                PRIMARY KEY (task_id, pr_id));
+             CREATE TABLE pr_doc_evaluation (pr_id TEXT, sprint_id INTEGER,
+                title_score INTEGER, description_score INTEGER,
+                total_doc_score INTEGER, justification TEXT,
+                PRIMARY KEY (pr_id, sprint_id));
+             CREATE TABLE student_sprint_metrics (student_id TEXT, sprint_id INTEGER,
+                avg_doc_score REAL, PRIMARY KEY (student_id, sprint_id));
+             INSERT INTO students(id, full_name, team_project_id)
+                VALUES ('carol', 'Carol', 1);
+             INSERT INTO tasks(id, task_key, name, type, status, sprint_id, assignee_id)
+                VALUES (1, 'PDS-1', 'login', 'TASK', 'DONE', 10, 'carol');
+             INSERT INTO pull_requests(id, pr_number, repo_full_name, title, body, author_id)
+                VALUES ('pr-1', 7, 'org/repo',
+                        'Implement login controller with JWT',
+                        'Implement the login controller because users could not sign in. \
+                         Linked to task PDS-42; verify by running the auth test suite.',
+                        'carol');
+             INSERT INTO task_pull_requests(task_id, pr_id) VALUES (1, 'pr-1');
+             INSERT INTO student_sprint_metrics(student_id, sprint_id, avg_doc_score)
+                VALUES ('carol', 10, NULL);",
+        )
+        .unwrap();
+
+        let mut cfg = build_minimal_config();
+        cfg.evaluate.judge = "deepseek-api".to_string();
+        // Ensure no key is leaking from the host env.
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+        let count = run_pr_doc_evaluation_for_sprint_id(&conn, 10, &cfg, true).unwrap();
+        assert_eq!(count, 1);
+
+        let justification: String = conn
+            .query_row(
+                "SELECT justification FROM pr_doc_evaluation WHERE sprint_id = 10",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            justification.contains("heuristics"),
+            "missing DEEPSEEK_API_KEY must fall back to heuristic, got: {justification}"
+        );
     }
 
     #[test]

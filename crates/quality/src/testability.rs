@@ -545,10 +545,7 @@ fn detect_broad_catch_in_method(body: Node, source: &[u8], out: &mut Vec<(i64, i
 /// `qualifier_text` is the receiver expression's source (`"System"`,
 /// `"this"`, `"foo.bar"`, etc.) or `None` when the call has no explicit
 /// receiver.
-fn split_method_invocation<'a>(
-    inv: Node<'a>,
-    source: &[u8],
-) -> Option<(Option<String>, String)> {
+fn split_method_invocation<'a>(inv: Node<'a>, source: &[u8]) -> Option<(Option<String>, String)> {
     // tree-sitter-java field names: `object` (the receiver) and `name`
     // (the method identifier).
     let name_node = inv.child_by_field_name("name")?;
@@ -669,11 +666,7 @@ fn detect_inline_collaborator_in_method(
     });
 }
 
-fn detect_static_singleton_in_method(
-    body: Node,
-    source: &[u8],
-    out: &mut Vec<(i64, i64, String)>,
-) {
+fn detect_static_singleton_in_method(body: Node, source: &[u8], out: &mut Vec<(i64, i64, String)>) {
     for_each_descendant(body, |n| {
         if n.kind() != "method_invocation" {
             return;
@@ -1394,9 +1387,10 @@ pub fn scan_repo_to_db(
 
     // Short-circuit when the head SHA hasn't moved since the last
     // successful run. The cached findings + attribution remain valid.
-    if let (Some(current), Some(cached)) =
-        (head.as_deref(), cached_head_sha(conn, repo_full_name, sprint_id))
-    {
+    if let (Some(current), Some(cached)) = (
+        head.as_deref(),
+        cached_head_sha(conn, repo_full_name, sprint_id),
+    ) {
         if current == cached {
             // Bookkeeping: refresh ran_at so operators can tell the
             // scan was *considered* this run, just not re-executed.
@@ -1487,7 +1481,12 @@ pub fn scan_repo_to_db(
         }
     }
 
-    let attribution_rows = match attribute_findings_for_repo(conn, repo_path, repo_full_name, sprint_id) {
+    let attribution_rows = match attribute_findings_for_repo(
+        conn,
+        repo_path,
+        repo_full_name,
+        sprint_id,
+    ) {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(repo = repo_full_name, error = %e, "complexity attribution failed; continuing without it");
@@ -1602,16 +1601,12 @@ mod tests {
 
     #[test]
     fn keeps_spring_main_java_file() {
-        assert!(is_scannable_main_source(
-            "src/main/java/com/x/Foo.java"
-        ));
+        assert!(is_scannable_main_source("src/main/java/com/x/Foo.java"));
     }
 
     #[test]
     fn keeps_android_app_main_java_file() {
-        assert!(is_scannable_main_source(
-            "app/src/main/java/com/x/Foo.java"
-        ));
+        assert!(is_scannable_main_source("app/src/main/java/com/x/Foo.java"));
     }
 
     #[test]
@@ -1655,9 +1650,7 @@ mod tests {
 
     #[test]
     fn rejects_well_known_android_shims() {
-        assert!(!is_scannable_main_source(
-            "app/src/main/java/com/x/R.java"
-        ));
+        assert!(!is_scannable_main_source("app/src/main/java/com/x/R.java"));
         assert!(!is_scannable_main_source(
             "app/src/main/java/com/x/BuildConfig.java"
         ));
@@ -1674,9 +1667,7 @@ mod tests {
 
     #[test]
     fn rejects_non_java_files() {
-        assert!(!is_scannable_main_source(
-            "src/main/java/com/x/foo.kt"
-        ));
+        assert!(!is_scannable_main_source("src/main/java/com/x/foo.kt"));
         assert!(!is_scannable_main_source(
             "src/main/resources/application.yml"
         ));
@@ -2155,16 +2146,21 @@ mod tests {
                  method_name, start_line, end_line, rule_key, severity,
                  measured_value, threshold, detail)
              VALUES (1, 1, ?, ?, 'A', 'f', ?, ?, ?, ?, NULL, NULL, ?)",
-            params![repo_full_name, file_path, start, end, rule, severity, detail],
+            params![
+                repo_full_name,
+                file_path,
+                start,
+                end,
+                rule,
+                severity,
+                detail
+            ],
         )
         .unwrap();
         conn.last_insert_rowid()
     }
 
-    fn attr_for(
-        conn: &Connection,
-        finding_id: i64,
-    ) -> Vec<(String, i64, f64, f64)> {
+    fn attr_for(conn: &Connection, finding_id: i64) -> Vec<(String, i64, f64, f64)> {
         let mut stmt = conn
             .prepare(
                 "SELECT student_id, lines_attributed, weighted_lines, weight

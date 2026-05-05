@@ -43,6 +43,7 @@
 
 pub mod cache;
 pub mod cli_judge;
+pub mod deepseek_judge;
 pub mod judge;
 
 use std::path::Path;
@@ -55,6 +56,7 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 pub use cli_judge::ClaudeCliJudge;
+pub use deepseek_judge::DeepseekJudge;
 pub use judge::{Judge, JudgeError, LlmJudge, LlmResponse, LlmViolation};
 
 /// One LLM-driven evaluation run over a cloned repo for a sprint.

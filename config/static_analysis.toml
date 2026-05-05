@@ -12,7 +12,7 @@
 # [detector_thresholds]` keeps it effectively silent. Lower it when ready
 # to grade.
 
-severity_floor = "INFO"            # drop findings below this before INSERT
+severity_floor = "WARNING"         # drop INFO findings before INSERT
 max_findings_per_analyzer = 200    # per (repo, sprint, analyzer) cap
 timeout_seconds = 120
 locale = "es"                      # 'es' | 'ca' | 'en'
