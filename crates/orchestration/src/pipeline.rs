@@ -886,8 +886,8 @@ pub fn run_pipeline(
     let project_ids_filter: Option<&[i64]> = scoped_project_ids.as_deref();
 
     // Resolve sprint groupings right after collection — this is read-only
-    // and has no dependency on clone, estimation, or survival. Moving it
-    // here lets us compute the new-data set before deciding what to clone.
+    // and has no dependency on clone or survival. Moving it here lets us
+    // compute the new-data set before deciding what to clone.
     let groups = resolve_all_sprint_tuples(&db, &opts.today, opts.project_filter.as_deref())?;
     if groups.is_empty() {
         warn!("no projects matched — nothing to process");
@@ -947,17 +947,6 @@ pub fn run_pipeline(
         } else {
             clone_repos_from_db(&db, &opts.entregues_dir, project_ids_filter)?;
         }
-    }
-
-    // T-P2.1: per-student estimation-bias fitter. Pools every estimated
-    // task across every sprint of each project (Bayesian posterior wants
-    // all the data). Runs *before* the per-sprint flag detection inside
-    // the parallel block so `student_estimation_bias` is populated when
-    // the ESTIMATION_BIAS detector queries it on the same run. The fit
-    // depends only on `tasks` + `sprints`, both populated by `collect`.
-    match sprint_grader_estimation::fit_and_persist_for_projects(&db.conn, project_ids_filter) {
-        Ok(n) => info!(students_written = n, "estimation bias fitting done"),
-        Err(e) => warn!(error = %e, "estimation bias fitting failed"),
     }
 
     // Stage 2: survival — one pass per sprint (each with its ordinal).
