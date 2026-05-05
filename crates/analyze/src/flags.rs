@@ -2394,6 +2394,136 @@ fn static_analysis_hotspot(
     Ok(flags)
 }
 
+/// COMPLEXITY_HOTSPOT (T-CX). Per-student companion to the testability
+/// scan in `crates/quality/src/testability.rs`. Aggregates a student's
+/// per-finding `weight × severity_rank` across this sprint's
+/// `method_complexity_findings` (joined via
+/// `method_complexity_attribution`) and fires when the resulting score
+/// crosses one of two bands:
+///
+/// - `score >= complexity_hotspot_crit` → CRITICAL
+/// - `score >= complexity_hotspot_warn` → WARNING
+///
+/// `severity_rank` is the existing `critical=3, warning=2, info=1` scale.
+/// The offender JSON is capped at the top-3 contributors (by weight ×
+/// severity_rank) so the report can render the most actionable items
+/// without dumping every finding.
+fn complexity_hotspot(
+    conn: &Connection,
+    sprint_id: i64,
+    warn_threshold: f64,
+    crit_threshold: f64,
+) -> rusqlite::Result<Vec<Flag>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.student_id, f.severity, a.weight, f.rule_key, f.file_path,
+                f.class_name, f.method_name, f.start_line, f.end_line,
+                f.measured_value, f.threshold, f.repo_full_name
+         FROM method_complexity_attribution a
+         JOIN method_complexity_findings f ON f.id = a.finding_id
+         WHERE a.sprint_id = ?",
+    )?;
+    let rows = stmt
+        .query_map([sprint_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, Option<f64>>(9)?,
+                r.get::<_, Option<f64>>(10)?,
+                r.get::<_, String>(11)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct Acc {
+        score: f64,
+        worst_severity: String,
+        offenders: Vec<(f64, Value)>,
+    }
+    let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
+    for (
+        student_id,
+        severity,
+        weight,
+        rule_key,
+        file_path,
+        class_name,
+        method_name,
+        start_line,
+        end_line,
+        measured_value,
+        threshold,
+        repo_full_name,
+    ) in rows
+    {
+        let rank = severity_rank(&severity) as f64;
+        let contribution = weight * rank;
+        let acc = by_student.entry(student_id).or_default();
+        acc.score += contribution;
+        if severity_rank(&severity) > severity_rank(&acc.worst_severity) {
+            acc.worst_severity = severity.clone();
+        }
+        acc.offenders.push((
+            contribution,
+            json!({
+                "rule_key": rule_key,
+                "severity": severity,
+                "weight": round3(weight),
+                "score_contribution": round3(contribution),
+                "repo_full_name": repo_full_name,
+                "file_path": file_path,
+                "class_name": class_name,
+                "method_name": method_name,
+                "start_line": start_line,
+                "end_line": end_line,
+                "measured_value": measured_value,
+                "threshold": threshold,
+            }),
+        ));
+    }
+
+    let mut flags = Vec::new();
+    for (student_id, mut acc) in by_student {
+        let band_severity = if acc.score >= crit_threshold {
+            "CRITICAL"
+        } else if acc.score >= warn_threshold {
+            if acc.worst_severity == "CRITICAL" {
+                "CRITICAL"
+            } else {
+                "WARNING"
+            }
+        } else {
+            continue;
+        };
+
+        acc.offenders
+            .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let offenders: Vec<Value> = acc.offenders.into_iter().take(3).map(|(_, v)| v).collect();
+
+        flags.push(Flag {
+            student_id,
+            flag_type: "COMPLEXITY_HOTSPOT",
+            severity: band_severity,
+            details: json!({
+                "score": round3(acc.score),
+                "warn_threshold": warn_threshold,
+                "crit_threshold": crit_threshold,
+                "worst_severity": acc.worst_severity,
+                "offenders": offenders,
+            }),
+        });
+    }
+    Ok(flags)
+}
+
 /// ESTIMATION_BIAS (T-P2.1). Per-student calibration flag based on the
 /// `student_estimation_bias` posterior fitted by the `estimation` crate.
 /// Fires WARNING when the 95 % credible interval for `β_u` excludes 0
@@ -2702,6 +2832,15 @@ pub fn detect_flags_for_sprint_id(
             config
                 .detector_thresholds
                 .static_analysis_hotspot_min_weighted
+        )
+    );
+    total += run!(
+        "COMPLEXITY_HOTSPOT",
+        complexity_hotspot(
+            conn,
+            sprint_id,
+            config.detector_thresholds.complexity_hotspot_warn,
+            config.detector_thresholds.complexity_hotspot_crit
         )
     );
     total += run!("ESTIMATION_BIAS", estimation_bias(conn, sprint_id));
