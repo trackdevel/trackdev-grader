@@ -75,6 +75,12 @@ pub fn sync_reports_through_sprint(
             );
             continue;
         };
+        sync_repo_to_origin_main(&repo_root).with_context(|| {
+            format!(
+                "failed to sync {} to origin/main before writing REPORT.md",
+                repo_root.display()
+            )
+        })?;
         let report_path = repo_root.join("REPORT.md");
         // T-SA: sync-reports publishes to team repos. Strip the
         // static-analysis section regardless of `--push` — the file we
@@ -201,6 +207,28 @@ pub fn repo_has_report_changes(repo_root: &Path, report_paths: &[PathBuf]) -> Re
         );
     }
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+/// Pre-write contract for the android-repo report sync: when REPORT.md is
+/// (re)written into the working tree, HEAD must be on `main` and `main` must
+/// match `origin/main` exactly. We fetch first (so origin/main reflects any
+/// student pushes since the previous run), switch to main, then `reset --hard`
+/// — this is the same idiom used by `repo_manager::update`. Any local
+/// uncommitted edits or unpushed commits in the clone are intentionally
+/// discarded; the clone is the grader's working area and REPORT.md is
+/// reproducible from the DB on every run.
+fn sync_repo_to_origin_main(repo_root: &Path) -> Result<()> {
+    run_cmd(repo_root, "git", &["fetch", "--quiet", "origin"])
+        .with_context(|| format!("git fetch origin failed in {}", repo_root.display()))?;
+    run_cmd(repo_root, "git", &["switch", "main"])
+        .with_context(|| format!("git switch main failed in {}", repo_root.display()))?;
+    run_cmd(repo_root, "git", &["reset", "--hard", "origin/main"]).with_context(|| {
+        format!(
+            "git reset --hard origin/main failed in {}",
+            repo_root.display()
+        )
+    })?;
+    Ok(())
 }
 
 pub fn publish_report_updates(repo_root: &Path, report_paths: &[PathBuf]) -> Result<()> {
