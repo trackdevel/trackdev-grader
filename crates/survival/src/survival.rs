@@ -143,6 +143,29 @@ pub fn project_for_repo(db: &Database, repo_full_name: &str) -> Option<i64> {
         .flatten()
 }
 
+/// Resolve the project owning this repo, with a path-based fallback used when
+/// the PR→student→project chain is broken (e.g. `pull_requests.author_id` is
+/// NULL across the whole repo because collection didn't resolve authors). The
+/// clone layout is `<repos_dir>/<project_name>/<repo_basename>`, so the
+/// parent dir name is authoritative when the DB linkage is missing.
+pub fn project_for_repo_or_path(
+    db: &Database,
+    repo_full_name: &str,
+    repo_path: &Path,
+) -> Option<i64> {
+    if let Some(pid) = project_for_repo(db, repo_full_name) {
+        return Some(pid);
+    }
+    let project_dir = repo_path.parent()?.file_name()?.to_str()?;
+    db.conn
+        .query_row(
+            "SELECT id FROM projects WHERE name = ?",
+            [project_dir],
+            |r| r.get::<_, i64>(0),
+        )
+        .ok()
+}
+
 pub fn sprint_id_for_project(db: &Database, project_id: i64, ordinal: u32) -> Option<i64> {
     let mut stmt = db
         .conn
@@ -632,12 +655,12 @@ pub fn compute_survival(
 
     let scoped_repos: Vec<(String, std::path::PathBuf)> = repo_map
         .iter()
-        .filter(
-            |(repo_full_name, _)| match project_for_repo(db, repo_full_name) {
+        .filter(|(repo_full_name, repo_path)| {
+            match project_for_repo_or_path(db, repo_full_name, repo_path) {
                 Some(pid) => targeted_projects.is_empty() || targeted_projects.contains(&pid),
                 None => false,
-            },
-        )
+            }
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -649,7 +672,7 @@ pub fn compute_survival(
     );
     let mut total_fps: i64 = 0;
     for (repo_full_name, repo_path) in &scoped_repos {
-        let project_id = match project_for_repo(db, repo_full_name) {
+        let project_id = match project_for_repo_or_path(db, repo_full_name, repo_path) {
             Some(p) => p,
             None => {
                 warn!(repo = %repo_full_name, "Cannot determine project — skipping");
@@ -699,4 +722,36 @@ pub fn compute_survival(
 
     info!("Survival computation complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_for_repo_or_path;
+    use sprint_grader_core::Database;
+    use std::path::PathBuf;
+
+    #[test]
+    fn project_for_repo_falls_back_to_parent_directory_when_pr_authors_are_null() {
+        let db = Database::open(std::path::Path::new(":memory:")).expect("in-memory db");
+        db.create_tables().expect("schema");
+        db.conn
+            .execute(
+                "INSERT INTO projects (id, slug, name) VALUES (11, 'p2d', 'pds26-2a')",
+                [],
+            )
+            .unwrap();
+        // PR rows exist but author_id is NULL — mirrors the live data shape
+        // for projects whose author resolution failed during collection.
+        db.conn
+            .execute(
+                "INSERT INTO pull_requests (id, repo_full_name, author_id)
+                 VALUES ('pr-1', 'udg-pds/spring-pds26_2a', NULL)",
+                [],
+            )
+            .unwrap();
+
+        let repo_path = PathBuf::from("/tmp/data/entregues/pds26-2a/spring-pds26_2a");
+        let pid = project_for_repo_or_path(&db, "udg-pds/spring-pds26_2a", &repo_path);
+        assert_eq!(pid, Some(11));
+    }
 }
