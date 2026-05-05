@@ -743,9 +743,7 @@ fn main() -> Result<()> {
                         g.project_id,
                         &config.detector_thresholds,
                     )
-                    .with_context(|| {
-                        format!("complexity scan failed for sprint_id {sid}")
-                    })?;
+                    .with_context(|| format!("complexity scan failed for sprint_id {sid}"))?;
                 }
             }
         }
@@ -949,7 +947,10 @@ fn main() -> Result<()> {
                     &report_path,
                 )
                 .with_context(|| format!("Markdown report failed for {}", report_path.display()))?;
-                repo_reports.entry(repo_root.clone()).or_default().push(report_path);
+                repo_reports
+                    .entry(repo_root.clone())
+                    .or_default()
+                    .push(report_path);
 
                 if professor_report {
                     // Parent of the android repo — `data/entregues/<project>/`
