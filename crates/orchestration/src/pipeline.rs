@@ -1268,9 +1268,32 @@ pub fn run_pipeline(
                             config.architecture.model_id.clone(),
                             config.architecture.max_tokens,
                         ) {
-                            Ok(j) => Some(Box::new(j)),
+                            Ok(j) => Some(Box::new(j)
+                                as Box<dyn sprint_grader_architecture_llm::Judge + Send + Sync>),
                             Err(e) => {
                                 warn!(error = %e, "could not construct Anthropic client; skipping LLM review");
+                                None
+                            }
+                        }
+                    }
+                }
+                "deepseek-api" => {
+                    let api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+                    if api_key.is_empty() {
+                        info!(
+                            "[architecture] llm_review = true with judge = \"deepseek-api\" but DEEPSEEK_API_KEY is empty — skipping LLM review"
+                        );
+                        None
+                    } else {
+                        match sprint_grader_architecture_llm::DeepseekJudge::new(
+                            &api_key,
+                            config.architecture.model_id.clone(),
+                            config.architecture.max_tokens,
+                        ) {
+                            Ok(j) => Some(Box::new(j)
+                                as Box<dyn sprint_grader_architecture_llm::Judge + Send + Sync>),
+                            Err(e) => {
+                                warn!(error = %e, "could not construct DeepSeek client; skipping LLM review");
                                 None
                             }
                         }
@@ -1279,7 +1302,7 @@ pub fn run_pipeline(
                 other => {
                     warn!(
                         judge = %other,
-                        "[architecture] unknown judge — expected \"claude-cli\" or \"anthropic-api\"; skipping LLM review"
+                        "[architecture] unknown judge — expected \"claude-cli\", \"anthropic-api\", or \"deepseek-api\"; skipping LLM review"
                     );
                     None
                 }
