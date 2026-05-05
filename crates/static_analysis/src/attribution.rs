@@ -82,13 +82,18 @@ pub fn attribute_findings_for_repo(
 
     let mut written = 0usize;
     for (file_path, findings) in by_file {
-        // One blame call per file, regardless of how many findings point
-        // into that file.
-        let blame = blame_file(repo_path, &file_path);
+        // SARIF artifact URIs have already been stripped of their `file:`
+        // scheme upstream, but some analyzers still emit absolute paths. git
+        // blame insists on either a repo-relative path or one inside the
+        // repo's working tree — convert here as a last line of defence so
+        // the attribution stage doesn't silently drop these findings.
+        let rel_path = relativise_to_repo(repo_path, &file_path);
+        let blame = blame_file(repo_path, &rel_path);
         if blame.is_empty() {
             warn!(
                 repo = repo_full_name,
                 file = %file_path,
+                rel = %rel_path,
                 "blame returned no lines; skipping attribution for this file"
             );
             continue;
@@ -130,6 +135,29 @@ pub fn attribute_findings_for_repo(
         }
     }
     Ok(written)
+}
+
+/// Make `file_path` relative to `repo_path` when possible. SARIF artifact
+/// URIs sometimes survive as absolute paths even after `strip_file_scheme`
+/// (e.g. `file:/abs/path` → `/abs/path`); git blame chokes on those. Falls
+/// back to the input as-is if it's already relative or doesn't share the
+/// repo's prefix.
+fn relativise_to_repo(repo_path: &Path, file_path: &str) -> String {
+    let p = std::path::Path::new(file_path);
+    if !p.is_absolute() {
+        return file_path.to_string();
+    }
+    if let Ok(canon_repo) = repo_path.canonicalize() {
+        if let Ok(canon_file) = p.canonicalize() {
+            if let Ok(stripped) = canon_file.strip_prefix(&canon_repo) {
+                return stripped.to_string_lossy().into_owned();
+            }
+        }
+    }
+    if let Ok(stripped) = p.strip_prefix(repo_path) {
+        return stripped.to_string_lossy().into_owned();
+    }
+    file_path.to_string()
 }
 
 fn resolve_student(map: &EmailStudentMap, email: &str) -> Option<String> {
