@@ -453,7 +453,10 @@ mod tests {
         assert_eq!(strip_file_scheme("file:/abs/path"), "/abs/path");
         assert_eq!(strip_file_scheme("file:///abs/path"), "/abs/path");
         assert_eq!(strip_file_scheme("file://host/abs"), "host/abs");
-        assert_eq!(strip_file_scheme("relative/path.java"), "relative/path.java");
+        assert_eq!(
+            strip_file_scheme("relative/path.java"),
+            "relative/path.java"
+        );
         assert_eq!(strip_file_scheme("/already/abs"), "/already/abs");
     }
 
