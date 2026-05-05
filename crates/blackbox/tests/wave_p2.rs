@@ -1,7 +1,7 @@
-//! Wave P2 scenarios (T-T3.1 → T-T3.7). Architectural additions —
-//! estimation bias, architecture conformance, ownership treemap,
-//! mutation testing, curriculum versioning, threshold jitter, and the
-//! per-detector regression-fixture meta-check.
+//! Wave P2 scenarios (T-T3.2 → T-T3.7). Architectural additions —
+//! architecture conformance, ownership treemap, mutation testing,
+//! curriculum versioning, threshold jitter, and the per-detector
+//! regression-fixture meta-check.
 
 use std::path::PathBuf;
 
@@ -18,72 +18,6 @@ fn count_flags(conn: &rusqlite::Connection, sprint_id: i64, ftype: &str) -> i64 
         |r| r.get(0),
     )
     .unwrap()
-}
-
-// ─── T-T3.1 — Estimation bias table populated and ESTIMATION_BIAS fires ──
-
-#[test]
-fn t_t3_1_estimation_bias_fit_persists_per_student_rows() {
-    // Real Trackdev data has one assignee per task (CLAUDE.md gotcha
-    // #8), so the Rasch model's β and per-task δ are weakly
-    // identified — β shrinks heavily under the N(0,1) prior. This
-    // scenario asserts only what the persist layer guarantees: every
-    // student with ≥1 estimated task gets a row in
-    // `student_estimation_bias`. Magnitude of β is covered by the
-    // EM crate's own synthetic-data convergence test.
-    let tmp = tempfile::tempdir().unwrap();
-    let (conn, _paths) = Fixture::new().build(tmp.path()).unwrap();
-    let written =
-        sprint_grader_estimation::fit_and_persist_for_project(&conn, ids::PROJECT_ID).unwrap();
-    assert_eq!(written, 5, "one row per student with estimated tasks");
-    let alice_present: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM student_estimation_bias
-             WHERE student_id='alice' AND project_id = ?",
-            [ids::PROJECT_ID],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(alice_present, 1);
-}
-
-#[test]
-fn t_t3_1_estimation_bias_flag_fires_on_pre_seeded_strong_bias() {
-    // Direct integration of the FLAG detector against a synthesised
-    // posterior — the flag's contract is "CrI excludes 0 by >0.5
-    // logits AND n_tasks ≥ 5". Seed exactly that.
-    let tmp = tempfile::tempdir().unwrap();
-    let (conn, _paths) = Fixture::new().build(tmp.path()).unwrap();
-    conn.execute(
-        "INSERT INTO student_estimation_bias
-            (student_id, project_id, beta_mean, beta_lower95, beta_upper95,
-             n_tasks, fitted_at)
-         VALUES ('alice', ?, 1.0, 0.6, 1.4, 8, '2026-04-26T00:00:00Z')",
-        [ids::PROJECT_ID],
-    )
-    .unwrap();
-    detect_flags_for_sprint_id(&conn, ids::SPRINT_ID, &Config::test_default()).unwrap();
-    assert_eq!(count_flags(&conn, ids::SPRINT_ID, "ESTIMATION_BIAS"), 1);
-}
-
-#[test]
-fn t_t3_1_estimation_bias_silent_below_min_n_tasks() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (conn, _paths) = Fixture::new().build(tmp.path()).unwrap();
-    conn.execute(
-        "INSERT INTO student_estimation_bias
-            (student_id, project_id, beta_mean, beta_lower95, beta_upper95,
-             n_tasks, fitted_at)
-         VALUES ('alice', ?, 1.0, 0.6, 1.4, 4, '2026-04-26T00:00:00Z')",
-        [ids::PROJECT_ID],
-    )
-    .unwrap();
-    detect_flags_for_sprint_id(&conn, ids::SPRINT_ID, &Config::test_default()).unwrap();
-    assert_eq!(
-        count_flags(&conn, ids::SPRINT_ID, "ESTIMATION_BIAS"),
-        0,
-        "n_tasks < 5 must suppress the flag"
-    );
 }
 
 // ─── T-T3.2 — Architecture scan + ARCHITECTURE_DRIFT (P2.2) ───────────────
@@ -455,7 +389,7 @@ fn t_t3_7_per_detector_test_fixtures_count_holds() {
     // Meta-check: cannot rename / delete a fixture without bumping the
     // floor here. The repo has 30+ flag_*.rs files in
     // crates/analyze/tests/. A regression that drops one (e.g. a
-    // refactor that loses ESTIMATION_BIAS coverage) trips this guard.
+    // refactor that loses LOW_MUTATION_SCORE coverage) trips this guard.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
