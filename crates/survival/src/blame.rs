@@ -257,51 +257,53 @@ pub type EmailStudentMap = HashMap<String, (String, Option<String>)>;
 pub fn build_email_to_student_map(conn: &Connection) -> rusqlite::Result<EmailStudentMap> {
     let mut out: EmailStudentMap = HashMap::new();
 
-    let mut stmt = conn.prepare("SELECT id, email, github_login FROM students")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, Option<String>>(2)?,
-        ))
-    })?;
-    for r in rows {
-        let (student_id, email, gh_login) = r?;
-        if let Some(e) = email.as_ref() {
-            out.insert(e.to_lowercase(), (student_id.clone(), gh_login.clone()));
-        }
-        if let Some(login) = gh_login.as_ref() {
-            let lower = login.to_lowercase();
-            out.insert(
-                format!("{lower}@users.noreply.github.com"),
-                (student_id.clone(), gh_login.clone()),
-            );
-            out.insert(lower, (student_id.clone(), gh_login.clone()));
-        }
-    }
-    drop(stmt);
-
-    // Supplement with github_users linked to a student.
+    // Computed task-assignee-derived mapping is the authoritative source.
+    // It writes (login, email) → student_id pairs whose confidence cleared
+    // the resolver's threshold; ambiguous identities are intentionally
+    // absent here and live in identity_resolution_warnings instead.
     let mut stmt = conn.prepare(
-        "SELECT login, email, student_id FROM github_users WHERE student_id IS NOT NULL",
+        "SELECT student_id, identity_kind, identity_value
+         FROM student_github_identity",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
-            r.get::<_, Option<String>>(1)?,
+            r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
         ))
     })?;
     for r in rows {
-        let (login, email, student_id) = r?;
-        let key = login.to_lowercase();
+        let (student_id, kind, value) = r?;
+        let key = value.to_lowercase();
+        let login = if kind == "login" { Some(value) } else { None };
         out.entry(key.clone())
-            .or_insert_with(|| (student_id.clone(), Some(login.clone())));
-        out.entry(format!("{key}@users.noreply.github.com"))
-            .or_insert_with(|| (student_id.clone(), Some(login.clone())));
-        if let Some(e) = email {
-            out.entry(e.to_lowercase())
-                .or_insert((student_id.clone(), Some(login.clone())));
+            .or_insert_with(|| (student_id.clone(), login.clone()));
+        if kind == "login" {
+            out.entry(format!("{key}@users.noreply.github.com"))
+                .or_insert_with(|| (student_id.clone(), login.clone()));
+        }
+    }
+    drop(stmt);
+
+    // Backstop: students.github_login is treated as a self-declared identity
+    // claim. Used only when the resolver hasn't already mapped the same
+    // value (or'_insert_with). Useful for cold-start runs where no PRs have
+    // been collected yet.
+    let mut stmt = conn.prepare("SELECT id, github_login FROM students")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+        ))
+    })?;
+    for r in rows {
+        let (student_id, gh_login) = r?;
+        if let Some(login) = gh_login.as_ref() {
+            let lower = login.to_lowercase();
+            out.entry(lower.clone())
+                .or_insert_with(|| (student_id.clone(), Some(login.clone())));
+            out.entry(format!("{lower}@users.noreply.github.com"))
+                .or_insert_with(|| (student_id.clone(), Some(login.clone())));
         }
     }
 
