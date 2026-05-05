@@ -1715,6 +1715,7 @@ fn write_section_b(
     sprint_id: i64,
     project_id: i64,
     depth: usize,
+    sa_per_student: Option<(&HashMap<String, Vec<SaFinding>>, usize)>,
 ) -> rusqlite::Result<()> {
     let h2 = "#".repeat(depth);
     let h3 = "#".repeat(depth + 1);
@@ -1788,6 +1789,39 @@ fn write_section_b(
             (sid, name, github)
         })
         .collect();
+
+    if let Some((sa_data, _)) = sa_per_student {
+        let mut t_total = 0usize;
+        let mut t_crit = 0usize;
+        let mut t_warn = 0usize;
+        let mut t_info = 0usize;
+        for findings in sa_data.values() {
+            for f in findings {
+                t_total += 1;
+                match f.severity.to_ascii_uppercase().as_str() {
+                    "CRITICAL" => t_crit += 1,
+                    "WARNING" => t_warn += 1,
+                    "INFO" => t_info += 1,
+                    _ => {}
+                }
+            }
+        }
+        if t_total > 0 {
+            use sprint_grader_static_analysis::i18n as sai18n;
+            let _ = writeln!(
+                buf,
+                "**{}:** {} ({} {} · {} {} · {} {})\n",
+                sai18n::TEAM_TALLY_LABEL,
+                t_total,
+                t_crit,
+                sai18n::SEVERITY_CRITICAL_PLURAL,
+                t_warn,
+                sai18n::SEVERITY_WARNING_PLURAL,
+                t_info,
+                sai18n::SEVERITY_INFO_PLURAL,
+            );
+        }
+    }
 
     for (sid, name, github) in &students {
         let _ = writeln!(buf, "{} {}", h3, name);
@@ -2053,6 +2087,14 @@ fn write_section_b(
             }
         }
 
+        if let Some((sa_data, top_n)) = sa_per_student {
+            if let Some(findings) = sa_data.get(sid) {
+                if !findings.is_empty() {
+                    write_student_static_analysis_block(buf, findings, top_n);
+                }
+            }
+        }
+
         buf.push_str("---\n\n");
     }
     Ok(())
@@ -2161,182 +2203,127 @@ fn write_student_architecture_block(buf: &mut String, violations: &[AttributedAr
 
 // ── Static-analysis findings (T-SA) ──────────────────────────────────────────
 //
-// Renders the section between B (per-student dashboards, which include the
-// per-student architecture block) and C (peer-group analysis). Joins
-// `static_analysis_finding_attribution` to `static_analysis_findings`, scopes
-// to the team via `students.team_project_id`, then groups by student. The
-// section is gated by a top-level `include_static_analysis` flag plumbed
-// through the public entry points; `sync-reports` passes `false` so the
-// section is stripped before pushing to team repos (instructor-only by
-// default per the phase-1 sign-off).
-fn write_section_static_analysis(
-    buf: &mut String,
+// Findings are rendered inside each student's Section B block (after the
+// architecture violations). The `static_analysis_per_student` function fetches
+// all rows once; `write_section_b` distributes them per student via
+// `write_student_static_analysis_block`. The block is gated by the
+// `include_static_analysis` flag: `sync-reports --push` passes `false` so
+// team-facing reports don't surface the findings.
+
+struct SaFinding {
+    analyzer: String,
+    rule_id: String,
+    severity: String,
+    file_path: String,
+    repo_full_name: String,
+    start_line: Option<i64>,
+    end_line: Option<i64>,
+    message: String,
+    weight: f64,
+}
+
+fn static_analysis_per_student(
     conn: &Connection,
     sprint_id: i64,
     project_id: i64,
-    depth: usize,
-    top_n_per_student: usize,
-) -> rusqlite::Result<()> {
-    use sprint_grader_static_analysis::i18n;
-
-    let h2 = "#".repeat(depth);
-    let h3 = "#".repeat(depth + 1);
-
-    // Pull the per-student finding stream once. The query joins through
-    // `students.team_project_id` so we don't surface findings authored by
-    // someone outside this team's roster — defensive against stale
-    // identities lingering in the attribution table.
-    type Row = (
-        String,         // student_id
-        String,         // full_name
-        String,         // analyzer
-        String,         // rule_id
-        String,         // severity
-        Option<String>, // category
-        String,         // file_path
-        String,         // repo_full_name
-        Option<i64>,    // start_line
-        Option<i64>,    // end_line
-        String,         // message
-        Option<String>, // help_uri
-        f64,            // weight
-    );
+) -> rusqlite::Result<HashMap<String, Vec<SaFinding>>> {
     let mut stmt = conn.prepare(
-        "SELECT a.student_id, COALESCE(s.full_name, s.id),
-                f.analyzer, f.rule_id, f.severity, f.category,
-                f.file_path, f.repo_full_name, f.start_line, f.end_line,
-                f.message, f.help_uri, a.weight
+        "SELECT a.student_id,
+                f.analyzer, f.rule_id, f.severity,
+                f.file_path, f.repo_full_name,
+                f.start_line, f.end_line, f.message,
+                a.weight
          FROM static_analysis_finding_attribution a
          JOIN static_analysis_findings f ON f.id = a.finding_id
          JOIN students s ON s.id = a.student_id
          WHERE a.sprint_id = ? AND s.team_project_id = ?
-         ORDER BY s.full_name, a.weight DESC, f.file_path, f.start_line",
+         ORDER BY a.weight DESC, f.file_path, f.start_line",
     )?;
-    let rows: Vec<Row> = stmt
-        .query_map(rusqlite::params![sprint_id, project_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                r.get::<_, Option<i64>>(8)?,
-                r.get::<_, Option<i64>>(9)?,
-                r.get::<_, String>(10)?,
-                r.get::<_, Option<String>>(11)?,
-                r.get::<_, f64>(12)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(stmt);
-
-    let _ = writeln!(buf, "{} {}\n", h2, i18n::SECTION_HEADER);
-
-    if rows.is_empty() {
-        let _ = writeln!(buf, "{}\n", i18n::NO_FINDINGS);
-        return Ok(());
+    let mut result: HashMap<String, Vec<SaFinding>> = HashMap::new();
+    let rows = stmt.query_map(rusqlite::params![sprint_id, project_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            SaFinding {
+                analyzer: r.get(1)?,
+                rule_id: r.get(2)?,
+                severity: r.get(3)?,
+                file_path: r.get(4)?,
+                repo_full_name: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                start_line: r.get(6)?,
+                end_line: r.get(7)?,
+                message: r.get(8)?,
+                weight: r.get(9)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (student_id, finding) = row?;
+        result.entry(student_id).or_default().push(finding);
     }
+    Ok(result)
+}
 
-    // Project-wide severity tally (counts per finding occurrence — a
-    // single finding shared by N students counts N times against the
-    // total, matching how the architecture summary reports too).
-    let mut total_crit = 0usize;
-    let mut total_warn = 0usize;
-    let mut total_info = 0usize;
-    for r in &rows {
-        match r.4.as_str() {
-            "CRITICAL" => total_crit += 1,
-            "WARNING" => total_warn += 1,
-            _ => total_info += 1,
-        }
-    }
+fn write_student_static_analysis_block(
+    buf: &mut String,
+    findings: &[SaFinding],
+    top_n: usize,
+) {
+    use sprint_grader_static_analysis::i18n;
+
+    let total = findings.len();
+    let crit = findings
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("CRITICAL"))
+        .count();
+    let warn = findings
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("WARNING"))
+        .count();
+    let info_n = findings
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("INFO"))
+        .count();
+    let total_weight: f64 = findings.iter().map(|f| f.weight).sum();
+
     let _ = writeln!(
         buf,
-        "{} {} · {} {} · {} {}\n",
-        total_crit,
+        "**{}:** {} ({} {} · {} {} · {} {}) — {} {:.1}\n",
+        i18n::BLOCK_HEADER,
+        total,
+        crit,
         i18n::SEVERITY_CRITICAL_PLURAL,
-        total_warn,
+        warn,
         i18n::SEVERITY_WARNING_PLURAL,
-        total_info,
+        info_n,
         i18n::SEVERITY_INFO_PLURAL,
+        i18n::WEIGHT_LABEL,
+        total_weight,
     );
 
-    let _ = writeln!(buf, "{} {}\n", h3, i18n::PER_STUDENT_SUBHEADER);
-
-    #[derive(Default)]
-    struct PerStudent {
-        full_name: String,
-        crit: usize,
-        warn: usize,
-        weight: f64,
-        findings: Vec<usize>, // indices into `rows`
-    }
-    use std::collections::BTreeMap;
-    let mut by_student: BTreeMap<String, PerStudent> = BTreeMap::new();
-    for (idx, r) in rows.iter().enumerate() {
-        let acc = by_student.entry(r.0.clone()).or_default();
-        if acc.full_name.is_empty() {
-            acc.full_name = r.1.clone();
-        }
-        match r.4.as_str() {
-            "CRITICAL" => acc.crit += 1,
-            "WARNING" => acc.warn += 1,
-            _ => {}
-        }
-        acc.weight += r.12;
-        acc.findings.push(idx);
-    }
-
-    // Per-student rendering — full_name already used as the primary
-    // sort key in the SQL ORDER BY, so iteration follows the same order.
-    for ps in by_student.values() {
+    let cap = top_n.max(1);
+    for f in findings.iter().take(cap) {
+        let basename = f.file_path.rsplit('/').next().unwrap_or(&f.file_path);
+        let label = format!("`{}`", basename);
+        let line_suffix = format_line_suffix(f.start_line, f.end_line);
+        let url_anchor = format_url_line_anchor(f.start_line, f.end_line);
+        let file_cell = match github_file_url(&f.repo_full_name, &f.file_path) {
+            Some(url) => format!("[{}{}]({}{})", label, line_suffix, url, url_anchor),
+            None => format!("{}{}", label, line_suffix),
+        };
         let _ = writeln!(
             buf,
-            "- **{}** — {} {}, {} {} ({} {:.1})",
-            ps.full_name,
-            ps.crit,
-            i18n::SEVERITY_CRITICAL_PLURAL,
-            ps.warn,
-            i18n::SEVERITY_WARNING_PLURAL,
-            i18n::WEIGHT_LABEL,
-            ps.weight
+            "- {} — `{}:{}` · _{}_ — {}",
+            file_cell,
+            f.analyzer,
+            f.rule_id,
+            f.severity.to_lowercase(),
+            md_escape(f.message.lines().next().unwrap_or("")),
         );
-        let cap = top_n_per_student.max(1);
-        for &idx in ps.findings.iter().take(cap) {
-            let r = &rows[idx];
-            let basename = r.6.rsplit('/').next().unwrap_or(&r.6);
-            let label = format!("`{}`", basename);
-            let line_suffix = format_line_suffix(r.8, r.9);
-            let url_anchor = format_url_line_anchor(r.8, r.9);
-            let file_cell = match github_file_url(&r.7, &r.6) {
-                Some(url) => format!("[{}{}]({}{})", label, line_suffix, url, url_anchor),
-                None => format!("{}{}", label, line_suffix),
-            };
-            let _ = writeln!(
-                buf,
-                "  - {} — `{}:{}` — {}",
-                file_cell,
-                r.2,
-                r.3,
-                md_escape(r.10.lines().next().unwrap_or(""))
-            );
-        }
-        if ps.findings.len() > cap {
-            let _ = writeln!(
-                buf,
-                "  - … {} {}",
-                ps.findings.len() - cap,
-                i18n::MORE_LABEL
-            );
-        }
     }
-
+    if findings.len() > cap {
+        let _ = writeln!(buf, "- … {} {}", findings.len() - cap, i18n::MORE_LABEL);
+    }
     buf.push('\n');
-    let _ = writeln!(buf, "{}\n", i18n::DISCLAIMER);
-    Ok(())
 }
 
 // ── Section: complexity & testability hotspots (T-CX) ────────────────────────
@@ -3076,6 +3063,18 @@ infrastructure*); AST rules document a structural constraint such as \
 - **Attribution** — the dominant author of the offending file (by \
 surviving statements). That author owns the violation in section B.\n\
 \n\
+### Static analysis (per student)\n\
+\n\
+Each student dashboard ends with a **Static analysis** block summarising \
+findings from PMD, Checkstyle and SpotBugs that `git blame` attributes \
+to that student. **Informational only — these findings do not affect \
+the assignment grade.** The headline reports total findings broken down \
+by severity, plus a `weight` figure: weight reflects how much of each \
+offending region the student authored, so a 1-line typo fix on a 30-line \
+method weighs ~0.03, not 0.50. Findings are listed top-`weight` first; \
+the team-wide tally (when present) appears just under the section B \
+heading.\n\
+\n\
 ### Flags\n\
 \n\
 Flags are signal triggers: each one fires when a specific evidence \
@@ -3209,17 +3208,19 @@ pub fn generate_markdown_report_to_path_ex2(
         cumulative_sprint_ids,
         2,
     )?;
-    write_section_b(&mut buf, conn, sprint_id, project_id, 2)?;
-    if include_static_analysis {
-        write_section_static_analysis(
-            &mut buf,
-            conn,
-            sprint_id,
-            project_id,
-            2,
-            DEFAULT_TOP_N_PER_STUDENT,
-        )?;
-    }
+    let sa_data = if include_static_analysis {
+        Some(static_analysis_per_student(conn, sprint_id, project_id)?)
+    } else {
+        None
+    };
+    write_section_b(
+        &mut buf,
+        conn,
+        sprint_id,
+        project_id,
+        2,
+        sa_data.as_ref().map(|d| (d, DEFAULT_TOP_N_PER_STUDENT)),
+    )?;
     write_section_complexity_hotspots(&mut buf, conn, sprint_id, project_id, 2)?;
     write_section_c(&mut buf, conn, sprint_id, project_id, 2)?;
     if let Some(sids) = cumulative_sprint_ids {
@@ -3432,17 +3433,19 @@ fn generate_markdown_report_multi_to_path_inner(
             Some(&sprint_ids_ordered[..=idx]),
             3,
         )?;
-        write_section_b(&mut buf, conn, *sid, project_id, 3)?;
-        if include_static_analysis {
-            write_section_static_analysis(
-                &mut buf,
-                conn,
-                *sid,
-                project_id,
-                3,
-                DEFAULT_TOP_N_PER_STUDENT,
-            )?;
-        }
+        let sa_data = if include_static_analysis {
+            Some(static_analysis_per_student(conn, *sid, project_id)?)
+        } else {
+            None
+        };
+        write_section_b(
+            &mut buf,
+            conn,
+            *sid,
+            project_id,
+            3,
+            sa_data.as_ref().map(|d| (d, DEFAULT_TOP_N_PER_STUDENT)),
+        )?;
         write_section_complexity_hotspots(&mut buf, conn, *sid, project_id, 3)?;
         if professor_view {
             write_section_complexity_attribution(&mut buf, conn, *sid, project_id, 3)?;
@@ -4556,6 +4559,7 @@ mod tests {
 
     #[test]
     fn static_analysis_section_renders_blob_url_with_line_anchor() {
+        use sprint_grader_static_analysis::i18n as sai18n;
         let conn = mk_conn();
         seed_static_analysis_finding(
             &conn,
@@ -4576,20 +4580,31 @@ mod tests {
             body.contains(
                 "blob/HEAD/src/main/java/com/x/UserController.java#L26-L49"
             ),
-            "static-analysis section must emit a clickable blob URL with the line anchor; got:\n{body}"
+            "static-analysis block must emit a clickable blob URL with the line anchor; got:\n{body}"
         );
         assert!(
             body.contains("`pmd:UnusedPrivateField`"),
             "finding line must include `analyzer:rule_id`; got:\n{body}"
         );
+        let block_marker = format!("**{}:**", sai18n::BLOCK_HEADER);
         assert!(
-            body.contains("Static code analysis"),
-            "static-analysis section header must surface; got:\n{body}"
+            body.contains(&block_marker),
+            "per-student static-analysis block header must surface ({block_marker}); got:\n{body}"
+        );
+        let team_marker = format!("**{}:**", sai18n::TEAM_TALLY_LABEL);
+        assert!(
+            body.contains(&team_marker),
+            "team-level static-analysis tally must surface ({team_marker}); got:\n{body}"
+        );
+        assert!(
+            body.contains(sai18n::SEVERITY_INFO_PLURAL),
+            "headline must include the info-severity bucket; got:\n{body}"
         );
     }
 
     #[test]
     fn static_analysis_section_omitted_when_disabled() {
+        use sprint_grader_static_analysis::i18n as sai18n;
         let conn = mk_conn();
         seed_static_analysis_finding(
             &conn,
@@ -4609,9 +4624,15 @@ mod tests {
         generate_markdown_report_to_path_ex2(&conn, 10, 1, "pds26-1a", &report_path, None, false)
             .unwrap();
         let body = std::fs::read_to_string(&report_path).unwrap();
+        let block_marker = format!("**{}:**", sai18n::BLOCK_HEADER);
         assert!(
-            !body.contains("Static code analysis"),
-            "section must be stripped when include_static_analysis = false; got:\n{body}"
+            !body.contains(&block_marker),
+            "static-analysis block must be stripped when include_static_analysis = false; got:\n{body}"
+        );
+        let team_marker = format!("**{}:**", sai18n::TEAM_TALLY_LABEL);
+        assert!(
+            !body.contains(&team_marker),
+            "team tally must be stripped when include_static_analysis = false; got:\n{body}"
         );
         assert!(
             !body.contains("UnusedPrivateField"),
