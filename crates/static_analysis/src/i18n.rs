@@ -4,21 +4,21 @@
 //! to translate, callers reference constants only. Rule messages stay
 //! in their tool-native language (English, mostly).
 
-pub const SECTION_HEADER: &str = "Static code analysis (informational — does not affect the grade)";
+pub const BLOCK_HEADER: &str = "Static analysis";
 
-pub const PER_STUDENT_SUBHEADER: &str = "Per student (attributed via `git blame`)";
+pub const TEAM_TALLY_LABEL: &str = "Static analysis (team)";
 
-pub const DISCLAIMER: &str = concat!(
-    "> These findings are informational and do not affect the assignment grade.\n",
-    "> Attribution via `git blame -w --ignore-revs-file`: a 1-line typo fix on a\n",
-    "> 30-line method weighs ~3 %, not 50 %."
+pub const GLOSSARY_BODY: &str = concat!(
+    "Findings from PMD / Checkstyle / SpotBugs, attributed to authors via\n",
+    "`git blame -w --ignore-revs-file`. **Informational only** — these do not\n",
+    "affect the assignment grade. The `weight` reflects how much of each\n",
+    "offending region a student authored: a 1-line typo fix on a 30-line\n",
+    "method weighs ~3 %, not 50 %."
 );
 
-pub const NO_FINDINGS: &str = "_No findings for this sprint._";
-
 pub const SEVERITY_CRITICAL_PLURAL: &str = "critical";
-pub const SEVERITY_WARNING_PLURAL: &str = "warnings";
-pub const SEVERITY_INFO_PLURAL: &str = "suggestions";
+pub const SEVERITY_WARNING_PLURAL: &str = "warning";
+pub const SEVERITY_INFO_PLURAL: &str = "info";
 
 pub const WEIGHT_LABEL: &str = "weight";
 pub const MORE_LABEL: &str = "more";
