@@ -1,25 +1,24 @@
-//! Single source of truth for the Spanish-language strings the report
+//! Single source of truth for the English-language strings the report
 //! shows for the static-analysis section. Keeping them here makes a
 //! future per-rule i18n pass mechanical: this file is the only place
-//! to translate, callers reference constants only. Phase-1: Spanish
-//! framing only; rule messages stay in their tool-native language
-//! (English, mostly).
+//! to translate, callers reference constants only. Rule messages stay
+//! in their tool-native language (English, mostly).
 
-pub const SECTION_HEADER: &str = "Análisis estático del código (informativo — no afecta a la nota)";
+pub const SECTION_HEADER: &str = "Static code analysis (informational — does not affect the grade)";
 
-pub const PER_STUDENT_SUBHEADER: &str = "Por estudiante (atribuido por `git blame`)";
+pub const PER_STUDENT_SUBHEADER: &str = "Per student (attributed via `git blame`)";
 
 pub const DISCLAIMER: &str = concat!(
-    "> Estos avisos son informativos y no afectan a la calificación de la entrega.\n",
-    "> Atribución por `git blame -w --ignore-revs-file`: una corrección de typo\n",
-    "> de 1 línea sobre un método de 30 líneas pesa ~3 %, no 50 %."
+    "> These findings are informational and do not affect the assignment grade.\n",
+    "> Attribution via `git blame -w --ignore-revs-file`: a 1-line typo fix on a\n",
+    "> 30-line method weighs ~3 %, not 50 %."
 );
 
-pub const NO_FINDINGS: &str = "_Sin hallazgos para este sprint._";
+pub const NO_FINDINGS: &str = "_No findings for this sprint._";
 
-pub const SEVERITY_CRITICAL_PLURAL: &str = "críticos";
-pub const SEVERITY_WARNING_PLURAL: &str = "advertencias";
-pub const SEVERITY_INFO_PLURAL: &str = "sugerencias";
+pub const SEVERITY_CRITICAL_PLURAL: &str = "critical";
+pub const SEVERITY_WARNING_PLURAL: &str = "warnings";
+pub const SEVERITY_INFO_PLURAL: &str = "suggestions";
 
-pub const WEIGHT_LABEL: &str = "peso";
-pub const MORE_LABEL: &str = "más";
+pub const WEIGHT_LABEL: &str = "weight";
+pub const MORE_LABEL: &str = "more";
