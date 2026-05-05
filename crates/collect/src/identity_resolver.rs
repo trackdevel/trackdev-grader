@@ -78,9 +78,7 @@ pub fn resolve_identities(
              JOIN tasks t ON t.id = tpr.task_id
              WHERE t.assignee_id IS NOT NULL",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut counts: HashMap<String, HashMap<String, u32>> = HashMap::new();
         for row in rows {
             let (pr_id, sid) = row?;
@@ -102,8 +100,7 @@ pub fn resolve_identities(
     // 2. Accumulator: (student_id, identity) → weight, plus first/last seen PR.
     let mut acc: HashMap<(String, IdentityKey), f64> = HashMap::new();
     let mut seen_pr: HashMap<IdentityKey, PrSeen> = HashMap::new();
-    let mut prs_with_evidence: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut prs_with_evidence: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let push = |acc: &mut HashMap<(String, IdentityKey), f64>,
                 seen: &mut HashMap<IdentityKey, PrSeen>,
@@ -119,9 +116,7 @@ pub fn resolve_identities(
         }
         let key = IdentityKey { kind, value };
         for (sid, w) in weights.iter() {
-            let entry = acc
-                .entry((sid.clone(), key.clone()))
-                .or_insert(0.0);
+            let entry = acc.entry((sid.clone(), key.clone())).or_insert(0.0);
             *entry += w * src_weight;
         }
         evidence_prs.insert(pr_id.to_string());
@@ -135,9 +130,7 @@ pub fn resolve_identities(
 
     // 3a. pr_commits — per-commit weight = commit_weight.
     {
-        let mut stmt = conn.prepare(
-            "SELECT pr_id, author_login, author_email FROM pr_commits",
-        )?;
+        let mut stmt = conn.prepare("SELECT pr_id, author_login, author_email FROM pr_commits")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -179,9 +172,8 @@ pub fn resolve_identities(
 
     // 3b. pr_pre_squash_authors — pre_squash_weight.
     {
-        let mut stmt = conn.prepare(
-            "SELECT pr_id, author_login, author_email FROM pr_pre_squash_authors",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT pr_id, author_login, author_email FROM pr_pre_squash_authors")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -223,9 +215,8 @@ pub fn resolve_identities(
 
     // 3c. pull_requests submitter — submitter_weight.
     {
-        let mut stmt = conn.prepare(
-            "SELECT id, github_author_login, github_author_email FROM pull_requests",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, github_author_login, github_author_email FROM pull_requests")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -332,9 +323,7 @@ pub fn resolve_identities(
     }
 
     if stats.identities_seen == 0 {
-        warn!(
-            "identity resolver: no PRs with linked tasks found — mapping is empty"
-        );
+        warn!("identity resolver: no PRs with linked tasks found — mapping is empty");
     } else {
         info!(
             identities = stats.identities_seen,
@@ -360,7 +349,10 @@ mod tests {
 
     fn seed_minimal(db: &Database) {
         db.conn
-            .execute("INSERT INTO projects (id, slug, name) VALUES (1, 'p', 'p')", [])
+            .execute(
+                "INSERT INTO projects (id, slug, name) VALUES (1, 'p', 'p')",
+                [],
+            )
             .unwrap();
         for sid in ["s-alice", "s-bob", "s-carol"] {
             db.conn
@@ -387,7 +379,10 @@ mod tests {
             .execute("INSERT INTO pull_requests (id) VALUES ('pr-1')", [])
             .unwrap();
         db.conn
-            .execute("INSERT INTO task_pull_requests (task_id, pr_id) VALUES (10, 'pr-1')", [])
+            .execute(
+                "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (10, 'pr-1')",
+                [],
+            )
             .unwrap();
         db.conn.execute(
             "INSERT INTO pr_commits (pr_id, sha, author_login, author_email) VALUES ('pr-1', 'a1', 'alice', 'alice@example.com')",
@@ -436,10 +431,16 @@ mod tests {
             .execute("INSERT INTO pull_requests (id) VALUES ('pr-2')", [])
             .unwrap();
         db.conn
-            .execute("INSERT INTO task_pull_requests (task_id, pr_id) VALUES (10, 'pr-2')", [])
+            .execute(
+                "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (10, 'pr-2')",
+                [],
+            )
             .unwrap();
         db.conn
-            .execute("INSERT INTO task_pull_requests (task_id, pr_id) VALUES (11, 'pr-2')", [])
+            .execute(
+                "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (11, 'pr-2')",
+                [],
+            )
             .unwrap();
         db.conn.execute(
             "INSERT INTO pr_commits (pr_id, sha, author_login, author_email) VALUES ('pr-2', 'b1', 'mystery', 'mystery@laptop')",
@@ -471,13 +472,22 @@ mod tests {
         // After PR-A (1.0 weight) + PR-B (0.5 each), shared@laptop maps to alice
         // with 1.5 / 2.0 = 0.75 confidence (≥ τ=0.7).
         db.conn
-            .execute("INSERT INTO tasks (id,type,status,assignee_id) VALUES (1,'TASK','DONE','s-alice')", [])
+            .execute(
+                "INSERT INTO tasks (id,type,status,assignee_id) VALUES (1,'TASK','DONE','s-alice')",
+                [],
+            )
             .unwrap();
         db.conn
-            .execute("INSERT INTO tasks (id,type,status,assignee_id) VALUES (2,'TASK','DONE','s-alice')", [])
+            .execute(
+                "INSERT INTO tasks (id,type,status,assignee_id) VALUES (2,'TASK','DONE','s-alice')",
+                [],
+            )
             .unwrap();
         db.conn
-            .execute("INSERT INTO tasks (id,type,status,assignee_id) VALUES (3,'TASK','DONE','s-bob')", [])
+            .execute(
+                "INSERT INTO tasks (id,type,status,assignee_id) VALUES (3,'TASK','DONE','s-bob')",
+                [],
+            )
             .unwrap();
         for prid in ["pr-A", "pr-B"] {
             db.conn
@@ -485,13 +495,22 @@ mod tests {
                 .unwrap();
         }
         db.conn
-            .execute("INSERT INTO task_pull_requests (task_id,pr_id) VALUES (1,'pr-A')", [])
+            .execute(
+                "INSERT INTO task_pull_requests (task_id,pr_id) VALUES (1,'pr-A')",
+                [],
+            )
             .unwrap();
         db.conn
-            .execute("INSERT INTO task_pull_requests (task_id,pr_id) VALUES (2,'pr-B')", [])
+            .execute(
+                "INSERT INTO task_pull_requests (task_id,pr_id) VALUES (2,'pr-B')",
+                [],
+            )
             .unwrap();
         db.conn
-            .execute("INSERT INTO task_pull_requests (task_id,pr_id) VALUES (3,'pr-B')", [])
+            .execute(
+                "INSERT INTO task_pull_requests (task_id,pr_id) VALUES (3,'pr-B')",
+                [],
+            )
             .unwrap();
         db.conn.execute(
             "INSERT INTO pr_commits (pr_id,sha,author_login,author_email) VALUES ('pr-A','x1',NULL,'shared@laptop')",
