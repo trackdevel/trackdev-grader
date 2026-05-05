@@ -3112,10 +3112,31 @@ fn write_team_identity_map_into(
     project_id: i64,
     depth: usize,
 ) -> rusqlite::Result<()> {
+    // Source of truth for resolved identities is `student_github_identity`
+    // (populated by collect::identity_resolver). `github_users` and
+    // `students.github_login` are cold-start fallbacks only — kept here
+    // for the boot path where the resolver hasn't run yet, mirroring
+    // the precedence in survival::blame::build_email_to_student_map.
+    //
+    // Per kind we pick the heaviest-weight, then highest-confidence row
+    // (correlated subquery; six-row teams make cost trivial).
     let mut stmt = conn.prepare(
         "SELECT s.username, s.full_name, s.email,
-                COALESCE(gu.login, s.github_login),
-                gu.email
+                COALESCE(
+                    (SELECT identity_value FROM student_github_identity
+                     WHERE student_id = s.id AND identity_kind = 'login'
+                     ORDER BY weight DESC, confidence DESC, identity_value
+                     LIMIT 1),
+                    gu.login,
+                    s.github_login
+                ),
+                COALESCE(
+                    (SELECT identity_value FROM student_github_identity
+                     WHERE student_id = s.id AND identity_kind = 'email'
+                     ORDER BY weight DESC, confidence DESC, identity_value
+                     LIMIT 1),
+                    gu.email
+                )
          FROM students s
          LEFT JOIN github_users gu ON gu.student_id = s.id
          WHERE s.team_project_id = ?
@@ -3829,6 +3850,11 @@ mod tests {
                 details TEXT);
              CREATE TABLE github_users (login TEXT PRIMARY KEY, name TEXT, email TEXT,
                 student_id TEXT, fetched_at TEXT);
+             CREATE TABLE student_github_identity (student_id TEXT NOT NULL,
+                identity_kind TEXT NOT NULL, identity_value TEXT NOT NULL,
+                weight REAL NOT NULL, confidence REAL NOT NULL,
+                first_seen_pr TEXT, last_seen_pr TEXT,
+                PRIMARY KEY (student_id, identity_kind, identity_value));
              CREATE TABLE fingerprints (id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_path TEXT, repo_full_name TEXT, statement_index INTEGER,
                 method_name TEXT, raw_fingerprint TEXT, normalized_fingerprint TEXT,
@@ -4008,6 +4034,52 @@ mod tests {
         assert!(
             body.contains("Alice Bob"),
             "full name missing from identity map: {body}"
+        );
+    }
+
+    #[test]
+    fn team_identity_map_uses_student_github_identity_when_github_users_is_empty() {
+        // Regression: pds26-5a had 5/6 teammates resolved in
+        // student_github_identity but absent from github_users +
+        // students.github_login. The renderer was silently rendering
+        // them as "—". Source-of-truth precedence must be:
+        //   1. student_github_identity (resolver-fed)
+        //   2. github_users           (cold-start backstop)
+        //   3. students.github_login  (cold-start backstop)
+        let conn = mk_conn();
+        // Wipe the cold-start tables so this test exercises *only* the
+        // resolver-fed path. Then seed a high-weight login + email row
+        // for u1 in student_github_identity.
+        conn.execute_batch(
+            "UPDATE students SET github_login = NULL WHERE id = 'u1';
+             DELETE FROM github_users;
+             INSERT INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence,
+                 first_seen_pr, last_seen_pr)
+              VALUES
+                ('u1', 'login', 'alice-resolved', 91.0, 1.0, 'pr-1', 'pr-7'),
+                ('u1', 'email', '147317731+alice@users.noreply.github.com',
+                 2.0, 1.0, 'pr-1', 'pr-1'),
+                ('u1', 'email', 'alice@campus.example', 84.0, 1.0, 'pr-1', 'pr-7');",
+        )
+        .unwrap();
+
+        let tmp = TempDir::new().unwrap();
+        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            body.contains("[alice-resolved](https://github.com/alice-resolved)"),
+            "resolver-fed login missing from identity map: {body}"
+        );
+        // The two emails have weight 84 and 2 — the heavier one wins.
+        assert!(
+            body.contains("alice@campus.example"),
+            "highest-weight email must win over the noreply fallback: {body}"
+        );
+        assert!(
+            !body.contains("147317731+alice"),
+            "lower-weight noreply email leaked into the identity map: {body}"
         );
     }
 
