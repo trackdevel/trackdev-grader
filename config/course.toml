@@ -179,20 +179,29 @@ architecture_hotspot_min_weighted = 2.0
 hidden_thresholds = false
 jitter_pct = 0.05
 
-# Architecture LLM review (T-P3.3). When `llm_review = true` AND
-# `ANTHROPIC_API_KEY` is set, the pipeline asks an LLM to grade each
-# Java file against the markdown rubric in `architecture.md`. Each
-# `(file_sha, rubric_version+body_hash, model_id)` triple is cached in
-# `architecture_llm_cache`, so re-runs only re-pay for files whose
+# Architecture LLM review (T-P3.3). When `llm_review = true` AND the
+# selected `judge`'s prerequisite is met, the pipeline asks an LLM to
+# grade each Java file against the markdown rubric in `architecture.md`.
+# Each `(file_sha, rubric_version+body_hash, model_id)` triple is cached
+# in `architecture_llm_cache`, so re-runs only re-pay for files whose
 # content changed. Default off.
+#
+# `judge` selects the backend:
+#   - "claude-cli"     (default) — local `claude --print`, no API key
+#   - "anthropic-api"            — direct Anthropic Messages API; needs ANTHROPIC_API_KEY
+#   - "deepseek-api"             — DeepSeek chat completions; needs DEEPSEEK_API_KEY
+# Set `model_id` to a string the chosen backend understands
+# (`claude-haiku-4-5-20251001` for Anthropic, `deepseek-chat` for DeepSeek).
 [architecture]
 llm_review = true
+judge = "deepseek-api"
+ model_id = "deepseek-chat"
 # REQUIRED. No default — empty/missing causes Config::load to fail. This
-# is a deliberate guard: the CLI judge would otherwise silently fall
-# back to whatever model the user's Claude session points at (Opus on
-# Max plans), draining quota.
-model_id = "claude-haiku-4-5-20251001"
-max_tokens = 1024
+# is a deliberate guard against silently falling back to whatever model
+# the user's Claude session points at (Opus on Max plans, draining
+# quota) or to a backend-default that drifts under your feet.
+#model_id = "claude-haiku-4-5-20251001"
+max_tokens = 4000
 rubric_path = "architecture.md"
 llm_skip_globs = [
     "**/build/**",
@@ -201,11 +210,13 @@ llm_skip_globs = [
     "**/*$$*.java",
 ]
 
-# PR / task documentation evaluation. `model_id` is REQUIRED for the
-# same reason as [architecture] — there is no default; missing/empty
-# causes Config::load to fail. `judge` defaults to "claude-cli".
+# PR / task documentation evaluation. `judge` accepts the same three
+# values as [architecture]: "claude-cli" (default), "anthropic-api",
+# "deepseek-api". `model_id` is REQUIRED — same rationale as above.
 [evaluate]
-model_id = "claude-haiku-4-5-20251001"
+judge = "deepseek-api"
+model_id = "deepseek-chat"
+# model_id = "claude-haiku-4-5-20251001"
 
 # Mutation testing (T-P2.4). When `enabled = true` and a build profile
 # sets `mutation_command` (typically `./gradlew pitest --info` for the
