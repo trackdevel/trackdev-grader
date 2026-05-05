@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
+use crate::llm_trait::{LlmClient, LlmError};
+
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 1024;
@@ -105,6 +107,7 @@ impl AnthropicClient {
         let body = json!({
             "model": self.model,
             "max_tokens": max_tokens,
+            "temperature": 0,
             "system": system_blocks,
             "messages": messages,
         });
@@ -180,20 +183,51 @@ fn extract_text(json: &Value) -> Result<String, AnthropicError> {
     })
 }
 
+// ---- LlmClient trait impl ----
+
+impl LlmClient for AnthropicClient {
+    fn complete(
+        &self,
+        system: &str,
+        messages: &[Value],
+        max_tokens: u32,
+    ) -> Result<String, LlmError> {
+        AnthropicClient::complete(self, system, messages, max_tokens).map_err(Into::into)
+    }
+}
+
+impl From<AnthropicError> for LlmError {
+    fn from(e: AnthropicError) -> Self {
+        match e {
+            AnthropicError::EmptyKey => LlmError::EmptyKey,
+            AnthropicError::Http { status, body } => LlmError::Http { status, body },
+            AnthropicError::RequestFailed { retries, source } => {
+                LlmError::RequestFailed { retries, source }
+            }
+            AnthropicError::NoContent { raw } => LlmError::NoContent { raw },
+            AnthropicError::Json(e) => LlmError::Json(e),
+        }
+    }
+}
+
 // ---- Conversational helper ----
 
 /// A stateful conversation — models the `session.send(msg) -> response` pattern
 /// used by the Python session library. The system prompt is fixed at construction;
 /// each `ask()` call appends a user message, posts the full history, and appends
 /// the assistant response so subsequent turns have full context.
+///
+/// Generic over the concrete client via the [`LlmClient`] trait so a single
+/// driver in `llm_eval.rs` covers Anthropic, DeepSeek, and any future
+/// backend.
 pub struct Conversation<'a> {
-    client: &'a AnthropicClient,
+    client: &'a dyn LlmClient,
     system: String,
     pub messages: Vec<Value>,
 }
 
 impl<'a> Conversation<'a> {
-    pub fn new(client: &'a AnthropicClient, system: impl Into<String>) -> Self {
+    pub fn new(client: &'a dyn LlmClient, system: impl Into<String>) -> Self {
         Self {
             client,
             system: system.into(),
@@ -201,7 +235,7 @@ impl<'a> Conversation<'a> {
         }
     }
 
-    pub fn ask(&mut self, user_msg: &str) -> Result<String, AnthropicError> {
+    pub fn ask(&mut self, user_msg: &str) -> Result<String, LlmError> {
         self.messages.push(json!({
             "role": "user",
             "content": user_msg,
