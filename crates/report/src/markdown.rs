@@ -588,7 +588,6 @@ struct StudentSummaryRow {
     ls: f64,
     ld: f64,
     ls_per_pt: f64,
-    avg_doc: Option<f64>,
     surv_norm: f64,
     /// Raw stmts/points for this student (surviving statements per
     /// estimated point). Carried so the summary writer can compute a
@@ -609,7 +608,6 @@ fn student_summary_headers() -> Vec<&'static str> {
         "LS/pt",
         "Survival",
         "Density Δ",
-        "Doc score",
         "Flags",
     ]
 }
@@ -639,7 +637,6 @@ fn write_student_summary_table(buf: &mut String, students: &[StudentSummaryRow])
             fmt_f2(s.ls_per_pt),
             fmt_pct(s.surv_norm),
             fmt_density_dev(density_mad_z(density_value, median, mad)),
-            s.avg_doc.map(fmt_f1).unwrap_or_default(),
             fmt_int(s.flag_count),
         ];
         push_table_row(buf, &cells);
@@ -677,7 +674,6 @@ fn current_student_summary(
                 COALESCE(sm.points_delivered, 0) AS pts,
                 COALESCE(sm.points_share, 0) AS share,
                 COALESCE(sm.weighted_pr_lines, 0) AS lines,
-                sm.avg_doc_score,
                 COALESCE(ss.survival_rate_normalized, 0) AS surv_norm,
                 COALESCE(ss.estimation_density, 0) AS density,
                 (SELECT COUNT(*) FROM flags f WHERE f.student_id = s.id AND f.sprint_id = ?)
@@ -703,10 +699,9 @@ fn current_student_summary(
                     pts: r.get::<_, f64>(3)?,
                     share: r.get::<_, f64>(4)?,
                     lines: r.get::<_, f64>(5)?,
-                    avg_doc: r.get::<_, Option<f64>>(6)?,
-                    surv_norm: r.get::<_, f64>(7)?,
-                    density: r.get::<_, f64>(8)?,
-                    flag_count: r.get::<_, i64>(9)?,
+                    surv_norm: r.get::<_, f64>(6)?,
+                    density: r.get::<_, f64>(7)?,
+                    flag_count: r.get::<_, i64>(8)?,
                     ls: stats.ls,
                     ld: stats.ld,
                     ls_per_pt: stats.ls_per_pt,
@@ -768,12 +763,11 @@ fn cumulative_student_summary(
     let mut rows = Vec::with_capacity(students.len());
     for (id, full_name, github_login) in students {
         let github_login = effective_github_login(conn, &id, github_login.as_deref());
-        let metrics: (f64, f64, Option<f64>) = conn
+        let metrics: (f64, f64) = conn
             .query_row(
                 &format!(
                     "SELECT COALESCE(SUM(points_delivered), 0),
-                            COALESCE(SUM(weighted_pr_lines), 0),
-                            AVG(avg_doc_score)
+                            COALESCE(SUM(weighted_pr_lines), 0)
                      FROM student_sprint_metrics
                      WHERE student_id = ? AND sprint_id IN ({})",
                     placeholders
@@ -783,11 +777,10 @@ fn cumulative_student_summary(
                     Ok((
                         r.get::<_, Option<f64>>(0)?.unwrap_or(0.0),
                         r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
-                        r.get::<_, Option<f64>>(2)?,
                     ))
                 },
             )
-            .unwrap_or((0.0, 0.0, None));
+            .unwrap_or((0.0, 0.0));
 
         let survival: (i64, i64, f64) = conn
             .query_row(
@@ -850,7 +843,6 @@ fn cumulative_student_summary(
             ls: stats.ls,
             ld: stats.ld,
             ls_per_pt: stats.ls_per_pt,
-            avg_doc: metrics.2,
             surv_norm,
             density,
             flag_count,
@@ -1638,6 +1630,28 @@ fn write_section_b(
     let pr_stmts = pr_stmts_for_team(conn, sprint_id, project_id)?;
     let arch_per_student = architecture_violations_per_student(conn, sprint_id, project_id)?;
 
+    // Per-PR documentation score (heuristic title+description rubric or
+    // LLM judge). Populates a single column in the per-PR table below.
+    // Silently returns an empty map when the table is absent so minimal
+    // test fixtures keep working.
+    let pr_doc_scores: HashMap<String, i64> = match conn.prepare(
+        "SELECT pr_id, total_doc_score FROM pr_doc_evaluation
+         WHERE sprint_id = ? AND total_doc_score IS NOT NULL",
+    ) {
+        Ok(mut stmt) => {
+            let rows = stmt.query_map([sprint_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            let mut out = HashMap::new();
+            for row in rows {
+                let (pid, score) = row?;
+                out.insert(pid, score);
+            }
+            out
+        }
+        Err(_) => HashMap::new(),
+    };
+
     // Project-wide density baselines for the per-task and per-PR
     // "density Δ" columns. Density = stmts/points; we use median + MAD
     // (matching `task_similarity::mad_z`) so a single mass-edited PR
@@ -1894,6 +1908,7 @@ fn write_section_b(
                     "Stmts",
                     "Stmts/pt",
                     "Density Δ",
+                    "Doc score",
                 ],
             );
             for (pr_id, num, repo, title, url, adds, dels, attr_errors) in prs {
@@ -1934,11 +1949,15 @@ fn write_section_b(
                 };
                 let density_cell =
                     fmt_density_dev(density_mad_z(pr_density, pr_density_median, pr_density_mad));
+                let doc_cell = pr_doc_scores
+                    .get(&pr_id)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
                 // push_table_row escapes pipes, but we want the link to stay
                 // intact — emit by hand for this row.
                 let _ = writeln!(
                     buf,
-                    "| {} | {} | {} | +{} / -{} | {} | {} | {} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | +{} / -{} | {} | {} | {} | {} | {} | {} | {} | {} |",
                     num_cell_with_glyph,
                     md_escape(&repo_short),
                     linked_title.replace('|', "\\|"),
@@ -1951,6 +1970,7 @@ fn write_section_b(
                     fmt_f1(stmts),
                     fmt_f2(stmts_per_pt),
                     density_cell,
+                    doc_cell,
                 );
             }
             buf.push('\n');
@@ -4337,7 +4357,7 @@ mod tests {
         assert!(body.contains("### Cumulative through this sprint"));
         // Single-student team → MAD = 0 → Density Δ cell is empty.
         assert!(body.contains(
-            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 12 | 100% | 200 | 110 | 15 | 11 | 67.5% |  | 3.5 | 1 |"
+            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 12 | 100% | 200 | 110 | 15 | 11 | 67.5% |  | 1 |"
         ));
     }
 
@@ -4355,10 +4375,10 @@ mod tests {
         );
         // Single-student team → MAD = 0 → Density Δ cell is empty.
         assert!(body.contains(
-            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 5 | 100% | 120 | 60 | 10 | 20 | 85% |  | 3 | 1 |"
+            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 5 | 100% | 120 | 60 | 10 | 20 | 85% |  | 1 |"
         ));
         assert!(body.contains(
-            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 12 | 100% | 200 | 110 | 15 | 11 | 67.5% |  | 3.5 | 1 |"
+            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 12 | 100% | 200 | 110 | 15 | 11 | 67.5% |  | 1 |"
         ));
     }
 
