@@ -115,6 +115,10 @@ pub fn purge_projects(
             "pr_submission_tiers",
             "pr_survival",
             "pr_pre_squash_authors",
+            // Etags are cache pointers: leaving them behind after the
+            // payload is gone makes the next conditional GET return 304
+            // NotModified, so pr_commits/pr_reviews never repopulate.
+            "pr_github_etags",
         ];
         for table in pr_tables {
             let sql = format!("DELETE FROM {} WHERE pr_id IN ({})", table, pr_ph);
@@ -526,6 +530,13 @@ mod tests {
                 PRIMARY KEY (student_id, sprint_id));
              CREATE TABLE pr_compilation (pr_id TEXT, sprint_id INTEGER,
                 PRIMARY KEY (pr_id, sprint_id));
+             CREATE TABLE pr_github_etags (pr_id TEXT, endpoint TEXT,
+                etag TEXT, fetched_at TEXT,
+                PRIMARY KEY (pr_id, endpoint));
+             INSERT INTO pr_github_etags VALUES
+                ('pr-1', 'commits', 'W/\"abc\"', '2026-04-28T17:44:50Z'),
+                ('pr-1', 'reviews', 'W/\"def\"', '2026-04-28T17:44:50Z'),
+                ('pr-1', 'pr',      'W/\"ghi\"', '2026-04-28T17:44:50Z');
              CREATE TABLE compilation_failure_summary (project_id INTEGER,
                 sprint_id INTEGER, PRIMARY KEY (project_id, sprint_id));
              CREATE TABLE pr_doc_evaluation (pr_id TEXT, sprint_id INTEGER,
@@ -631,6 +642,20 @@ mod tests {
             .unwrap();
         assert_eq!(n_lm, 1);
         assert_eq!(n_fp, 1);
+    }
+
+    #[test]
+    fn purge_projects_clears_pr_github_etags() {
+        // Regression: leaving etags behind makes the next conditional GET
+        // return 304 NotModified, so pr_commits never repopulates and
+        // survival/LS/LD silently compute to zero.
+        let conn = mk_conn();
+        let report = purge_projects(&conn, &[1], false).unwrap();
+        assert_eq!(report.get("pr_github_etags"), Some(&3));
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pr_github_etags", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[test]
