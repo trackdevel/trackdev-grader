@@ -263,9 +263,6 @@ Tables fall into a few groups:
 - **Architecture** — `architecture_violations` (T-P2.2; one row per
   `(file, broken rule, offending import)` from the `architecture.toml`
   scan).
-- **Estimation** — `student_estimation_bias` (T-P2.1; per-student β_u
-  posterior fitted by the `estimation` crate from log-points and
-  per-task difficulty δ_i, with N(0,1) priors and a mean-β=0 gauge).
 - **Mutation testing** — `pr_mutation` (T-P2.4; one row per (PR, repo)
   with `(mutants_total, mutants_killed, mutation_score, duration_seconds)`
   parsed from Pitest's `mutations.xml`; populated only when
@@ -370,15 +367,6 @@ types changed behaviour during the P0/P1 wave and warrant calling out:
   patterns (`llm_skip_globs`) keep generated code out of the call —
   default deny-list covers `build/`, `generated/`, `R.java`, and
   anonymous-inner-class files matching `*$$*.java`.
-- **`ESTIMATION_BIAS`** (WARNING, per-student) fires when the 95 %
-  credible interval of a student's β_u excludes 0 by more than 0.5
-  logits **and** they have at least 5 estimated tasks (T-P2.1). β_u is
-  fitted by the `estimation` crate against `log(SP) = β_u + δ_i + ε`
-  with N(0,1) priors and a mean-β=0 gauge; positive β_u means the
-  student systematically over-estimates (▲ in reports), negative means
-  under-estimates (▼). The cumulative student summary in Section A
-  prints the realised β_u with the directional symbol; `≈` denotes a
-  calibrated student whose CrI does not clear the margin.
 - **`LOW_MUTATION_SCORE`** (per-PR, attributed to the PR author)
   surfaces PRs whose Pitest mutation score is below the configured
   thresholds: WARNING below `[mutation] warning_threshold` (default
