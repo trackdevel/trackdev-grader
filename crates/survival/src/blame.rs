@@ -291,10 +291,7 @@ pub fn build_email_to_student_map(conn: &Connection) -> rusqlite::Result<EmailSt
     // been collected yet.
     let mut stmt = conn.prepare("SELECT id, github_login FROM students")?;
     let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, Option<String>>(1)?,
-        ))
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
     })?;
     for r in rows {
         let (student_id, gh_login) = r?;
