@@ -258,14 +258,6 @@ enum Command {
         #[arg(long)]
         sprint: u32,
     },
-    /// Fit and persist per-student estimation bias (β_u) for every project,
-    /// or just the projects passed via `--projects`. Writes
-    /// `student_estimation_bias`. Idempotent: rows for the project are
-    /// replaced. T-P2.1.
-    EstimateBias {
-        #[command(flatten)]
-        projects: ProjectsArg,
-    },
     /// Generate Excel (.xlsx) + Markdown (.md) multi-sprint project report.
     Report {
         #[command(flatten)]
@@ -887,34 +879,6 @@ fn main() -> Result<()> {
                 rows_written = total_written,
                 "curriculum frozen"
             );
-        }
-        Command::EstimateBias { projects } => {
-            let filter = parse_project_filter(projects.projects);
-            // Resolve the slug filter to project_ids so the fitter can scope.
-            // None means "every project that has at least one estimated task".
-            let project_ids: Option<Vec<i64>> = if let Some(names) = filter.as_deref() {
-                let mut ids: Vec<i64> = Vec::with_capacity(names.len());
-                for name in names {
-                    let pid: Option<i64> = db
-                        .conn
-                        .query_row("SELECT id FROM projects WHERE name = ?", [name], |r| {
-                            r.get::<_, i64>(0)
-                        })
-                        .ok();
-                    if let Some(pid) = pid {
-                        ids.push(pid);
-                    }
-                }
-                Some(ids)
-            } else {
-                None
-            };
-            let n = sprint_grader_estimation::fit_and_persist_for_projects(
-                &db.conn,
-                project_ids.as_deref(),
-            )
-            .context("estimation bias fitting failed")?;
-            info!(students_written = n, "estimation bias fitted");
         }
         Command::Report {
             projects,
