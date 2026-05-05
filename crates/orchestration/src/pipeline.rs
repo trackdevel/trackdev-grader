@@ -1177,6 +1177,37 @@ pub fn run_pipeline(
         );
     }
 
+    // T-CX (step 8): per-method complexity & testability scan. Same
+    // gating shape as architecture: scoped to projects with new data.
+    // No external rules file — thresholds live in `course.toml
+    // [detector_thresholds] complexity_*`. Each (repo, sprint) gets a
+    // `method_complexity_runs` row with a head-SHA cache so re-runs
+    // against an unchanged repo short-circuit instantly. Always runs;
+    // there's no `skip_complexity` toggle — the cache makes that
+    // unnecessary.
+    for g in groups
+        .iter()
+        .filter(|g| projects_with_new_data.contains(&g.project_id))
+    {
+        let project_root = opts.entregues_dir.join(&g.name);
+        for sid in &g.sprint_ids {
+            if let Err(e) = sprint_grader_quality::testability::scan_project_to_db(
+                &db.conn,
+                &project_root,
+                *sid,
+                g.project_id,
+                &config.detector_thresholds,
+            ) {
+                warn!(
+                    project = %g.name,
+                    sprint_id = sid,
+                    error = %e,
+                    "complexity scan failed"
+                );
+            }
+        }
+    }
+
     // T-P3.3: LLM-judged architecture review. Gated by config flag +
     // judge backend prerequisites:
     //   - `judge = "claude-cli"` (default) requires the local `claude`
