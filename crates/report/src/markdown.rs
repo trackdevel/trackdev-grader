@@ -3018,8 +3018,9 @@ hiccup). It is observability metadata, never a grading penalty.\n\
 ### Doc-score signals\n\
 \n\
 - **Avg Doc Score** — quality of PR descriptions and titles, scored on \
-0–4. Computed by an LLM rubric when an Anthropic key is configured, \
-otherwise by deterministic heuristics (empty body / generic title).\n\
+0–6 (title 0–2 + description 0–4). Computed by an LLM rubric when an \
+Anthropic key is configured, otherwise by deterministic heuristics \
+(empty body / generic title).\n\
 \n\
 ### Peer-group analysis (section C)\n\
 \n\
@@ -3524,7 +3525,7 @@ fn write_cumulative_summary(
             // Skip empty sprints entirely? Python's table keeps them; preserve that.
             any_row = true;
             let doc_str = match doc {
-                Some(v) => fmt_f2(v),
+                Some(v) => format!("{:.1}", v),
                 None => "—".to_string(),
             };
             push_table_row(
