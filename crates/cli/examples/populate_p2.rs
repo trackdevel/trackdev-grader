@@ -1,7 +1,7 @@
 //! One-off helper: populate the new P2 derived tables for a project
 //! whose `grading.db` predates those features. Lets us regenerate a
-//! REPORT.md with the β_u column, the ownership treemap, and the
-//! architecture conformance subsection actually filled in.
+//! REPORT.md with the ownership treemap and the architecture
+//! conformance subsection actually filled in.
 //!
 //! Usage:
 //!   cargo run --release --example populate_p2 -- <db_path> <project_slug>
@@ -29,10 +29,6 @@ fn main() -> anyhow::Result<()> {
         "project {project_slug} (id={project_id}), {} sprints: {sprint_ids:?}",
         sprint_ids.len()
     );
-
-    // Estimation bias (T-P2.1)
-    let n_bias = sprint_grader_estimation::fit_and_persist_for_project(&conn, project_id)?;
-    println!("estimation: persisted {n_bias} student rows");
 
     // Ownership (T-P2.3)
     for sid in &sprint_ids {
