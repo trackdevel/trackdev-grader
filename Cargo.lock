@@ -1694,7 +1694,6 @@ dependencies = [
  "sprint-grader-compile",
  "sprint-grader-core",
  "sprint-grader-curriculum",
- "sprint-grader-estimation",
  "sprint-grader-evaluate",
  "sprint-grader-process",
  "sprint-grader-repo-analysis",
@@ -1718,7 +1717,6 @@ dependencies = [
  "sprint-grader-compile",
  "sprint-grader-core",
  "sprint-grader-curriculum",
- "sprint-grader-estimation",
  "sprint-grader-evaluate",
  "sprint-grader-orchestration",
  "sprint-grader-process",
@@ -1797,19 +1795,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sprint-grader-estimation"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "rusqlite",
- "sprint-grader-core",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
 name = "sprint-grader-evaluate"
 version = "0.1.0"
 dependencies = [
@@ -1845,7 +1830,6 @@ dependencies = [
  "sprint-grader-compile",
  "sprint-grader-core",
  "sprint-grader-curriculum",
- "sprint-grader-estimation",
  "sprint-grader-evaluate",
  "sprint-grader-process",
  "sprint-grader-quality",

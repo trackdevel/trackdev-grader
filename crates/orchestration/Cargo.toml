@@ -30,7 +30,6 @@ sprint-grader-curriculum = { path = "../curriculum" }
 sprint-grader-architecture = { path = "../architecture" }
 sprint-grader-architecture-llm = { path = "../architecture_llm" }
 sprint-grader-static-analysis = { path = "../static_analysis" }
-sprint-grader-estimation = { path = "../estimation" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -590,67 +590,15 @@ struct StudentSummaryRow {
     ls_per_pt: f64,
     avg_doc: Option<f64>,
     surv_norm: f64,
+    /// Raw stmts/points for this student (surviving statements per
+    /// estimated point). Carried so the summary writer can compute a
+    /// per-team median + MAD and render the Density Δ glyph.
     density: f64,
     flag_count: i64,
-    /// T-P2.1: per-student estimation bias (β_u). Populated for every
-    /// summary row (per-sprint and cumulative) — β_u is project-level
-    /// (fitted once across all sprints in `student_estimation_bias`),
-    /// so the same value surfaces in every sprint's summary table.
-    estimation_bias: Option<EstimationBiasCell>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct EstimationBiasCell {
-    beta_mean: f64,
-    /// Half-width of the 95 % credible interval. Used to decide the
-    /// directional symbol: when the CrI excludes 0 by more than the
-    /// detector's 0.5-logit margin we render ▲/▼; otherwise ≈.
-    half_width: f64,
-}
-
-/// Load `student_estimation_bias` rows for `project_id` into a map keyed
-/// by `student_id`. β_u is project-level (one row per student per
-/// project), so callers in section A and section B can share this lookup
-/// to avoid N point-queries inside the per-student loop.
-fn bias_for_project(
-    conn: &Connection,
-    project_id: i64,
-) -> rusqlite::Result<HashMap<String, EstimationBiasCell>> {
-    // Silently return an empty map when the table doesn't exist — this
-    // matches the prior point-query behaviour (`.ok()` swallowed the
-    // missing-table error) and keeps minimal test fixtures working.
-    let mut stmt = match conn.prepare(
-        "SELECT student_id, beta_mean, beta_lower95, beta_upper95
-         FROM student_estimation_bias
-         WHERE project_id = ?",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Ok(HashMap::new()),
-    };
-    let rows = stmt.query_map([project_id], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, f64>(1)?,
-            r.get::<_, f64>(2)?,
-            r.get::<_, f64>(3)?,
-        ))
-    })?;
-    let mut out = HashMap::new();
-    for r in rows {
-        let (sid, mean, lo, hi) = r?;
-        out.insert(
-            sid,
-            EstimationBiasCell {
-                beta_mean: mean,
-                half_width: (hi - lo) / 2.0,
-            },
-        );
-    }
-    Ok(out)
-}
-
-fn student_summary_headers(include_bias: bool) -> Vec<&'static str> {
-    let mut h = vec![
+fn student_summary_headers() -> Vec<&'static str> {
+    vec![
         "Student",
         "GitHub",
         "Points",
@@ -660,52 +608,24 @@ fn student_summary_headers(include_bias: bool) -> Vec<&'static str> {
         "LD",
         "LS/pt",
         "Survival",
-        "Density",
+        "Density Δ",
         "Doc score",
         "Flags",
-    ];
-    if include_bias {
-        h.push("β_u");
-    }
-    h
-}
-
-/// Render the β_u cell. Symbol semantics mirror the ESTIMATION_BIAS
-/// detector: ▲ over-estimator (CrI strictly above +0.5 logits), ▼
-/// under-estimator (CrI strictly below −0.5), ≈ calibrated otherwise.
-fn fmt_bias_cell(bias: Option<EstimationBiasCell>) -> String {
-    let Some(b) = bias else {
-        return String::new();
-    };
-    const MARGIN: f64 = 0.5;
-    let lower = b.beta_mean - b.half_width;
-    let upper = b.beta_mean + b.half_width;
-    let symbol = if lower > MARGIN {
-        "▲"
-    } else if upper < -MARGIN {
-        "▼"
-    } else {
-        "≈"
-    };
-    format!("{symbol} {:+.2}", b.beta_mean)
+    ]
 }
 
 fn write_student_summary_table(buf: &mut String, students: &[StudentSummaryRow]) {
-    write_student_summary_table_inner(buf, students, true);
-}
-
-fn write_cumulative_student_summary_table(buf: &mut String, students: &[StudentSummaryRow]) {
-    write_student_summary_table_inner(buf, students, true);
-}
-
-fn write_student_summary_table_inner(
-    buf: &mut String,
-    students: &[StudentSummaryRow],
-    include_bias: bool,
-) {
-    push_table_header(buf, &student_summary_headers(include_bias));
+    let densities: Vec<f64> = students
+        .iter()
+        .map(|s| s.density)
+        .filter(|d| *d > 0.0)
+        .collect();
+    let median = sprint_grader_core::stats::median(&densities);
+    let mad = sprint_grader_core::stats::mad(&densities);
+    push_table_header(buf, &student_summary_headers());
     for s in students {
-        let mut cells = vec![
+        let density_value = if s.density > 0.0 { Some(s.density) } else { None };
+        let cells = vec![
             s.full_name.clone(),
             s.github_login
                 .as_deref()
@@ -718,16 +638,17 @@ fn write_student_summary_table_inner(
             fmt_f1(s.ld),
             fmt_f2(s.ls_per_pt),
             fmt_pct(s.surv_norm),
-            fmt_f2(s.density),
+            fmt_density_dev(density_mad_z(density_value, median, mad)),
             s.avg_doc.map(fmt_f1).unwrap_or_default(),
             fmt_int(s.flag_count),
         ];
-        if include_bias {
-            cells.push(fmt_bias_cell(s.estimation_bias));
-        }
         push_table_row(buf, &cells);
     }
     buf.push('\n');
+}
+
+fn write_cumulative_student_summary_table(buf: &mut String, students: &[StudentSummaryRow]) {
+    write_student_summary_table(buf, students);
 }
 
 fn sprint_placeholders(sprint_ids: &[i64]) -> String {
@@ -750,7 +671,6 @@ fn current_student_summary(
     project_id: i64,
 ) -> rusqlite::Result<Vec<StudentSummaryRow>> {
     let ls_per_student = student_ls_totals(conn, sprint_id, project_id)?;
-    let bias_per_student = bias_for_project(conn, project_id)?;
 
     let mut stmt = conn.prepare(
         "SELECT s.id, s.full_name, s.github_login,
@@ -776,7 +696,6 @@ fn current_student_summary(
             |r| {
                 let id = r.get::<_, String>(0)?;
                 let stats = ls_per_student.get(&id).copied().unwrap_or_default();
-                let bias = bias_per_student.get(&id).copied();
                 Ok(StudentSummaryRow {
                     id,
                     full_name: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -791,7 +710,6 @@ fn current_student_summary(
                     ls: stats.ls,
                     ld: stats.ld,
                     ls_per_pt: stats.ls_per_pt,
-                    estimation_bias: bias,
                 })
             },
         )?
@@ -814,7 +732,6 @@ fn cumulative_student_summary(
 
     let placeholders = sprint_placeholders(sprint_ids);
     let ls_per_student = cumulative_student_ls_totals(conn, sprint_ids, project_id)?;
-    let bias_per_student = bias_for_project(conn, project_id)?;
 
     let team_total_points: f64 = conn
         .query_row(
@@ -923,11 +840,6 @@ fn cumulative_student_summary(
             0.0
         };
 
-        // T-P2.1: pull the per-student bias posterior for this project.
-        // Falls back to None when the row is missing (project skipped or
-        // student never had any estimated tasks).
-        let bias = bias_per_student.get(&id).copied();
-
         rows.push(StudentSummaryRow {
             id,
             full_name,
@@ -942,7 +854,6 @@ fn cumulative_student_summary(
             surv_norm,
             density,
             flag_count,
-            estimation_bias: bias,
         });
     }
 
@@ -1130,10 +1041,11 @@ fn write_section_a(
             let _ = writeln!(buf, "{} Cumulative through this sprint\n", h3);
             write_cumulative_student_summary_table(buf, &cumulative_students);
             buf.push_str(
-                "_Legend:_ **Density** = surviving statements per estimated point \
-(higher = more code per point delivered, a code-volume signal). \
-**β_u** = per-student estimation bias in logits, posterior mean ± symbol \
-(▲ over-estimator, ▼ under-estimator, ≈ calibrated within ±0.5 logits).\n\n",
+                "_Legend:_ **Density Δ** = MAD-normalised deviation of this \
+student's surviving statements per estimated point from the team median: \
+▲ denser than typical (more code per point — under-pointed or unusually \
+dense work), ▼ sparser than typical (over-pointed or light task), ≈ \
+within ±1 MAD-z. Empty when MAD is zero or the student has no surviving code.\n\n",
             );
         }
     }
@@ -1693,10 +1605,9 @@ fn density_mad_z(value: Option<f64>, median: f64, mad: f64) -> Option<f64> {
     Some((v - median) / mad)
 }
 
-/// Render a density-deviation cell with the same glyph vocabulary as
-/// `fmt_bias_cell` so the report's symbol set stays consistent: ▲ above
-/// typical density (more statements per point than the project median),
-/// ▼ below typical, ≈ within ±1 MAD-z.
+/// Render a density-deviation cell: ▲ above typical density (more
+/// statements per point than the project median), ▼ below typical,
+/// ≈ within ±1 MAD-z.
 fn fmt_density_dev(z: Option<f64>) -> String {
     let Some(z) = z else { return String::new() };
     let symbol = if z > 1.0 {
@@ -1830,11 +1741,10 @@ fn write_section_b(
         } else {
             buf.push('\n');
         }
-        // β_u is project-level (one value per student) and lives in the
-        // Section A summary table, where it has row-level meaning. It's
-        // intentionally NOT repeated per-row in the per-student tables
-        // below; instead each task/PR row carries its own "density Δ"
-        // (stmts/points relative to the project median, MAD-normalised).
+        // Section A's per-student summary already carries a Density Δ
+        // glyph (team-relative MAD-z). Per-row tables below carry their
+        // own per-task / per-PR Density Δ so each row is interpretable
+        // on its own.
 
         // Trajectory sparkline across sprints (composite_score from
         // student_trajectory; renders as a minimalist 120×28 SVG).
@@ -3008,29 +2918,21 @@ estimation points. The same density idea as LS/pt but on the statement \
 unit, which is the better red flag for over- or under-estimation: it is \
 harder to inflate by reformatting, harder to deflate by refactor, and is \
 the unit used in the per-student `estimation_density` aggregate.\n\
-- **Density** *(cumulative table)* — surviving statements per estimated \
-point across the whole sprint. A code-volume signal at the student level.\n\
 - **Weighted PR Lines** — each PR's `+` and `-` lines distributed across \
 its linked tasks weighted by estimation-point share. Used in the \
 cumulative summary so multi-task PRs don't double-count.\n\
 \n\
 ### Estimation calibration\n\
 \n\
-- **β_u** — per-student estimation bias in logits, derived from a \
-Bayesian Rasch-style model fit across the project's tasks. Posterior \
-mean is shown alongside a glyph: **▲** over-estimator (tasks worth less \
-than they were pointed), **▼** under-estimator (tasks worth more), **≈** \
-calibrated within ±0.5 logits. The gauge fixes the team mean β at zero, \
-so β_u is always relative to teammates. Lives only in the per-student \
-summary table — β_u is a single value per student, so repeating it on \
-every task or PR row would be uninformative.\n\
-- **Density Δ** *(per-task / per-PR)* — MAD-normalised deviation of \
-this row's `stmts/points` from the project's median density across the \
-sprint: `(stmts_per_pt − median) / MAD`. **▲** denser than typical \
-(more code per point — under-pointed or unusually dense work), **▼** \
-sparser than typical (over-pointed or light task), **≈** within ±1 \
-MAD-z. Empty when MAD is zero (density is uniform — no normalisation \
-possible) or the row has zero estimation points.\n\
+- **Density Δ** — MAD-normalised deviation of this row's `stmts/points` \
+from the median density across the relevant scope: \
+`(stmts_per_pt − median) / MAD`. In the per-student summary the median \
+is computed across teammates; in the per-task and per-PR tables it is \
+computed across the project's tasks/PRs in the sprint. **▲** denser \
+than typical (more code per point — under-pointed or unusually dense \
+work), **▼** sparser than typical (over-pointed or light task), **≈** \
+within ±1 MAD-z. Empty when MAD is zero (density is uniform — no \
+normalisation possible) or the row has zero estimation points.\n\
 \n\
 ### PR submission timing\n\
 \n\
@@ -3973,7 +3875,7 @@ mod tests {
             "**LAT**",
             "**LAR**",
             "**LS**",
-            "**β_u**",
+            "**Density Δ**",
             "Truck factor",
             "Severity",
         ] {
@@ -4410,7 +4312,7 @@ mod tests {
     }
 
     #[test]
-    fn cumulative_table_carries_density_and_beta_legend() {
+    fn cumulative_table_carries_density_delta_legend() {
         let conn = mk_conn();
         let tmp = TempDir::new().unwrap();
         let path =
@@ -4418,8 +4320,8 @@ mod tests {
                 .unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(
-            body.contains("**Density**") && body.contains("**β_u**"),
-            "missing legend explaining Density / β_u columns",
+            body.contains("**Density Δ**"),
+            "missing legend explaining Density Δ column",
         );
     }
 
@@ -4433,8 +4335,9 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("### This sprint"));
         assert!(body.contains("### Cumulative through this sprint"));
+        // Single-student team → MAD = 0 → Density Δ cell is empty.
         assert!(body.contains(
-            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 12 | 100% | 200 | 110 | 15 | 11 | 67.5% | 11.25 | 3.5 | 1 |"
+            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 12 | 100% | 200 | 110 | 15 | 11 | 67.5% |  | 3.5 | 1 |"
         ));
     }
 
@@ -4450,11 +4353,12 @@ mod tests {
             body.matches("#### Cumulative through this sprint").count(),
             2
         );
+        // Single-student team → MAD = 0 → Density Δ cell is empty.
         assert!(body.contains(
-            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 5 | 100% | 120 | 60 | 10 | 20 | 85% | 17 | 3 | 1 |"
+            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 5 | 100% | 120 | 60 | 10 | 20 | 85% |  | 3 | 1 |"
         ));
         assert!(body.contains(
-            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 12 | 100% | 200 | 110 | 15 | 11 | 67.5% | 11.25 | 3.5 | 1 |"
+            "| Alice Bob | [alice-gh](https://github.com/alice-gh) | 12 | 100% | 200 | 110 | 15 | 11 | 67.5% |  | 3.5 | 1 |"
         ));
     }
 
