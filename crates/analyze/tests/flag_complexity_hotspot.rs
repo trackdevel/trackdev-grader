@@ -27,15 +27,7 @@ fn insert_finding(
              method_name, start_line, end_line, rule_key, severity,
              measured_value, threshold, detail)
          VALUES (?, 1, 'udg/x', ?, 'A', ?, 10, 30, ?, ?, ?, ?, '')",
-        params![
-            sprint_id,
-            file,
-            method,
-            rule_key,
-            severity,
-            measured,
-            threshold,
-        ],
+        params![sprint_id, file, method, rule_key, severity, measured, threshold,],
     )
     .unwrap();
     conn.last_insert_rowid()
@@ -127,12 +119,10 @@ fn warning_at_warn_band() {
         1
     );
     let sev =
-        common::flag_severity_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice")
-            .unwrap();
+        common::flag_severity_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice").unwrap();
     assert_eq!(sev, "WARNING");
     let details =
-        common::flag_details_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice")
-            .unwrap();
+        common::flag_details_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice").unwrap();
     assert!((details["score"].as_f64().unwrap() - 4.0).abs() < 1e-9);
     let offenders = details["offenders"].as_array().unwrap();
     assert_eq!(offenders.len(), 2);
@@ -166,8 +156,7 @@ fn critical_at_crit_band() {
     detect_flags_for_sprint_id(&conn, common::SPRINT_ID, &config_with_thresholds(4.0, 8.0))
         .unwrap();
     let sev =
-        common::flag_severity_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice")
-            .unwrap();
+        common::flag_severity_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice").unwrap();
     assert_eq!(sev, "CRITICAL");
 }
 
@@ -204,8 +193,7 @@ fn critical_severity_propagates_even_when_score_low() {
     detect_flags_for_sprint_id(&conn, common::SPRINT_ID, &config_with_thresholds(4.0, 8.0))
         .unwrap();
     let sev =
-        common::flag_severity_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice")
-            .unwrap();
+        common::flag_severity_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice").unwrap();
     assert_eq!(sev, "CRITICAL", "CRITICAL contributing rule must escalate");
 }
 
@@ -327,8 +315,7 @@ fn offenders_list_capped_at_top_three_by_contribution() {
     detect_flags_for_sprint_id(&conn, common::SPRINT_ID, &config_with_thresholds(4.0, 8.0))
         .unwrap();
     let details =
-        common::flag_details_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice")
-            .unwrap();
+        common::flag_details_for(&conn, common::SPRINT_ID, "COMPLEXITY_HOTSPOT", "alice").unwrap();
     let offenders = details["offenders"].as_array().unwrap();
     assert_eq!(offenders.len(), 3, "top-3 cap");
     let severities: Vec<&str> = offenders
