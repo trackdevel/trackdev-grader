@@ -30,6 +30,5 @@ sprint-grader-repo-analysis = { path = "../repo_analysis" }
 sprint-grader-ai-detect = { path = "../ai_detect" }
 sprint-grader-report = { path = "../report" }
 sprint-grader-orchestration = { path = "../orchestration" }
-sprint-grader-estimation = { path = "../estimation" }
 sprint-grader-architecture = { path = "../architecture" }
 sprint-grader-static-analysis = { path = "../static_analysis" }
