@@ -372,6 +372,29 @@ pub struct DetectorThresholdsConfig {
     /// `REPORT.md` is committed back to team repos. Lower this in
     /// `course.toml [detector_thresholds]` when ready to grade.
     pub static_analysis_hotspot_min_weighted: f64,
+    /// `COMPLEXITY_HOTSPOT` (T-CX) cyclomatic-complexity ceilings per method.
+    /// Above `_warn` the rule fires WARNING; above `_crit` it fires CRITICAL.
+    pub complexity_cc_warn: f64,
+    pub complexity_cc_crit: f64,
+    /// `COMPLEXITY_HOTSPOT` cognitive-complexity ceilings.
+    pub complexity_cognitive_warn: f64,
+    pub complexity_cognitive_crit: f64,
+    /// `COMPLEXITY_HOTSPOT` max nesting-depth ceilings.
+    pub complexity_nesting_warn: f64,
+    pub complexity_nesting_crit: f64,
+    /// `COMPLEXITY_HOTSPOT` long-method (LOC) ceilings.
+    pub complexity_loc_warn: f64,
+    pub complexity_loc_crit: f64,
+    /// `COMPLEXITY_HOTSPOT` wide-signature (parameter count) ceilings.
+    pub complexity_params_warn: f64,
+    pub complexity_params_crit: f64,
+    /// `COMPLEXITY_HOTSPOT` flag thresholds. The per-student score is
+    /// `Σ over findings: weight * severity_rank(rule.severity)` where rank
+    /// is critical=3, warning=2, info=1 (matches `severity_rank` in
+    /// `flags.rs`). Above `_warn` the flag fires WARNING; above `_crit`
+    /// CRITICAL.
+    pub complexity_hotspot_warn: f64,
+    pub complexity_hotspot_crit: f64,
 }
 
 impl Default for DetectorThresholdsConfig {
@@ -394,6 +417,18 @@ impl Default for DetectorThresholdsConfig {
             // Phase-1 default: feedback only. The flag rarely fires until
             // an instructor lowers this knob in course.toml.
             static_analysis_hotspot_min_weighted: 10.0,
+            complexity_cc_warn: 10.0,
+            complexity_cc_crit: 15.0,
+            complexity_cognitive_warn: 15.0,
+            complexity_cognitive_crit: 20.0,
+            complexity_nesting_warn: 4.0,
+            complexity_nesting_crit: 6.0,
+            complexity_loc_warn: 60.0,
+            complexity_loc_crit: 100.0,
+            complexity_params_warn: 5.0,
+            complexity_params_crit: 8.0,
+            complexity_hotspot_warn: 4.0,
+            complexity_hotspot_crit: 8.0,
         }
     }
 }
@@ -641,6 +676,18 @@ struct RawDetectorThresholds {
     bulk_rename_line_floor: Option<i64>,
     architecture_hotspot_min_weighted: Option<f64>,
     static_analysis_hotspot_min_weighted: Option<f64>,
+    complexity_cc_warn: Option<f64>,
+    complexity_cc_crit: Option<f64>,
+    complexity_cognitive_warn: Option<f64>,
+    complexity_cognitive_crit: Option<f64>,
+    complexity_nesting_warn: Option<f64>,
+    complexity_nesting_crit: Option<f64>,
+    complexity_loc_warn: Option<f64>,
+    complexity_loc_crit: Option<f64>,
+    complexity_params_warn: Option<f64>,
+    complexity_params_crit: Option<f64>,
+    complexity_hotspot_warn: Option<f64>,
+    complexity_hotspot_crit: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -966,6 +1013,54 @@ impl Config {
                 .detector_thresholds
                 .static_analysis_hotspot_min_weighted
                 .unwrap_or(detector_defaults.static_analysis_hotspot_min_weighted),
+            complexity_cc_warn: raw
+                .detector_thresholds
+                .complexity_cc_warn
+                .unwrap_or(detector_defaults.complexity_cc_warn),
+            complexity_cc_crit: raw
+                .detector_thresholds
+                .complexity_cc_crit
+                .unwrap_or(detector_defaults.complexity_cc_crit),
+            complexity_cognitive_warn: raw
+                .detector_thresholds
+                .complexity_cognitive_warn
+                .unwrap_or(detector_defaults.complexity_cognitive_warn),
+            complexity_cognitive_crit: raw
+                .detector_thresholds
+                .complexity_cognitive_crit
+                .unwrap_or(detector_defaults.complexity_cognitive_crit),
+            complexity_nesting_warn: raw
+                .detector_thresholds
+                .complexity_nesting_warn
+                .unwrap_or(detector_defaults.complexity_nesting_warn),
+            complexity_nesting_crit: raw
+                .detector_thresholds
+                .complexity_nesting_crit
+                .unwrap_or(detector_defaults.complexity_nesting_crit),
+            complexity_loc_warn: raw
+                .detector_thresholds
+                .complexity_loc_warn
+                .unwrap_or(detector_defaults.complexity_loc_warn),
+            complexity_loc_crit: raw
+                .detector_thresholds
+                .complexity_loc_crit
+                .unwrap_or(detector_defaults.complexity_loc_crit),
+            complexity_params_warn: raw
+                .detector_thresholds
+                .complexity_params_warn
+                .unwrap_or(detector_defaults.complexity_params_warn),
+            complexity_params_crit: raw
+                .detector_thresholds
+                .complexity_params_crit
+                .unwrap_or(detector_defaults.complexity_params_crit),
+            complexity_hotspot_warn: raw
+                .detector_thresholds
+                .complexity_hotspot_warn
+                .unwrap_or(detector_defaults.complexity_hotspot_warn),
+            complexity_hotspot_crit: raw
+                .detector_thresholds
+                .complexity_hotspot_crit
+                .unwrap_or(detector_defaults.complexity_hotspot_crit),
         };
 
         Ok(Config {
