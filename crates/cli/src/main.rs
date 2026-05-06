@@ -717,17 +717,13 @@ fn main() -> Result<()> {
             if no_spotbugs {
                 rules.spotbugs.enabled = false;
             }
+            // T-P3.4 PR 3: artifact-shape — one scan per project per
+            // run. The CLI subcommand previously iterated sprint_ids;
+            // findings are sprint-free now, so a single call suffices.
             for g in &groups {
                 let project_root = entregues_dir.join(&g.name);
-                for sid in &g.sprint_ids {
-                    sprint_grader_static_analysis::scan_project_to_db(
-                        &db.conn,
-                        &project_root,
-                        *sid,
-                        &rules,
-                    )
-                    .with_context(|| format!("static-analysis failed for sprint_id {sid}"))?;
-                }
+                sprint_grader_static_analysis::scan_project_to_db(&db.conn, &project_root, &rules)
+                    .with_context(|| format!("static-analysis failed for project {}", g.name))?;
             }
         }
         Command::ComplexityScan { projects } => {
