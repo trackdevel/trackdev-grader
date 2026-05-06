@@ -188,12 +188,23 @@ jitter_pct = 0.05
 [architecture]
 llm_review = true
 judge = "deepseek-api"
-model_id = "deepseek-chat"
+model_id = "deepseek-v4-pro"
+thinking = "enabled"
 # REQUIRED. No default — empty/missing causes Config::load to fail. This
 # is a deliberate guard: the CLI judge would otherwise silently fall
 # back to whatever model the user's Claude session points at (Opus on
 # Max plans), draining quota.
+# DeepSeek V4 names: "deepseek-v4-flash" (cheap, fast) or
+# "deepseek-v4-pro" (slower, stronger). The legacy names
+# "deepseek-chat" / "deepseek-reasoner" alias to V4-flash
+# non-thinking / thinking and are deprecated 2026-07-24.
 # model_id = "claude-haiku-4-5-20251001"
+# DeepSeek V4 thinking mode. Optional; one of "enabled" or "disabled".
+# Omit to let the server pick its default (currently "enabled").
+# Set to "disabled" on cheap rubrics (PR-doc / task heuristics) to skip
+# reasoning tokens; leave on "enabled" for architecture review.
+# Ignored by claude-cli / anthropic-api backends.
+# thinking = "enabled"
 max_tokens = 4000
 rubric_path = "architecture.md"
 llm_skip_globs = [
@@ -208,8 +219,10 @@ llm_skip_globs = [
 # causes Config::load to fail. `judge` defaults to "claude-cli".
 [evaluate]
 judge = "deepseek-api"
-model_id = "deepseek-chat"
+model_id = "deepseek-v4-flash"
+
 # model_id = "claude-haiku-4-5-20251001"
+thinking = "disabled"  # see [architecture] thinking notes
 
 # Mutation testing (T-P2.4). When `enabled = true` and a build profile
 # sets `mutation_command` (typically `./gradlew pitest --info` for the
