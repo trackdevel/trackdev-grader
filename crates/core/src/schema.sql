@@ -188,6 +188,23 @@ CREATE TABLE IF NOT EXISTS flags (
     details TEXT
 );
 
+-- Per-student artifact-level flags (T-P3.4). Sibling to `flags` but
+-- project-keyed instead of sprint-keyed. Flag detectors that classify
+-- the *delivered code* (architecture / complexity / static analysis)
+-- INSERT here; sprint-level *behavioural* detectors continue to use
+-- the sprint-keyed `flags` table. The renderer reads this table for
+-- the top-level "Code quality on main" section in REPORT.md.
+-- Re-runs DELETE WHERE project_id = ? before re-populating, mirroring
+-- the per-sprint `flags` idempotency idiom.
+CREATE TABLE IF NOT EXISTS student_artifact_flags (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id TEXT,
+    project_id INTEGER,
+    flag_type  TEXT,
+    severity   TEXT,
+    details    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS pr_doc_evaluation (
     pr_id TEXT,
     sprint_id INTEGER,
@@ -745,49 +762,63 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
 -- is one of `layer_dependency` (a layered rule was broken) or
 -- `forbidden_import` (a category-level prohibition fired). `rule_name`
 -- is the rule label from `architecture.toml` for cross-referencing.
+-- Architecture conformance violations (T-P2.2 / T-P3.1 / T-P3.3 / T-P3.4).
+-- Artifact-level rows: one per (repo, file, rule, offending_import,
+-- start_line) describing a violation that survives in the team's main
+-- branch. Sprint-free by design — we grade the code as delivered, not
+-- the per-sprint trajectory. `introduced_sprint_id` records the
+-- earliest sprint window that contains the minimum author-date among
+-- the lines blamed for [start_line..=end_line]; NULL when no window
+-- matches (e.g. commits before the course started).
 CREATE TABLE IF NOT EXISTS architecture_violations (
-    repo_full_name   TEXT NOT NULL,
-    sprint_id        INTEGER NOT NULL,
-    file_path        TEXT NOT NULL,
-    rule_name        TEXT NOT NULL,
-    violation_kind   TEXT NOT NULL,
-    offending_import TEXT NOT NULL,
-    severity         TEXT NOT NULL,
-    -- T-P3.1 additions: line range so attribution can blame the offending
-    -- code, not the whole file. NULL on rows produced before T-P3.1.
-    start_line       INTEGER,
-    end_line         INTEGER,
-    -- "package_glob" / "forbidden_import" / "ast_*" / "llm". NULL on legacy rows.
-    rule_kind        TEXT,
-    -- Reserved for T-P3.3: hash of the rubric/rule body that produced this row,
-    -- so a rubric edit invalidates cached LLM judgements. NULL on AST/glob rows.
-    rule_version     TEXT,
+    repo_full_name       TEXT NOT NULL,
+    file_path            TEXT NOT NULL,
+    rule_name            TEXT NOT NULL,
+    violation_kind       TEXT NOT NULL,
+    offending_import     TEXT NOT NULL,
+    severity             TEXT NOT NULL,
+    -- 1-based inclusive line range. Part of the PK so the same rule
+    -- firing on multiple ranges within one file produces distinct rows
+    -- (no more `@L<n>` disambiguator suffix on `offending_import`).
+    -- SQLite tolerates NULL in PK columns and treats NULLs as distinct,
+    -- which preserves backwards compatibility with package-glob rows
+    -- whose line was historically NULL on some inputs.
+    start_line           INTEGER,
+    end_line             INTEGER,
+    -- "package_glob" / "forbidden_import" / "ast_*" / "llm".
+    rule_kind            TEXT,
+    -- T-P3.3: hash of the rubric/rule body that produced this row, so
+    -- a rubric edit invalidates cached LLM judgements. NULL on
+    -- AST/glob rows.
+    rule_version         TEXT,
     -- Free-form explanation; primarily populated for LLM-judged rows.
-    explanation      TEXT,
-    PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import)
+    explanation          TEXT,
+    -- T-P3.4: blame-derived earliest containing sprint window. NULL
+    -- when no sprint window contains the minimum author-date among
+    -- the offending lines.
+    introduced_sprint_id INTEGER,
+    PRIMARY KEY (repo_full_name, file_path, rule_name, offending_import, start_line)
 );
 
--- Per-student attribution of `architecture_violations` rows (T-P3.1).
+-- Per-student attribution of `architecture_violations` rows (T-P3.1 / T-P3.4).
 -- Computed by running `git blame -w --ignore-revs-file` over the violation's
 -- (file, start_line..end_line) and tallying lines per student. `weight` is
 -- `lines_authored / total_lines` in [0, 1] so the per-student WARNING
 -- magnitude scales with how much of the offending code each student actually
 -- wrote — a 1-line typo fix on a 30-line bad method gets ~3 % weight.
 -- The join key is the parent row's implicit `rowid`; pre-existing
--- attribution for a given (repo, sprint) is deleted when the architecture
--- scan re-runs, mirroring the violation-table idempotency idiom.
+-- attribution for a given (repo) is deleted when the architecture scan
+-- re-runs, mirroring the violation-table idempotency idiom. Sprint-free
+-- by design (artifact-level): use `architecture_violations.introduced_sprint_id`
+-- on the parent row when sprint provenance is needed for rendering.
 CREATE TABLE IF NOT EXISTS architecture_violation_attribution (
     violation_rowid INTEGER NOT NULL,
     student_id      TEXT NOT NULL,
     lines_authored  INTEGER NOT NULL,
     total_lines     INTEGER NOT NULL,
     weight          REAL NOT NULL,
-    sprint_id       INTEGER NOT NULL,
     PRIMARY KEY (violation_rowid, student_id)
 );
-
-CREATE INDEX IF NOT EXISTS idx_arch_attr_sprint
-    ON architecture_violation_attribution(sprint_id);
 
 -- LLM-judged architecture cache (T-P3.3). Keyed by `(file_sha,
 -- rubric_version, model_id)` so the cache invalidates when the file
@@ -805,6 +836,24 @@ CREATE TABLE IF NOT EXISTS architecture_llm_cache (
     response_json  TEXT NOT NULL,
     evaluated_at   TEXT NOT NULL,
     PRIMARY KEY (file_sha, rubric_version, model_id)
+);
+
+-- Per-repo outcome row for the architecture scan (T-P3.4). Mirrors
+-- `static_analysis_runs` and `method_complexity_runs` shape but
+-- artifact-level (no sprint_id). `head_sha` lets `run-all` skip
+-- re-scanning when the working tree hasn't moved since the last
+-- successful run. `findings_count` is the number of
+-- `architecture_violations` rows produced for this repo. Re-runs
+-- INSERT OR REPLACE keyed on `repo_full_name`.
+CREATE TABLE IF NOT EXISTS architecture_runs (
+    repo_full_name TEXT    NOT NULL,
+    status         TEXT    NOT NULL,           -- OK | SKIPPED_HEAD_UNCHANGED | SKIPPED_NO_SOURCES | CRASHED
+    findings_count INTEGER NOT NULL DEFAULT 0,
+    duration_ms    INTEGER,
+    head_sha       TEXT,
+    diagnostics    TEXT,
+    ran_at         TEXT    NOT NULL,           -- ISO-8601 UTC
+    PRIMARY KEY (repo_full_name)
 );
 
 -- Per-team ownership snapshot (T-P2.3). `truck_factor` is the smallest k
