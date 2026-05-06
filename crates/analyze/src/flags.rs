@@ -2342,10 +2342,9 @@ fn static_analysis_hotspot(
     Ok(flags)
 }
 
-/// COMPLEXITY_HOTSPOT (T-CX). Per-student companion to the testability
-/// scan in `crates/quality/src/testability.rs`. Aggregates a student's
-/// per-finding `weight × severity_rank` across this sprint's
-/// `method_complexity_findings` (joined via
+/// COMPLEXITY_HOTSPOT (T-CX / T-P3.4). Per-student artifact flag.
+/// Aggregates a student's per-finding `weight × severity_rank` across
+/// this project's `method_complexity_findings` (joined via
 /// `method_complexity_attribution`) and fires when the resulting score
 /// crosses one of two bands:
 ///
@@ -2355,10 +2354,11 @@ fn static_analysis_hotspot(
 /// `severity_rank` is the existing `critical=3, warning=2, info=1` scale.
 /// The offender JSON is capped at the top-3 contributors (by weight ×
 /// severity_rank) so the report can render the most actionable items
-/// without dumping every finding.
+/// without dumping every finding. Sprint-free: scoping is by
+/// `method_complexity_findings.project_id`.
 fn complexity_hotspot(
     conn: &Connection,
-    sprint_id: i64,
+    project_id: i64,
     warn_threshold: f64,
     crit_threshold: f64,
 ) -> rusqlite::Result<Vec<Flag>> {
@@ -2368,10 +2368,10 @@ fn complexity_hotspot(
                 f.measured_value, f.threshold, f.repo_full_name
          FROM method_complexity_attribution a
          JOIN method_complexity_findings f ON f.id = a.finding_id
-         WHERE a.sprint_id = ?",
+         WHERE f.project_id = ?",
     )?;
     let rows = stmt
-        .query_map([sprint_id], |r| {
+        .query_map([project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -2606,9 +2606,8 @@ fn persist_artifact_flags(
 /// scans have populated their attribution rows. Idempotent: the
 /// project's prior `student_artifact_flags` rows are deleted first.
 ///
-/// PR 1 wires only `ARCHITECTURE_HOTSPOT`. PR 2 will add
-/// `COMPLEXITY_HOTSPOT`; PR 3 will add `STATIC_ANALYSIS_HOTSPOT`. Until
-/// then, those two stay in `detect_flags_for_sprint_id`.
+/// PR 1 wired `ARCHITECTURE_HOTSPOT`. PR 2 adds `COMPLEXITY_HOTSPOT`.
+/// PR 3 will add `STATIC_ANALYSIS_HOTSPOT`.
 pub fn detect_artifact_flags_for_project_id(
     conn: &Connection,
     project_id: i64,
@@ -2643,6 +2642,15 @@ pub fn detect_artifact_flags_for_project_id(
     total += run!(
         "ARCHITECTURE_HOTSPOT",
         architecture_hotspot(conn, project_id, dt.architecture_hotspot_min_weighted)
+    );
+    total += run!(
+        "COMPLEXITY_HOTSPOT",
+        complexity_hotspot(
+            conn,
+            project_id,
+            dt.complexity_hotspot_warn,
+            dt.complexity_hotspot_crit,
+        )
     );
     Ok(total)
 }
@@ -2766,9 +2774,10 @@ pub fn detect_flags_for_sprint_id(
         "REGULARITY_DECLINING",
         regularity_declining(conn, sprint_id, dt)
     );
-    // T-P3.4: ARCHITECTURE_DRIFT is gone (per-sprint trajectory has no
-    // meaning under the artifact-shape rewrite); ARCHITECTURE_HOTSPOT is
-    // now project-keyed and runs in `detect_artifact_flags_for_project_id`.
+    // T-P3.4: ARCHITECTURE_DRIFT is gone; ARCHITECTURE_HOTSPOT and
+    // COMPLEXITY_HOTSPOT are project-keyed and run in
+    // `detect_artifact_flags_for_project_id`. STATIC_ANALYSIS_HOTSPOT
+    // moves there in PR 3.
     total += run!(
         "STATIC_ANALYSIS_HOTSPOT",
         static_analysis_hotspot(
@@ -2777,15 +2786,6 @@ pub fn detect_flags_for_sprint_id(
             config
                 .detector_thresholds
                 .static_analysis_hotspot_min_weighted
-        )
-    );
-    total += run!(
-        "COMPLEXITY_HOTSPOT",
-        complexity_hotspot(
-            conn,
-            sprint_id,
-            config.detector_thresholds.complexity_hotspot_warn,
-            config.detector_thresholds.complexity_hotspot_crit
         )
     );
     total += run!(
