@@ -1155,25 +1155,19 @@ pub fn run_pipeline(
     } else if sa_rules_path.is_file() {
         match sprint_grader_static_analysis::Rules::load(&sa_rules_path) {
             Ok(sa_rules) => {
-                for g in groups
-                    .iter()
-                    .filter(|g| projects_with_new_data.contains(&g.project_id))
-                {
+                // T-P3.4 PR 3: artifact-shape — one scan per project per
+                // run. The static_analysis_runs head_sha gate (inside
+                // scan_repo_to_db) skips repos whose working tree hasn't
+                // moved. Drop projects_with_new_data; head_sha is the
+                // correct cache key.
+                for g in &groups {
                     let project_root = opts.entregues_dir.join(&g.name);
-                    for sid in &g.sprint_ids {
-                        if let Err(e) = sprint_grader_static_analysis::scan_project_to_db(
-                            &db.conn,
-                            &project_root,
-                            *sid,
-                            &sa_rules,
-                        ) {
-                            warn!(
-                                project = %g.name,
-                                sprint_id = sid,
-                                error = %e,
-                                "static-analysis scan failed"
-                            );
-                        }
+                    if let Err(e) = sprint_grader_static_analysis::scan_project_to_db(
+                        &db.conn,
+                        &project_root,
+                        &sa_rules,
+                    ) {
+                        warn!(project = %g.name, error = %e, "static-analysis scan failed");
                     }
                 }
             }
