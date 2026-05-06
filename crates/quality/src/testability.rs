@@ -1046,18 +1046,20 @@ fn parse_offending_lines(detail: &str) -> Vec<u32> {
 }
 
 /// Run blame attribution for every `method_complexity_findings` row in
-/// `(repo_full_name, sprint_id)`. Pre-existing
-/// `method_complexity_attribution` rows for the same `(repo, sprint)`
-/// are deleted before re-inserting, mirroring the
-/// `static_analysis_finding_attribution` idempotency idiom. Returns
-/// the number of rows written.
+/// `repo_full_name` (T-P3.4: sprint-free, artifact-shape).
+/// Pre-existing `method_complexity_attribution` rows for the repo's
+/// findings are deleted before re-inserting, mirroring the
+/// architecture-attribution idempotency idiom. Also fills
+/// `method_complexity_findings.introduced_sprint_id` for each finding
+/// from per-line blame author-times (earliest containing sprint window).
+/// Returns the number of attribution rows written.
 pub fn attribute_findings_for_repo(
     conn: &Connection,
     repo_path: &Path,
     repo_full_name: &str,
-    sprint_id: i64,
 ) -> rusqlite::Result<usize> {
     let email_map = build_email_to_student_map(conn)?;
+    let sprint_windows = load_sprint_windows(conn)?;
 
     // Pull every finding row that owns a non-zero line range.
     #[allow(clippy::type_complexity)]
@@ -1065,10 +1067,10 @@ pub fn attribute_findings_for_repo(
         let mut stmt = conn.prepare(
             "SELECT id, file_path, start_line, end_line, rule_key, COALESCE(detail, '')
              FROM method_complexity_findings
-             WHERE repo_full_name = ? AND sprint_id = ?
+             WHERE repo_full_name = ?
                AND start_line > 0 AND end_line >= start_line",
         )?;
-        let it = stmt.query_map(params![repo_full_name, sprint_id], |r| {
+        let it = stmt.query_map(params![repo_full_name], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -1096,9 +1098,9 @@ pub fn attribute_findings_for_repo(
         "DELETE FROM method_complexity_attribution
          WHERE finding_id IN (
              SELECT id FROM method_complexity_findings
-             WHERE repo_full_name = ? AND sprint_id = ?
+             WHERE repo_full_name = ?
          )",
-        params![repo_full_name, sprint_id],
+        params![repo_full_name],
     )?;
 
     let mut written = 0usize;
@@ -1125,6 +1127,7 @@ pub fn attribute_findings_for_repo(
             let mut per_student_weight: HashMap<String, f64> = HashMap::new();
             let mut total_weight: f64 = 0.0;
             let mut total_lines: u32 = 0;
+            let mut min_author_time: Option<i64> = None;
             for ln in start..=end {
                 let bl = match blame.get(&ln) {
                     Some(b) => b,
@@ -1141,7 +1144,20 @@ pub fn attribute_findings_for_repo(
                     *per_student_lines.entry(sid.clone()).or_default() += 1;
                     *per_student_weight.entry(sid).or_default() += w;
                 }
+                track_min_time(&mut min_author_time, bl);
             }
+
+            // T-P3.4: write the earliest containing sprint as
+            // `introduced_sprint_id`. Always update (even to NULL) so a
+            // re-run cleanly overwrites prior values.
+            let introduced = min_author_time.and_then(|t| containing_sprint_id(&sprint_windows, t));
+            conn.execute(
+                "UPDATE method_complexity_findings
+                 SET introduced_sprint_id = ?
+                 WHERE id = ?",
+                params![introduced, id],
+            )?;
+
             if total_weight <= 0.0 || per_student_weight.is_empty() {
                 continue;
             }
@@ -1151,16 +1167,9 @@ pub fn attribute_findings_for_repo(
                 conn.execute(
                     "INSERT OR REPLACE INTO method_complexity_attribution
                         (finding_id, student_id, lines_attributed,
-                         weighted_lines, weight, sprint_id)
-                     VALUES (?, ?, ?, ?, ?, ?)",
-                    params![
-                        id,
-                        sid,
-                        lines_attributed as i64,
-                        weighted,
-                        weight,
-                        sprint_id
-                    ],
+                         weighted_lines, weight)
+                     VALUES (?, ?, ?, ?, ?)",
+                    params![id, sid, lines_attributed as i64, weighted, weight],
                 )?;
                 written += 1;
             }
@@ -1168,6 +1177,61 @@ pub fn attribute_findings_for_repo(
         }
     }
     Ok(written)
+}
+
+fn track_min_time(slot: &mut Option<i64>, bl: &sprint_grader_survival::blame::BlameLine) {
+    if bl.author_time <= 0 {
+        return;
+    }
+    match slot {
+        Some(prev) => {
+            if bl.author_time < *prev {
+                *slot = Some(bl.author_time);
+            }
+        }
+        None => *slot = Some(bl.author_time),
+    }
+}
+
+/// `[(sprint_id, start_unix, end_unix)]` ordered by start ascending.
+type SprintWindows = Vec<(i64, i64, i64)>;
+
+fn load_sprint_windows(conn: &Connection) -> rusqlite::Result<SprintWindows> {
+    let mut stmt = conn.prepare(
+        "SELECT id, start_date, end_date FROM sprints
+         WHERE start_date IS NOT NULL AND end_date IS NOT NULL
+         ORDER BY start_date ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut out: SprintWindows = Vec::new();
+    for r in rows {
+        let (id, start, end) = r?;
+        let s = match sprint_grader_core::time::parse_iso(&start) {
+            Some(dt) => dt.timestamp(),
+            None => continue,
+        };
+        let e = match sprint_grader_core::time::parse_iso(&end) {
+            Some(dt) => dt.timestamp(),
+            None => continue,
+        };
+        out.push((id, s, e));
+    }
+    Ok(out)
+}
+
+fn containing_sprint_id(windows: &SprintWindows, ts: i64) -> Option<i64> {
+    for (id, s, e) in windows {
+        if ts >= *s && ts <= *e {
+            return Some(*id);
+        }
+    }
+    None
 }
 
 // ----------------------------------------------------------------------
@@ -1280,7 +1344,6 @@ fn persist_method_metrics(
 /// the new row's id so the caller can run attribution off it later.
 fn persist_finding(
     conn: &rusqlite::Connection,
-    sprint_id: i64,
     project_id: i64,
     repo_full_name: &str,
     f: &Finding,
@@ -1288,12 +1351,11 @@ fn persist_finding(
     use rusqlite::params;
     conn.execute(
         "INSERT INTO method_complexity_findings
-            (sprint_id, project_id, repo_full_name, file_path, class_name,
+            (project_id, repo_full_name, file_path, class_name,
              method_name, start_line, end_line, rule_key, severity,
              measured_value, threshold, detail)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
-            sprint_id,
             project_id,
             repo_full_name,
             f.file_path,
@@ -1311,14 +1373,12 @@ fn persist_finding(
     Ok(conn.last_insert_rowid())
 }
 
-/// Persist the `method_complexity_runs` row for `(repo, sprint)`.
+/// Persist the `method_complexity_runs` row for `repo_full_name`.
 /// Idempotent: `INSERT OR REPLACE` on the natural PK so re-runs
-/// overwrite the prior status atomically.
-#[allow(clippy::too_many_arguments)]
+/// overwrite the prior status atomically (T-P3.4: per-repo, sprint-free).
 fn record_run(
     conn: &rusqlite::Connection,
     repo_full_name: &str,
-    sprint_id: i64,
     status: &str,
     findings_count: usize,
     duration_ms: i64,
@@ -1329,12 +1389,11 @@ fn record_run(
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT OR REPLACE INTO method_complexity_runs
-            (repo_full_name, sprint_id, status, findings_count,
+            (repo_full_name, status, findings_count,
              duration_ms, head_sha, diagnostics, ran_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         params![
             repo_full_name,
-            sprint_id,
             status,
             findings_count as i64,
             duration_ms,
@@ -1346,38 +1405,40 @@ fn record_run(
     Ok(())
 }
 
-/// Returns the cached head SHA (if any) for `(repo, sprint)`. Callers
+/// Returns the cached head SHA (if any) for `repo_full_name`. Callers
 /// compare it against the current `git_head_sha` to decide whether to
 /// short-circuit the AST scan.
-fn cached_head_sha(
-    conn: &rusqlite::Connection,
-    repo_full_name: &str,
-    sprint_id: i64,
-) -> Option<String> {
+fn cached_head_sha(conn: &rusqlite::Connection, repo_full_name: &str) -> Option<String> {
     conn.query_row(
         "SELECT head_sha FROM method_complexity_runs
-         WHERE repo_full_name = ? AND sprint_id = ? AND status = ?",
-        rusqlite::params![repo_full_name, sprint_id, STATUS_OK],
+         WHERE repo_full_name = ? AND status = ?",
+        rusqlite::params![repo_full_name, STATUS_OK],
         |r| r.get::<_, Option<String>>(0),
     )
     .ok()
     .flatten()
 }
 
-/// Scan one cloned repo for one sprint, persist findings + metrics +
-/// attribution. Idempotent: pre-existing rows for `(repo, sprint)` in
-/// `method_complexity_findings` (and the cascade-deleted attribution
-/// rows) are dropped first. Returns the number of finding rows written.
+/// Scan one cloned repo, persist findings + metrics + attribution
+/// (T-P3.4: artifact-shape, sprint-free). Idempotent at
+/// `(repo_full_name)` granularity: pre-existing finding rows for the
+/// repo are dropped before re-insert (cascade clears attribution via
+/// the FK).
 ///
-/// Short-circuit: when `method_complexity_runs.head_sha` for this
-/// `(repo, sprint)` already matches the current `git rev-parse HEAD`,
-/// the AST walk is skipped entirely and the cached findings stay in
-/// place. This keeps `report` regeneration cheap after a config tweak.
+/// Short-circuit: when `method_complexity_runs.head_sha` for this repo
+/// already matches the current `git rev-parse HEAD`, the AST walk is
+/// skipped and the cached findings stay in place. This keeps `report`
+/// regeneration cheap after a config tweak.
+///
+/// `project_id` is recorded on every finding row so artifact-flag
+/// queries can scope to a project without joining `pull_requests`.
+/// Note that the `method_metrics` cache is still keyed per-sprint —
+/// that table is not part of the artifact migration.
 pub fn scan_repo_to_db(
     conn: &rusqlite::Connection,
     repo_path: &Path,
     repo_full_name: &str,
-    sprint_id: i64,
+    sprint_id_for_metrics_cache: i64,
     project_id: i64,
     thresholds: &DetectorThresholdsConfig,
 ) -> rusqlite::Result<usize> {
@@ -1387,25 +1448,22 @@ pub fn scan_repo_to_db(
 
     // Short-circuit when the head SHA hasn't moved since the last
     // successful run. The cached findings + attribution remain valid.
-    if let (Some(current), Some(cached)) = (
-        head.as_deref(),
-        cached_head_sha(conn, repo_full_name, sprint_id),
-    ) {
+    if let (Some(current), Some(cached)) = (head.as_deref(), cached_head_sha(conn, repo_full_name))
+    {
         if current == cached {
             // Bookkeeping: refresh ran_at so operators can tell the
             // scan was *considered* this run, just not re-executed.
             let kept: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM method_complexity_findings
-                     WHERE repo_full_name = ? AND sprint_id = ?",
-                    params![repo_full_name, sprint_id],
+                     WHERE repo_full_name = ?",
+                    params![repo_full_name],
                     |r| r.get(0),
                 )
                 .unwrap_or(0);
             record_run(
                 conn,
                 repo_full_name,
-                sprint_id,
                 STATUS_SKIPPED_HEAD_UNCHANGED,
                 kept as usize,
                 started.elapsed().as_millis() as i64,
@@ -1414,7 +1472,6 @@ pub fn scan_repo_to_db(
             )?;
             info!(
                 repo = repo_full_name,
-                sprint_id,
                 head = current,
                 kept_findings = kept,
                 "complexity scan skipped: head SHA unchanged"
@@ -1428,7 +1485,6 @@ pub fn scan_repo_to_db(
         record_run(
             conn,
             repo_full_name,
-            sprint_id,
             STATUS_SKIPPED_NO_SOURCES,
             0,
             started.elapsed().as_millis() as i64,
@@ -1438,18 +1494,12 @@ pub fn scan_repo_to_db(
         return Ok(0);
     }
 
-    // Idempotency: drop the previous run's findings (cascade clears
-    // attribution via the FK) before re-inserting.
+    // Idempotency: drop the previous run's findings for this repo
+    // (cascade clears attribution via the FK) before re-inserting.
     conn.execute(
         "DELETE FROM method_complexity_findings
-         WHERE repo_full_name = ? AND sprint_id = ?",
-        params![repo_full_name, sprint_id],
-    )?;
-    conn.execute(
-        "DELETE FROM method_complexity_attribution
-         WHERE sprint_id = ?
-           AND finding_id NOT IN (SELECT id FROM method_complexity_findings)",
-        params![sprint_id],
+         WHERE repo_full_name = ?",
+        params![repo_full_name],
     )?;
 
     let mut written = 0usize;
@@ -1466,27 +1516,23 @@ pub fn scan_repo_to_db(
         // file once each — collapsing them into a single parse-and-
         // walk pass is a step-9 micro-optimisation.
         for f in classic_findings_for_file(rel, &src, thresholds) {
-            persist_finding(conn, sprint_id, project_id, repo_full_name, &f)?;
+            persist_finding(conn, project_id, repo_full_name, &f)?;
             written += 1;
         }
         for f in testability_findings_for_file(rel, &src) {
-            persist_finding(conn, sprint_id, project_id, repo_full_name, &f)?;
+            persist_finding(conn, project_id, repo_full_name, &f)?;
             written += 1;
         }
         // Populate `method_metrics` so subsequent quality_delta /
         // future testability_findings_from_db calls don't have to
-        // re-parse.
+        // re-parse. method_metrics keeps its sprint_id PK column —
+        // it's not part of the artifact migration.
         for m in crate::complexity::analyze_file(rel, &src) {
-            persist_method_metrics(conn, sprint_id, &m)?;
+            persist_method_metrics(conn, sprint_id_for_metrics_cache, &m)?;
         }
     }
 
-    let attribution_rows = match attribute_findings_for_repo(
-        conn,
-        repo_path,
-        repo_full_name,
-        sprint_id,
-    ) {
+    let attribution_rows = match attribute_findings_for_repo(conn, repo_path, repo_full_name) {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(repo = repo_full_name, error = %e, "complexity attribution failed; continuing without it");
@@ -1497,7 +1543,6 @@ pub fn scan_repo_to_db(
     record_run(
         conn,
         repo_full_name,
-        sprint_id,
         STATUS_OK,
         written,
         started.elapsed().as_millis() as i64,
@@ -1507,7 +1552,6 @@ pub fn scan_repo_to_db(
 
     info!(
         repo = repo_full_name,
-        sprint_id,
         files = files.len(),
         findings = written,
         attribution_rows,
@@ -1517,15 +1561,14 @@ pub fn scan_repo_to_db(
 }
 
 /// Convenience: scan every directory under `entregues_dir/<project_name>`
-/// that looks like a cloned repo. Mirrors the architecture stage's
-/// `scan_project_to_db` shape (resolves the `<org>/<repo>` form from
-/// `pull_requests.repo_full_name`, falls back to the bare directory
-/// name if no PR row references it). `project_id` is required so the
-/// finding rows carry their owner without needing a pull-request join.
+/// that looks like a cloned repo (T-P3.4: sprint-free at the artifact
+/// level). The `sprint_id_for_metrics_cache` is forwarded only to
+/// `method_metrics` (which keeps its per-sprint shape); finding /
+/// attribution / runs rows are sprint-free.
 pub fn scan_project_to_db(
     conn: &rusqlite::Connection,
     project_root: &Path,
-    sprint_id: i64,
+    sprint_id_for_metrics_cache: i64,
     project_id: i64,
     thresholds: &DetectorThresholdsConfig,
 ) -> rusqlite::Result<usize> {
@@ -1548,7 +1591,7 @@ pub fn scan_project_to_db(
             conn,
             &repo_path,
             &repo_full_name,
-            sprint_id,
+            sprint_id_for_metrics_cache,
             project_id,
             thresholds,
         ) {
@@ -1556,14 +1599,12 @@ pub fn scan_project_to_db(
             Err(e) => {
                 tracing::warn!(
                     repo = %repo_full_name,
-                    sprint_id,
                     error = %e,
                     "complexity scan failed; recording crashed status"
                 );
                 let _ = record_run(
                     conn,
                     &repo_full_name,
-                    sprint_id,
                     STATUS_CRASHED,
                     0,
                     0,
@@ -2142,10 +2183,10 @@ mod tests {
     ) -> i64 {
         conn.execute(
             "INSERT INTO method_complexity_findings
-                (sprint_id, project_id, repo_full_name, file_path, class_name,
+                (project_id, repo_full_name, file_path, class_name,
                  method_name, start_line, end_line, rule_key, severity,
                  measured_value, threshold, detail)
-             VALUES (1, 1, ?, ?, 'A', 'f', ?, ?, ?, ?, NULL, NULL, ?)",
+             VALUES (1, ?, ?, 'A', 'f', ?, ?, ?, ?, NULL, NULL, ?)",
             params![
                 repo_full_name,
                 file_path,
@@ -2200,7 +2241,7 @@ mod tests {
         commit_file(&repo, "A.java", body, "alice@example.com", "Alice", "init");
 
         let fid = insert_finding(&conn, "udg/x", "A.java", "cyclomatic", "WARNING", 2, 7, "");
-        let n = attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        let n = attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
         assert!(n > 0);
         let rows = attr_for(&conn, fid);
         assert_eq!(rows.len(), 1, "got {rows:?}");
@@ -2253,7 +2294,7 @@ mod tests {
             12,
             "L9: catches Exception",
         );
-        attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
         let rows = attr_for(&conn, fid);
         assert_eq!(rows.len(), 2, "alice + bob: got {rows:?}");
 
@@ -2286,7 +2327,7 @@ mod tests {
         commit_file(&repo, "A.java", body, "alice@example.com", "Alice", "init");
 
         let fid = insert_finding(&conn, "udg/x", "A.java", "long-method", "WARNING", 2, 4, "");
-        attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
         let n1: i64 = conn
             .query_row(
                 "SELECT count(*) FROM method_complexity_attribution WHERE finding_id = ?",
@@ -2294,7 +2335,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
         let n2: i64 = conn
             .query_row(
                 "SELECT count(*) FROM method_complexity_attribution WHERE finding_id = ?",
@@ -2350,11 +2391,11 @@ mod tests {
         assert!(n > 0, "expected at least one finding");
 
         // Must contain a broad-catch finding for Foo.heavy and NOT for
-        // FooTest or Foo_Impl.
+        // FooTest or Foo_Impl. (T-P3.4: findings table is sprint-free.)
         let files: Vec<String> = conn
             .prepare(
                 "SELECT DISTINCT file_path FROM method_complexity_findings
-                 WHERE sprint_id = 1",
+                 WHERE repo_full_name = 'udg/x'",
             )
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
@@ -2384,11 +2425,12 @@ mod tests {
             .unwrap();
         assert!(start >= 1 && end >= start, "line range must be set");
 
-        // Attribution row written for alice (single author).
+        // Attribution row written for alice (single author). T-P3.4:
+        // attribution has no sprint_id; scope by student.
         let attr: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM method_complexity_attribution
-                 WHERE sprint_id = 1 AND student_id = 'alice'",
+                 WHERE student_id = 'alice'",
                 [],
                 |r| r.get(0),
             )
@@ -2399,7 +2441,7 @@ mod tests {
         let (status, head): (String, Option<String>) = conn
             .query_row(
                 "SELECT status, head_sha FROM method_complexity_runs
-                 WHERE repo_full_name = 'udg/x' AND sprint_id = 1",
+                 WHERE repo_full_name = 'udg/x'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -2433,8 +2475,7 @@ mod tests {
         assert_eq!(first, second, "cached findings count must match");
         let status: String = conn
             .query_row(
-                "SELECT status FROM method_complexity_runs WHERE repo_full_name = 'udg/x'
-                 AND sprint_id = 1",
+                "SELECT status FROM method_complexity_runs WHERE repo_full_name = 'udg/x'",
                 [],
                 |r| r.get(0),
             )
@@ -2473,8 +2514,7 @@ mod tests {
         scan_repo_to_db(&conn, &repo, "udg/x", 1, 1, &th).unwrap();
         let status: String = conn
             .query_row(
-                "SELECT status FROM method_complexity_runs WHERE repo_full_name = 'udg/x'
-                 AND sprint_id = 1",
+                "SELECT status FROM method_complexity_runs WHERE repo_full_name = 'udg/x'",
                 [],
                 |r| r.get(0),
             )
@@ -2502,8 +2542,7 @@ mod tests {
         assert_eq!(n, 0);
         let status: String = conn
             .query_row(
-                "SELECT status FROM method_complexity_runs WHERE repo_full_name = 'udg/x'
-                 AND sprint_id = 1",
+                "SELECT status FROM method_complexity_runs WHERE repo_full_name = 'udg/x'",
                 [],
                 |r| r.get(0),
             )
@@ -2527,7 +2566,7 @@ mod tests {
         );
         // start_line = 0 → SQL filter excludes the row.
         insert_finding(&conn, "udg/x", "A.java", "cyclomatic", "WARNING", 0, 0, "");
-        let n = attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        let n = attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
         assert_eq!(n, 0);
     }
 

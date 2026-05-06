@@ -960,73 +960,74 @@ CREATE TABLE IF NOT EXISTS static_analysis_finding_attribution (
 CREATE INDEX IF NOT EXISTS idx_sa_attr_sprint
     ON static_analysis_finding_attribution(sprint_id);
 
--- Per-method complexity / testability findings (T-CX). One row per
--- (method, rule_key) where the rule fired. Source: AST scan of the team
--- repos performed by `crates/quality/src/testability.rs`. Rules are split
--- in two families: classic complexity axes (cyclomatic, cognitive,
--- nesting, long-method, wide-signature) and targeted testability rules
--- (broad-catch, non-deterministic-call, inline-collaborator,
--- static-singleton, reflection). Only `src/main/java/**` and
--- `app/src/main/java/**` are scanned; tests and generated sources are
--- skipped at discovery time. Idempotency: rows for the (sprint_id,
--- repo_full_name) tuple are deleted before re-population.
+-- Per-method complexity / testability findings (T-CX / T-P3.4). One row
+-- per (method, rule_key) where the rule fired. Source: AST scan of the
+-- team repos performed by `crates/quality/src/testability.rs`. Rules
+-- are split in two families: classic complexity axes (cyclomatic,
+-- cognitive, nesting, long-method, wide-signature) and targeted
+-- testability rules (broad-catch, non-deterministic-call,
+-- inline-collaborator, static-singleton, reflection). Only
+-- `src/main/java/**` and `app/src/main/java/**` are scanned; tests and
+-- generated sources are skipped at discovery time. Sprint-free
+-- artifact-shape (T-P3.4): grading the code as delivered on main. The
+-- `introduced_sprint_id` column records the earliest sprint window
+-- containing any blamed commit's author-date for the offending range;
+-- NULL when no sprint window matches. Idempotency: rows for the repo
+-- are deleted before re-population.
 CREATE TABLE IF NOT EXISTS method_complexity_findings (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    sprint_id       INTEGER NOT NULL,
-    project_id      INTEGER NOT NULL,
-    repo_full_name  TEXT    NOT NULL,
-    file_path       TEXT    NOT NULL,
-    class_name      TEXT,
-    method_name     TEXT    NOT NULL,
-    start_line      INTEGER NOT NULL,
-    end_line        INTEGER NOT NULL,
-    rule_key        TEXT    NOT NULL,
-    severity        TEXT    NOT NULL,           -- CRITICAL | WARNING | INFO
-    measured_value  REAL,
-    threshold       REAL,
-    detail          TEXT
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id           INTEGER NOT NULL,
+    repo_full_name       TEXT    NOT NULL,
+    file_path            TEXT    NOT NULL,
+    class_name           TEXT,
+    method_name          TEXT    NOT NULL,
+    start_line           INTEGER NOT NULL,
+    end_line             INTEGER NOT NULL,
+    rule_key             TEXT    NOT NULL,
+    severity             TEXT    NOT NULL,           -- CRITICAL | WARNING | INFO
+    measured_value       REAL,
+    threshold            REAL,
+    detail               TEXT,
+    introduced_sprint_id INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_mcf_sprint
-    ON method_complexity_findings(sprint_id, repo_full_name);
+CREATE INDEX IF NOT EXISTS idx_mcf_repo
+    ON method_complexity_findings(repo_full_name);
+CREATE INDEX IF NOT EXISTS idx_mcf_project
+    ON method_complexity_findings(project_id);
 
 -- Per-student bad-line-weighted attribution for `method_complexity_findings`
--- (T-CX). `weighted_lines` is the raw badness sum (lines inside the
--- offending construct count 3x, control-flow lines count 2x, plain method
--- lines count 1x); `weight` is `weighted_lines / total_weighted_lines`,
--- summing to 1 across the method's authors. `lines_attributed` is the
--- raw line count (no weighting) for transparency.
+-- (T-CX / T-P3.4). `weighted_lines` is the raw badness sum (lines
+-- inside the offending construct count 3x, control-flow lines count
+-- 2x, plain method lines count 1x); `weight` is
+-- `weighted_lines / total_weighted_lines`, summing to 1 across the
+-- method's authors. `lines_attributed` is the raw line count (no
+-- weighting) for transparency. Sprint-free: artifact-shape parent
+-- carries the introduced_sprint_id for rendering provenance.
 CREATE TABLE IF NOT EXISTS method_complexity_attribution (
     finding_id        INTEGER NOT NULL,
     student_id        TEXT    NOT NULL,
     lines_attributed  INTEGER NOT NULL,
     weighted_lines    REAL    NOT NULL,
     weight            REAL    NOT NULL,         -- in [0, 1]
-    sprint_id         INTEGER NOT NULL,
     PRIMARY KEY (finding_id, student_id),
     FOREIGN KEY (finding_id) REFERENCES method_complexity_findings(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_mca_sprint
-    ON method_complexity_attribution(sprint_id);
-
--- Per-(repo, sprint) outcome row for the testability scan (T-CX). Same
--- shape as `static_analysis_runs` so the report can render the scan
--- status (OK / SKIPPED_NO_SOURCES / SKIPPED_HEAD_UNCHANGED) honestly.
--- Re-runs check this row first: when `head_sha` matches the current
--- repo HEAD AND the row is OK, the AST scan is a no-op and classic
--- findings are re-derived from `method_metrics` only — preserving the
--- "report regenerate is seconds" property after a config tweak.
+-- Per-repo outcome row for the testability scan (T-CX / T-P3.4). Same
+-- shape as `architecture_runs` — artifact-level (no sprint_id).
+-- `head_sha` lets `run-all` skip re-scanning when the working tree
+-- hasn't moved since the last successful run. Re-runs `INSERT OR
+-- REPLACE` keyed on `repo_full_name`.
 CREATE TABLE IF NOT EXISTS method_complexity_runs (
     repo_full_name TEXT    NOT NULL,
-    sprint_id      INTEGER NOT NULL,
     status         TEXT    NOT NULL,           -- OK | SKIPPED_NO_SOURCES | SKIPPED_HEAD_UNCHANGED | CRASHED
     findings_count INTEGER NOT NULL DEFAULT 0,
     duration_ms    INTEGER,
     head_sha       TEXT,
     diagnostics    TEXT,
     ran_at         TEXT    NOT NULL,           -- ISO-8601 UTC
-    PRIMARY KEY (repo_full_name, sprint_id)
+    PRIMARY KEY (repo_full_name)
 );
 
 -- Per-(analyzer, repo, sprint) outcome row so the report can render

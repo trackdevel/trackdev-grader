@@ -1190,34 +1190,27 @@ pub fn run_pipeline(
         );
     }
 
-    // T-CX (step 8): per-method complexity & testability scan. Same
-    // gating shape as architecture: scoped to projects with new data.
-    // No external rules file — thresholds live in `course.toml
-    // [detector_thresholds] complexity_*`. Each (repo, sprint) gets a
-    // `method_complexity_runs` row with a head-SHA cache so re-runs
-    // against an unchanged repo short-circuit instantly. Always runs;
-    // there's no `skip_complexity` toggle — the cache makes that
-    // unnecessary.
-    for g in groups
-        .iter()
-        .filter(|g| projects_with_new_data.contains(&g.project_id))
-    {
+    // T-P3.4 PR 2: complexity scan, artifact-shape (per-repo, sprint-free).
+    // Runs once per project per pipeline invocation; the
+    // method_complexity_runs head_sha gate (inside scan_project_to_db)
+    // skips repos whose working tree hasn't moved. We deliberately do
+    // NOT gate on `projects_with_new_data` here — head_sha is the
+    // correct cache key for "did the artifact change". The
+    // `sprint_id_for_metrics_cache` is forwarded only to the still-per-sprint
+    // `method_metrics` cache table; finding/attribution/runs rows are
+    // sprint-free. Use the most recent sprint as the metrics-cache key
+    // so the cached method_metrics rows reflect the latest delivery.
+    for g in &groups {
         let project_root = opts.entregues_dir.join(&g.name);
-        for sid in &g.sprint_ids {
-            if let Err(e) = sprint_grader_quality::testability::scan_project_to_db(
-                &db.conn,
-                &project_root,
-                *sid,
-                g.project_id,
-                &config.detector_thresholds,
-            ) {
-                warn!(
-                    project = %g.name,
-                    sprint_id = sid,
-                    error = %e,
-                    "complexity scan failed"
-                );
-            }
+        let metrics_sprint = g.sprint_ids.last().copied().unwrap_or(0);
+        if let Err(e) = sprint_grader_quality::testability::scan_project_to_db(
+            &db.conn,
+            &project_root,
+            metrics_sprint,
+            g.project_id,
+            &config.detector_thresholds,
+        ) {
+            warn!(project = %g.name, error = %e, "complexity scan failed");
         }
     }
 

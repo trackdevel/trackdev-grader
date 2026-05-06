@@ -1509,12 +1509,12 @@ fn write_section_b(
     let pr_ls = pr_ls_for_team(conn, sprint_id, project_id)?;
     let task_stmts = task_stmts_for_team(conn, sprint_id, project_id)?;
     let pr_stmts = pr_stmts_for_team(conn, sprint_id, project_id)?;
-    // T-P3.4: architecture violations are now artifact-level and rendered
-    // once at the top of the multi-sprint REPORT.md by
-    // `write_artifact_section`; the per-sprint section B no longer
-    // includes them.
-    let complexity_per_student = complexity_findings_per_student(conn, sprint_id, project_id)?;
-    let qualified_by_basename = qualified_repo_names_by_basename(conn);
+    // T-P3.4 (PR 1 + PR 2): architecture violations and complexity
+    // findings are artifact-level and rendered once at the top of the
+    // multi-sprint REPORT.md by `write_artifact_section`. The
+    // per-sprint Section B no longer includes them, so the
+    // qualified-repo lookup that complexity used is no longer needed
+    // here.
 
     // Per-PR documentation score (heuristic title+description rubric or
     // LLM judge). Populates a single column in the per-PR table below.
@@ -1902,14 +1902,9 @@ fn write_section_b(
             buf.push('\n');
         }
 
-        // T-P3.4: per-sprint architecture block was removed — renders once
-        // in `write_artifact_section` at the top of the document.
-
-        if let Some(findings) = complexity_per_student.get(sid) {
-            if !findings.is_empty() {
-                write_student_complexity_block(buf, findings, &qualified_by_basename);
-            }
-        }
+        // T-P3.4: per-sprint architecture and complexity blocks were
+        // removed — both render once in `write_artifact_section` at the
+        // top of the document.
 
         if let Some((sa_data, top_n)) = sa_per_student {
             if let Some(findings) = sa_data.get(sid) {
@@ -1927,10 +1922,11 @@ fn write_section_b(
 /// T-P3.4: top-level "Code quality on main" section. Rendered once per
 /// project at the top of the multi-sprint REPORT.md, before the
 /// per-sprint behavioural sections. Reads project-keyed
-/// `architecture_violations` and the `student_artifact_flags` rows
-/// fired by `detect_artifact_flags_for_project_id`. Per-member
-/// subsections list each student's blame-attributed violations on
-/// main HEAD, with clickable file links and student-friendly rule prose.
+/// `architecture_violations`, `method_complexity_findings`, and the
+/// `student_artifact_flags` rows fired by
+/// `detect_artifact_flags_for_project_id`. Per-member subsections list
+/// each student's blame-attributed violations and complexity findings
+/// on main HEAD, with clickable file links and student-friendly prose.
 fn write_artifact_section(
     buf: &mut String,
     conn: &Connection,
@@ -1938,21 +1934,24 @@ fn write_artifact_section(
     heading_level: usize,
 ) -> rusqlite::Result<()> {
     let arch_per_student = architecture_violations_per_student(conn, project_id)?;
-    if arch_per_student.is_empty() {
+    let complexity_per_student = complexity_findings_per_student(conn, project_id)?;
+    if arch_per_student.is_empty() && complexity_per_student.is_empty() {
         // Nothing to say at the artifact level on this project. Don't
         // emit an empty header — keeps minimal-fixture renders quiet.
         return Ok(());
     }
+    let qualified_by_basename = qualified_repo_names_by_basename(conn);
 
     let h = "#".repeat(heading_level);
     let h_member = "#".repeat(heading_level + 1);
     let _ = writeln!(buf, "{} Code quality on main\n", h);
     let _ = writeln!(
         buf,
-        "Per-member breakdown of architecture violations surviving on the \
-default branch. Each bullet links to the offending file at HEAD; the \
-`% of lines` suffix is the student's blame share over the offending \
-range. Sprint-level behavioural metrics follow below.\n"
+        "Per-member breakdown of architecture violations and \
+complexity / testability findings surviving on the default branch. \
+Each bullet links to the offending file at HEAD; the `% of lines` \
+suffix on architecture rows is the student's blame share over the \
+offending range. Sprint-level behavioural metrics follow below.\n"
     );
 
     // Resolve student_id → display name once so the section reads in
@@ -1969,17 +1968,25 @@ range. Sprint-level behavioural metrics follow below.\n"
     drop(name_stmt);
 
     for (student_id, full_name) in students {
-        let violations = match arch_per_student.get(&student_id) {
-            Some(v) if !v.is_empty() => v,
-            _ => continue,
-        };
+        let arch = arch_per_student.get(&student_id);
+        let complexity = complexity_per_student.get(&student_id);
+        let has_arch = arch.is_some_and(|v| !v.is_empty());
+        let has_complexity = complexity.is_some_and(|v| !v.is_empty());
+        if !has_arch && !has_complexity {
+            continue;
+        }
         let display = if full_name.is_empty() {
             student_id.clone()
         } else {
             full_name
         };
         let _ = writeln!(buf, "{} {}\n", h_member, md_escape(&display));
-        write_student_architecture_block(buf, violations);
+        if let Some(violations) = arch {
+            write_student_architecture_block(buf, violations);
+        }
+        if let Some(findings) = complexity {
+            write_student_complexity_block(buf, findings, &qualified_by_basename);
+        }
     }
 
     Ok(())
@@ -2207,9 +2214,10 @@ struct ComplexityFinding {
 
 fn complexity_findings_per_student(
     conn: &Connection,
-    sprint_id: i64,
     project_id: i64,
 ) -> rusqlite::Result<HashMap<String, Vec<ComplexityFinding>>> {
+    // T-P3.4 PR 2: artifact-shape, project-keyed; gating flag now lives
+    // in `student_artifact_flags`, not the sprint-keyed `flags` table.
     let mut stmt = conn.prepare(
         "SELECT a.student_id,
                 f.repo_full_name, f.file_path, f.class_name, f.method_name,
@@ -2219,19 +2227,19 @@ fn complexity_findings_per_student(
          FROM method_complexity_attribution a
          JOIN method_complexity_findings f ON f.id = a.finding_id
          JOIN students s ON s.id = a.student_id
-         WHERE a.sprint_id = ?
+         WHERE f.project_id = ?
            AND s.team_project_id = ?
            AND a.weight > 0
            AND EXISTS (
-             SELECT 1 FROM flags fl
-             WHERE fl.sprint_id = a.sprint_id
+             SELECT 1 FROM student_artifact_flags fl
+             WHERE fl.project_id = s.team_project_id
                AND fl.student_id = a.student_id
                AND fl.flag_type = 'COMPLEXITY_HOTSPOT'
            )
          ORDER BY a.weight DESC, f.file_path, f.start_line",
     )?;
     let mut result: HashMap<String, Vec<ComplexityFinding>> = HashMap::new();
-    let rows = stmt.query_map(rusqlite::params![sprint_id, project_id], |r| {
+    let rows = stmt.query_map(rusqlite::params![project_id, project_id], |r| {
         Ok((
             r.get::<_, String>(0)?,
             ComplexityFinding {
@@ -2362,6 +2370,13 @@ fn write_section_complexity_attribution(
         i64,
         String,
     );
+    // T-P3.4 PR 2: scoping is by f.project_id (artifact-shape).
+    // sprint_id is unused now but kept on the function signature so the
+    // multi-sprint outer loop callsite doesn't have to special-case the
+    // professor-view branch. The flag-table lookup below still uses
+    // sprint_id (because COMPLEXITY_HOTSPOT now lives in
+    // student_artifact_flags, which is project-keyed — see below).
+    let _ = sprint_id;
     let mut stmt = conn.prepare(
         "SELECT a.student_id, COALESCE(s.full_name, s.id),
                 f.severity, a.weight, f.rule_key, f.file_path,
@@ -2370,11 +2385,11 @@ fn write_section_complexity_attribution(
          FROM method_complexity_attribution a
          JOIN method_complexity_findings f ON f.id = a.finding_id
          JOIN students s ON s.id = a.student_id
-         WHERE a.sprint_id = ? AND s.team_project_id = ?
+         WHERE f.project_id = ? AND s.team_project_id = ?
          ORDER BY s.full_name, a.weight DESC, f.file_path, f.start_line",
     )?;
     let rows: Vec<Row> = stmt
-        .query_map(rusqlite::params![sprint_id, project_id], |r| {
+        .query_map(rusqlite::params![project_id, project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -2450,13 +2465,16 @@ fn write_section_complexity_attribution(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // T-P3.4 PR 2: COMPLEXITY_HOTSPOT moved to student_artifact_flags
+    // (project-keyed, sprint-free).
     type FlagRow = (String, String, String);
     let mut flag_stmt = conn.prepare(
         "SELECT student_id, severity, COALESCE(details, '')
-         FROM flags WHERE sprint_id = ? AND flag_type = 'COMPLEXITY_HOTSPOT'",
+         FROM student_artifact_flags
+         WHERE project_id = ? AND flag_type = 'COMPLEXITY_HOTSPOT'",
     )?;
     let flags: BTreeMap<String, (String, String)> = flag_stmt
-        .query_map([sprint_id], |r| {
+        .query_map([project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -4018,16 +4036,17 @@ mod tests {
                 ls_per_point_deviation REAL, PRIMARY KEY (group_id, task_id));
              CREATE TABLE method_complexity_findings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sprint_id INTEGER NOT NULL, project_id INTEGER NOT NULL,
+                project_id INTEGER NOT NULL,
                 repo_full_name TEXT NOT NULL, file_path TEXT NOT NULL,
                 class_name TEXT, method_name TEXT NOT NULL,
                 start_line INTEGER NOT NULL, end_line INTEGER NOT NULL,
                 rule_key TEXT NOT NULL, severity TEXT NOT NULL,
-                measured_value REAL, threshold REAL, detail TEXT);
+                measured_value REAL, threshold REAL, detail TEXT,
+                introduced_sprint_id INTEGER);
              CREATE TABLE method_complexity_attribution (
                 finding_id INTEGER NOT NULL, student_id TEXT NOT NULL,
                 lines_attributed INTEGER NOT NULL, weighted_lines REAL NOT NULL,
-                weight REAL NOT NULL, sprint_id INTEGER NOT NULL,
+                weight REAL NOT NULL,
                 PRIMARY KEY (finding_id, student_id));
              CREATE VIEW IF NOT EXISTS pr_authors AS
                 SELECT pr.id AS pr_id, t.assignee_id AS student_id,
@@ -5026,10 +5045,10 @@ mod tests {
     ) {
         conn.execute(
             "INSERT INTO method_complexity_findings
-                (id, sprint_id, project_id, repo_full_name, file_path, class_name,
+                (id, project_id, repo_full_name, file_path, class_name,
                  method_name, start_line, end_line, rule_key, severity,
                  measured_value, threshold, detail)
-             VALUES (?, 10, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')",
+             VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')",
             rusqlite::params![
                 finding_id,
                 repo_full_name,
@@ -5055,17 +5074,19 @@ mod tests {
     ) {
         conn.execute(
             "INSERT INTO method_complexity_attribution
-                (finding_id, student_id, lines_attributed, weighted_lines, weight, sprint_id)
-             VALUES (?, ?, 5, 10.0, ?, 10)",
+                (finding_id, student_id, lines_attributed, weighted_lines, weight)
+             VALUES (?, ?, 5, 10.0, ?)",
             rusqlite::params![finding_id, student_id, weight],
         )
         .unwrap();
     }
 
     fn seed_complexity_flag(conn: &Connection, student_id: &str, severity: &str) {
+        // T-P3.4 PR 2: COMPLEXITY_HOTSPOT lives in student_artifact_flags now.
         conn.execute(
-            "INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
-             VALUES (?, 10, 'COMPLEXITY_HOTSPOT', ?, '{}')",
+            "INSERT INTO student_artifact_flags
+                (student_id, project_id, flag_type, severity, details)
+             VALUES (?, 1, 'COMPLEXITY_HOTSPOT', ?, '{}')",
             rusqlite::params![student_id, severity],
         )
         .unwrap();
@@ -5089,9 +5110,11 @@ mod tests {
 
     #[test]
     fn per_student_complexity_block_renders_method_link_with_weight_and_anchor() {
-        // COMPLEXITY_HOTSPOT fires for u1 → the per-student complexity block
-        // surfaces every finding attributed to u1 with its method link, line
-        // anchor, severity, threshold tail, and `· N% of lines` blame suffix.
+        // T-P3.4 PR 2: COMPLEXITY_HOTSPOT fires (in student_artifact_flags)
+        // → the per-member complexity block in the artifact section of the
+        // multi-sprint REPORT.md renders every finding attributed to u1
+        // with its method link, line anchor, severity, threshold tail, and
+        // `· N% of lines` blame suffix.
         let conn = mk_conn();
         seed_complexity_finding(
             &conn,
@@ -5110,7 +5133,7 @@ mod tests {
         seed_complexity_attribution(&conn, 1, "u1", 0.6);
         seed_complexity_flag(&conn, "u1", "WARNING");
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("**Complexity & testability:** 1"));
         assert!(body.contains("`UserController.register()`"));
@@ -5126,7 +5149,7 @@ mod tests {
     #[test]
     fn per_student_complexity_block_one_bullet_per_finding_no_grouping() {
         // Two findings on the same method must render as TWO bullets in the
-        // per-student block — one per (file, method, rule) tuple — because
+        // per-member block — one per (file, method, rule) tuple — because
         // weights can differ per rule.
         let conn = mk_conn();
         seed_complexity_finding(
@@ -5161,7 +5184,7 @@ mod tests {
         seed_complexity_attribution(&conn, 2, "u1", 0.5);
         seed_complexity_flag(&conn, "u1", "CRITICAL");
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let method_occurrences = body.matches("`A.f()`").count();
         assert_eq!(
