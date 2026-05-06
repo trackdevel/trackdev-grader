@@ -217,6 +217,65 @@ pub fn flag_severity_for(
     .ok()
 }
 
+// ---- T-P3.4 artifact-flag helpers (`student_artifact_flags`) ----
+
+pub fn count_artifact_flags(conn: &Connection, project_id: i64, flag_type: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM student_artifact_flags
+         WHERE project_id = ? AND flag_type = ?",
+        params![project_id, flag_type],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+pub fn count_artifact_flags_for(
+    conn: &Connection,
+    project_id: i64,
+    flag_type: &str,
+    student: &str,
+) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM student_artifact_flags
+         WHERE project_id = ? AND flag_type = ? AND student_id = ?",
+        params![project_id, flag_type, student],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+pub fn artifact_flag_details_for(
+    conn: &Connection,
+    project_id: i64,
+    flag_type: &str,
+    student: &str,
+) -> Option<Value> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT details FROM student_artifact_flags
+             WHERE project_id = ? AND flag_type = ? AND student_id = ? LIMIT 1",
+            params![project_id, flag_type, student],
+            |r| r.get(0),
+        )
+        .ok();
+    raw.map(|s| serde_json::from_str(&s).expect("details is JSON"))
+}
+
+pub fn artifact_flag_severity_for(
+    conn: &Connection,
+    project_id: i64,
+    flag_type: &str,
+    student: &str,
+) -> Option<String> {
+    conn.query_row(
+        "SELECT severity FROM student_artifact_flags
+         WHERE project_id = ? AND flag_type = ? AND student_id = ? LIMIT 1",
+        params![project_id, flag_type, student],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
 /// All flag types fired in the given sprint, deduped, sorted alphabetically.
 /// Useful in negative tests that want to assert "none of these specific types"
 /// without listing every irrelevant detector.
