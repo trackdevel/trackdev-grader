@@ -1046,14 +1046,27 @@ within ±1 MAD-z. Empty when MAD is zero or the student has no surviving code.\n
         }
     }
 
-    // PR submission timing SVG (horizontal stacked bars, one row per student)
+    // PR submission timing SVG (horizontal stacked bars, one row per student).
+    // Crediting matches the XLSX timing sheet: each PR contributes to its
+    // primary assignee only (max points, ties → max task count → student_id),
+    // so the team-wide totals are conserved on multi-assignee PRs.
     let mut rows: Vec<StackedRow> = Vec::new();
     for s in &students {
         let mut raw_counts: HashMap<String, i64> = HashMap::new();
         let mut stmt = conn.prepare(
-            "SELECT pst.tier, COUNT(*) FROM pr_submission_tiers pst
-             JOIN pull_requests pr ON pr.id = pst.pr_id
-             WHERE pst.sprint_id = ? AND pr.author_id = ?
+            "WITH primary_author AS (
+                 SELECT pa.pr_id, pa.student_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY pa.pr_id
+                            ORDER BY pa.author_points DESC,
+                                     pa.author_task_count DESC,
+                                     pa.student_id
+                        ) AS rn
+                 FROM pr_authors pa
+             )
+             SELECT pst.tier, COUNT(*) FROM pr_submission_tiers pst
+             JOIN primary_author p ON p.pr_id = pst.pr_id AND p.rn = 1
+             WHERE pst.sprint_id = ? AND p.student_id = ?
              GROUP BY pst.tier",
         )?;
         let counts = stmt
@@ -1806,13 +1819,18 @@ fn write_section_b(
         }
 
         // PR table — only PRs whose linked task is a DONE TASK/BUG show up.
+        // Membership is derived from task assignment (the canonical TrackDev
+        // source) via task_pull_requests → tasks.assignee_id, NOT from
+        // pull_requests.author_id. A student sees every PR linked to a DONE
+        // task they're assigned to, even when `pr.author_id` is NULL or
+        // points to a different github identity.
         let mut stmt = conn.prepare(
             "SELECT DISTINCT pr.id, pr.pr_number, pr.repo_full_name, pr.title, pr.url,
                     pr.additions, pr.deletions, pr.attribution_errors
              FROM pull_requests pr
              JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
              JOIN tasks t ON t.id = tpr.task_id
-             WHERE t.sprint_id = ? AND pr.author_id = ?
+             WHERE t.sprint_id = ? AND t.assignee_id = ?
                AND t.type != 'USER_STORY' AND t.status = 'DONE'
              ORDER BY pr.pr_number",
         )?;
@@ -2592,12 +2610,14 @@ fn write_orphan_pr_annex(
     if rows.is_empty() {
         return Ok(());
     }
-    let _ = writeln!(buf, "{} Annex: orphan pull requests\n", h2);
+    let _ = writeln!(buf, "{} Ghost contributor — orphan pull requests\n", h2);
     let _ = writeln!(
         buf,
-        "PRs without linked tasks have no TrackDev authors and are excluded \
-         from every author-keyed metric (the task-assignee model has no \
-         author to attribute them to). Listed for review.\n"
+        "These PRs touch this team's repos but link to **no TrackDev tasks**. \
+Under the task-assignee author model they have no student to attribute to, \
+so they're collected here as if produced by a synthetic 'ghost' team \
+member: visible for review, excluded from every author-keyed metric. \
+Each row is a hint to either link a task or mark the PR as out-of-scope.\n"
     );
     push_table_header(buf, &["#", "Repo", "Title", "Merged"]);
     for (_id, num, repo, title, url, merged_at) in rows {
@@ -3168,6 +3188,92 @@ fn write_team_identity_map_into(
 
     let h = "#".repeat(depth);
     let _ = writeln!(buf, "{} Team identity map\n", h);
+
+    // Cross-project guard. By workspace invariant a PR's task-assignee set
+    // must lie entirely within one project; if it ever spans two, the team
+    // mapping itself is corrupt and every downstream metric is suspect.
+    // List offenders here before the identity table so the warning is
+    // unmissable. SELECT counts assignees by team_project_id over the
+    // pr_authors view; the OFFENDERS subquery then surfaces the actual PRs.
+    let mut offender_stmt = conn.prepare(
+        "SELECT pr.id, pr.pr_number, pr.repo_full_name, pr.title, pr.url,
+                GROUP_CONCAT(DISTINCT p.name) AS projects
+         FROM pull_requests pr
+         JOIN pr_authors pa ON pa.pr_id = pr.id
+         JOIN students s ON s.id = pa.student_id
+         JOIN projects p ON p.id = s.team_project_id
+         WHERE pr.id IN (
+             SELECT pa2.pr_id FROM pr_authors pa2
+             JOIN students s2 ON s2.id = pa2.student_id
+             WHERE s2.team_project_id = ?
+         )
+         GROUP BY pr.id
+         HAVING COUNT(DISTINCT s.team_project_id) > 1
+         ORDER BY pr.pr_number",
+    )?;
+    type OffenderRow = (
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let offenders: Vec<OffenderRow> = offender_stmt
+        .query_map([project_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(offender_stmt);
+    if offenders.is_empty() {
+        let _ = writeln!(
+            buf,
+            "_All PRs that touch this team are scoped to it (no cross-project PRs)._\n"
+        );
+    } else {
+        let _ = writeln!(
+            buf,
+            "**⚠ Cross-project PRs detected.** Every PR that touches this \
+team should have all its task assignees in the same project. The PRs below \
+are linked to tasks across multiple projects, which means a downstream \
+metric is reading a corrupted team mapping. Resolve before trusting this \
+report.\n"
+        );
+        for (_id, num, repo, title, url, projects_csv) in &offenders {
+            let title_str = title.clone().unwrap_or_default();
+            let repo_short = repo
+                .as_deref()
+                .and_then(|s| s.rsplit('/').next())
+                .unwrap_or("")
+                .to_string();
+            let pr_label = match num {
+                Some(n) => format!("#{}", n),
+                None => "(unnumbered)".to_string(),
+            };
+            let pr_cell = match url.as_deref() {
+                Some(u) if u.starts_with("http") => md_link(&pr_label, u),
+                _ => pr_label.clone(),
+            };
+            let projects_label = projects_csv.clone().unwrap_or_default();
+            let _ = writeln!(
+                buf,
+                "- {} in `{}` — {}  \n  _projects on this PR: {}_",
+                pr_cell,
+                md_escape(&repo_short),
+                md_escape(&title_str),
+                md_escape(&projects_label),
+            );
+        }
+        buf.push('\n');
+    }
+
     push_table_header(
         buf,
         &[
@@ -3917,6 +4023,15 @@ mod tests {
                 lines_attributed INTEGER NOT NULL, weighted_lines REAL NOT NULL,
                 weight REAL NOT NULL, sprint_id INTEGER NOT NULL,
                 PRIMARY KEY (finding_id, student_id));
+             CREATE VIEW IF NOT EXISTS pr_authors AS
+                SELECT pr.id AS pr_id, t.assignee_id AS student_id,
+                       SUM(COALESCE(t.estimation_points, 0)) AS author_points,
+                       COUNT(*) AS author_task_count
+                FROM pull_requests pr
+                JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
+                JOIN tasks t ON t.id = tpr.task_id
+                WHERE t.type != 'USER_STORY' AND t.assignee_id IS NOT NULL
+                GROUP BY pr.id, t.assignee_id;
              INSERT INTO projects VALUES (1, 'pds26-1a');
              INSERT INTO sprints VALUES (10, 1, 'Sprint 1', '2026-02-16', '2026-03-08');
              INSERT INTO sprints VALUES (11, 1, 'Sprint 2', '2026-03-09', '2026-03-29');

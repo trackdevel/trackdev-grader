@@ -241,9 +241,9 @@ fn team_inequality_member_value(
                  JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
                  JOIN tasks t ON t.id = tpr.task_id
                  JOIN pr_commits pc ON pc.pr_id = pr.id
-                 JOIN students s ON s.id = pr.author_id
+                 JOIN students s ON s.id = t.assignee_id
                  WHERE t.sprint_id = ? AND t.type != 'USER_STORY'
-                   AND pr.author_id = ? AND s.team_project_id = ?",
+                   AND t.assignee_id = ? AND s.team_project_id = ?",
                 params![sprint_id, student_id, project_id],
                 |r| r.get::<_, i64>(0),
             )
