@@ -34,6 +34,12 @@ const BACKOFF_BASE_SECS: u64 = 2;
 pub struct DeepseekClient {
     client: Client,
     model: String,
+    /// V4 thinking mode. When `Some`, emitted in the request body as
+    /// `{"thinking": {"type": <value>}}`. When `None`, the field is
+    /// omitted and the server applies its own default (currently
+    /// `enabled` for V4 models). Validated upstream in `Config::load`
+    /// to one of `"enabled"` or `"disabled"`.
+    thinking: Option<String>,
 }
 
 impl DeepseekClient {
@@ -54,21 +60,36 @@ impl DeepseekClient {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("reqwest client build");
-        Ok(Self { client, model })
+        Ok(Self {
+            client,
+            model,
+            thinking: None,
+        })
+    }
+
+    /// Builder: pin V4 thinking mode (`"enabled"` or `"disabled"`).
+    /// Pass `None` to leave it server-default.
+    pub fn with_thinking(mut self, thinking: Option<String>) -> Self {
+        self.thinking = thinking;
+        self
     }
 
     fn build_body(&self, system: &str, messages: &[Value], max_tokens: u32) -> Value {
         let mut full = Vec::with_capacity(messages.len() + 1);
         full.push(json!({"role": "system", "content": system}));
         full.extend(messages.iter().cloned());
-        json!({
+        let mut body = json!({
             "model": self.model,
             "messages": full,
             "max_tokens": max_tokens,
             "temperature": 0,
             "response_format": {"type": "json_object"},
             "stream": false,
-        })
+        });
+        if let Some(mode) = &self.thinking {
+            body["thinking"] = json!({"type": mode});
+        }
+        body
     }
 
     pub fn complete(
@@ -190,6 +211,26 @@ mod tests {
         assert_eq!(msgs[0]["content"], "You are a reviewer.");
         assert_eq!(msgs[1]["role"], "user");
         assert_eq!(msgs[1]["content"], "hello");
+    }
+
+    #[test]
+    fn build_body_omits_thinking_field_by_default() {
+        let body = fixture_client().build_body("sys", &[json!({"role": "user", "content": "x"})], 16);
+        assert!(body.get("thinking").is_none(), "thinking must default-omit");
+    }
+
+    #[test]
+    fn build_body_emits_thinking_disabled_when_pinned() {
+        let c = fixture_client().with_thinking(Some("disabled".to_string()));
+        let body = c.build_body("sys", &[json!({"role": "user", "content": "x"})], 16);
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn build_body_emits_thinking_enabled_when_pinned() {
+        let c = fixture_client().with_thinking(Some("enabled".to_string()));
+        let body = c.build_body("sys", &[json!({"role": "user", "content": "x"})], 16);
+        assert_eq!(body["thinking"]["type"], "enabled");
     }
 
     #[test]
