@@ -1129,78 +1129,10 @@ within ±1 MAD-z. Empty when MAD is zero or the student has no surviving code.\n
         );
     }
 
-    // T-P2.2: architecture conformance roll-up. Reads
-    // `architecture_violations` totals + per-rule top-3 so the team sees
-    // both the headline count and which rules are biting.
-    let arch_total: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM architecture_violations av
-             JOIN sprints s ON s.id = av.sprint_id
-             WHERE s.project_id = ? AND av.sprint_id = ?",
-            rusqlite::params![project_id, sprint_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    if arch_total > 0 {
-        let _ = writeln!(buf, "{} Architecture conformance\n", h3);
-        // Severity breakdown across the whole project for this sprint.
-        let mut sev_stmt = conn.prepare(
-            "SELECT av.severity, COUNT(*) FROM architecture_violations av
-             JOIN sprints s ON s.id = av.sprint_id
-             WHERE s.project_id = ? AND av.sprint_id = ?
-             GROUP BY av.severity",
-        )?;
-        let mut crit = 0i64;
-        let mut warn = 0i64;
-        let mut info_n = 0i64;
-        for row in sev_stmt.query_map(rusqlite::params![project_id, sprint_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })? {
-            let (sev, n) = row?;
-            match sev.to_ascii_uppercase().as_str() {
-                "CRITICAL" => crit = n,
-                "WARNING" => warn = n,
-                "INFO" => info_n = n,
-                _ => {}
-            }
-        }
-        drop(sev_stmt);
-        let _ = writeln!(
-            buf,
-            "**Total violations:** {} ({} critical · {} warning · {} info). \
-Severity bands per `architecture.toml`. Per-student attribution \
-(by dominant author of the offending file) follows in Section B.\n",
-            arch_total, crit, warn, info_n
-        );
-
-        // Stub for violations whose offending region has no surviving
-        // authorship — they appear nowhere in Section B because there is
-        // no student to blame. Surface the count here so the team total
-        // is reconcilable with the per-student breakdowns.
-        let unattributed: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM architecture_violations av
-                 JOIN sprints s ON s.id = av.sprint_id
-                 WHERE s.project_id = ? AND av.sprint_id = ?
-                   AND NOT EXISTS (
-                     SELECT 1 FROM architecture_violation_attribution a
-                     WHERE a.violation_rowid = av.rowid
-                       AND a.weight > 0
-                   )",
-                rusqlite::params![project_id, sprint_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        if unattributed > 0 {
-            let _ = writeln!(
-                buf,
-                "**Unattributed violations:** {} — offending lines have no \
-surviving authorship in this sprint, so they are not assigned to any \
-student in Section B.\n",
-                unattributed
-            );
-        }
-    }
+    // T-P3.4: per-sprint architecture conformance roll-up was removed —
+    // architecture is an artifact-level concern now, rendered once at the
+    // top of the multi-sprint REPORT.md (`write_artifact_section`),
+    // grading the code on main HEAD rather than per-sprint snapshots.
 
     // Flag severity roll-up for the team
     let critical = count_severity(conn, sprint_id, project_id, "CRITICAL");
@@ -1364,19 +1296,19 @@ fn humanize_rule_name(rule: &str) -> String {
 }
 
 /// Build the per-student architecture-violation map from
-/// `architecture_violation_attribution`. Rows are filtered to students
-/// who fired `ARCHITECTURE_HOTSPOT` this sprint (consolidation: per-student
-/// detail only appears when the flag is on) and to attributions whose
-/// `weight > 0` (a 0-share row would render as "0% of lines", which is
-/// the same as not authoring the offending region — pure noise).
+/// `architecture_violation_attribution` (T-P3.4: artifact-shape, project-keyed).
+/// Rows are filtered to students who fired `ARCHITECTURE_HOTSPOT` (which
+/// now lives in `student_artifact_flags`, not the sprint-keyed `flags`
+/// table) and to attributions whose `weight > 0` (a 0-share row would
+/// render as "0% of lines", which is the same as not authoring the
+/// offending region — pure noise).
 ///
 /// `weight` here is a true blame share: `lines_authored / total_lines`
 /// over the violation's start/end range, computed by the architecture
-/// stage's blame attribution pass. A weight of 1.0 means the student owns
-/// every line of the offending region; 0.5 means half of them.
+/// stage's blame attribution pass. A weight of 1.0 means the student
+/// owns every line of the offending region; 0.5 means half of them.
 fn architecture_violations_per_student(
     conn: &Connection,
-    sprint_id: i64,
     project_id: i64,
 ) -> rusqlite::Result<HashMap<String, Vec<AttributedArchViolation>>> {
     let qualified_by_basename = qualified_repo_names_by_basename(conn);
@@ -1388,12 +1320,11 @@ fn architecture_violations_per_student(
          FROM architecture_violation_attribution a
          JOIN architecture_violations av ON av.rowid = a.violation_rowid
          JOIN students s ON s.id = a.student_id
-         WHERE a.sprint_id = ?
-           AND s.team_project_id = ?
+         WHERE s.team_project_id = ?
            AND a.weight > 0
            AND EXISTS (
-             SELECT 1 FROM flags f
-             WHERE f.sprint_id = a.sprint_id
+             SELECT 1 FROM student_artifact_flags f
+             WHERE f.project_id = s.team_project_id
                AND f.student_id = a.student_id
                AND f.flag_type = 'ARCHITECTURE_HOTSPOT'
            )
@@ -1412,7 +1343,7 @@ fn architecture_violations_per_student(
         f64,
     );
     let rows: Vec<Row> = stmt
-        .query_map(rusqlite::params![sprint_id, project_id], |r| {
+        .query_map([project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -1578,7 +1509,10 @@ fn write_section_b(
     let pr_ls = pr_ls_for_team(conn, sprint_id, project_id)?;
     let task_stmts = task_stmts_for_team(conn, sprint_id, project_id)?;
     let pr_stmts = pr_stmts_for_team(conn, sprint_id, project_id)?;
-    let arch_per_student = architecture_violations_per_student(conn, sprint_id, project_id)?;
+    // T-P3.4: architecture violations are now artifact-level and rendered
+    // once at the top of the multi-sprint REPORT.md by
+    // `write_artifact_section`; the per-sprint section B no longer
+    // includes them.
     let complexity_per_student = complexity_findings_per_student(conn, sprint_id, project_id)?;
     let qualified_by_basename = qualified_repo_names_by_basename(conn);
 
@@ -1968,11 +1902,8 @@ fn write_section_b(
             buf.push('\n');
         }
 
-        if let Some(violations) = arch_per_student.get(sid) {
-            if !violations.is_empty() {
-                write_student_architecture_block(buf, violations);
-            }
-        }
+        // T-P3.4: per-sprint architecture block was removed — renders once
+        // in `write_artifact_section` at the top of the document.
 
         if let Some(findings) = complexity_per_student.get(sid) {
             if !findings.is_empty() {
@@ -1990,6 +1921,67 @@ fn write_section_b(
 
         buf.push_str("---\n\n");
     }
+    Ok(())
+}
+
+/// T-P3.4: top-level "Code quality on main" section. Rendered once per
+/// project at the top of the multi-sprint REPORT.md, before the
+/// per-sprint behavioural sections. Reads project-keyed
+/// `architecture_violations` and the `student_artifact_flags` rows
+/// fired by `detect_artifact_flags_for_project_id`. Per-member
+/// subsections list each student's blame-attributed violations on
+/// main HEAD, with clickable file links and student-friendly rule prose.
+fn write_artifact_section(
+    buf: &mut String,
+    conn: &Connection,
+    project_id: i64,
+    heading_level: usize,
+) -> rusqlite::Result<()> {
+    let arch_per_student = architecture_violations_per_student(conn, project_id)?;
+    if arch_per_student.is_empty() {
+        // Nothing to say at the artifact level on this project. Don't
+        // emit an empty header — keeps minimal-fixture renders quiet.
+        return Ok(());
+    }
+
+    let h = "#".repeat(heading_level);
+    let h_member = "#".repeat(heading_level + 1);
+    let _ = writeln!(buf, "{} Code quality on main\n", h);
+    let _ = writeln!(
+        buf,
+        "Per-member breakdown of architecture violations surviving on the \
+default branch. Each bullet links to the offending file at HEAD; the \
+`% of lines` suffix is the student's blame share over the offending \
+range. Sprint-level behavioural metrics follow below.\n"
+    );
+
+    // Resolve student_id → display name once so the section reads in
+    // student-friendly order (alphabetical by name) rather than ID order.
+    let mut name_stmt = conn.prepare(
+        "SELECT id, COALESCE(full_name, '') FROM students
+         WHERE team_project_id = ? ORDER BY full_name, id",
+    )?;
+    let students: Vec<(String, String)> = name_stmt
+        .query_map([project_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(name_stmt);
+
+    for (student_id, full_name) in students {
+        let violations = match arch_per_student.get(&student_id) {
+            Some(v) if !v.is_empty() => v,
+            _ => continue,
+        };
+        let display = if full_name.is_empty() {
+            student_id.clone()
+        } else {
+            full_name
+        };
+        let _ = writeln!(buf, "{} {}\n", h_member, md_escape(&display));
+        write_student_architecture_block(buf, violations);
+    }
+
     Ok(())
 }
 
@@ -3577,6 +3569,11 @@ fn generate_markdown_report_multi_to_path_inner(
     let mut buf = String::with_capacity(64 * 1024);
     let _ = writeln!(buf, "# Project report — {}\n", project_name);
 
+    // T-P3.4: artifact-level "Code quality on main" section. Rendered
+    // once before the per-sprint loop. Grades the code as delivered;
+    // per-sprint sections cover the behavioural narrative.
+    write_artifact_section(&mut buf, conn, project_id, 2)?;
+
     for (idx, sid) in sprint_ids_ordered.iter().enumerate() {
         let (sprint_name, start, end) = conn
             .query_row(
@@ -3969,17 +3966,26 @@ mod tests {
              CREATE TABLE team_sprint_ownership (project_id INTEGER, sprint_id INTEGER,
                 truck_factor INTEGER, owners_csv TEXT,
                 PRIMARY KEY (project_id, sprint_id));
-             CREATE TABLE architecture_violations (repo_full_name TEXT, sprint_id INTEGER,
-                file_path TEXT, rule_name TEXT, violation_kind TEXT,
+             CREATE TABLE architecture_violations (repo_full_name TEXT, file_path TEXT,
+                rule_name TEXT, violation_kind TEXT,
                 offending_import TEXT, severity TEXT,
                 start_line INTEGER, end_line INTEGER,
                 rule_kind TEXT, rule_version TEXT, explanation TEXT,
-                PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import));
+                introduced_sprint_id INTEGER,
+                PRIMARY KEY (repo_full_name, file_path, rule_name, offending_import, start_line));
              CREATE TABLE architecture_violation_attribution (
                 violation_rowid INTEGER NOT NULL, student_id TEXT NOT NULL,
                 lines_authored INTEGER NOT NULL, total_lines INTEGER NOT NULL,
-                weight REAL NOT NULL, sprint_id INTEGER NOT NULL,
+                weight REAL NOT NULL,
                 PRIMARY KEY (violation_rowid, student_id));
+             CREATE TABLE student_artifact_flags (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id TEXT, project_id INTEGER, flag_type TEXT,
+                severity TEXT, details TEXT);
+             CREATE TABLE architecture_runs (repo_full_name TEXT NOT NULL,
+                status TEXT NOT NULL, findings_count INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER, head_sha TEXT, diagnostics TEXT,
+                ran_at TEXT NOT NULL,
+                PRIMARY KEY (repo_full_name));
              CREATE TABLE static_analysis_findings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 repo_full_name TEXT NOT NULL, sprint_id INTEGER NOT NULL,
@@ -4425,70 +4431,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn architecture_hotspot_flag_pointer_text_references_per_student_block() {
-        // ARCHITECTURE_HOTSPOT flag bullet renders as a one-liner pointing
-        // the reader to the per-student Architecture violations sub-block.
-        let conn = mk_conn();
-        conn.execute_batch(
-            "INSERT INTO architecture_violations
-                (repo_full_name, sprint_id, file_path, rule_name,
-                 violation_kind, offending_import, severity, start_line, end_line)
-             VALUES
-                ('udg/spring-foo', 10, 'X.java', 'SERVICE_RETURNS_ENTITY',
-                 'llm', 'X@L13', 'CRITICAL', 13, 13);
-             INSERT INTO architecture_violation_attribution
-                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
-                SELECT rowid, 'u1', 1, 1, 1.0, 10 FROM architecture_violations
-                WHERE sprint_id = 10;
-             INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
-                VALUES ('u1', 10, 'ARCHITECTURE_HOTSPOT', 'CRITICAL',
-                        '{\"weighted\":2.0,\"min_weighted\":1.5}');",
-        )
-        .unwrap();
-        let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
-        let body = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            body.contains(
-                "Architecture weighted contribution reached 2 (threshold 1.5). \
-See the Architecture violations block in this dashboard for the attributed offenders."
-            ),
-            "flag pointer line missing or stale: {body}"
-        );
-        // The standalone "## Architecture hotspots" section is gone.
-        assert!(
-            !body.contains("## Architecture hotspots"),
-            "standalone arch hotspot section must be removed: {body}"
-        );
-    }
-
-    #[test]
-    fn per_student_architecture_block_silent_when_hotspot_flag_did_not_fire() {
-        // Violations and attribution exist but no ARCHITECTURE_HOTSPOT flag
-        // → the per-student arch block must not render at all.
-        let conn = mk_conn();
-        conn.execute_batch(
-            "INSERT INTO architecture_violations
-                (repo_full_name, sprint_id, file_path, rule_name,
-                 violation_kind, offending_import, severity)
-             VALUES
-                ('udg/spring-foo', 10, 'X.java', 'SOMETHING',
-                 'llm', 'X@L1', 'WARNING');
-             INSERT INTO architecture_violation_attribution
-                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
-                SELECT rowid, 'u1', 1, 1, 1.0, 10 FROM architecture_violations
-                WHERE sprint_id = 10;",
-        )
-        .unwrap();
-        let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
-        let body = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !body.contains("**Architecture violations:**"),
-            "per-student arch block must be gated by ARCHITECTURE_HOTSPOT firing: {body}"
-        );
-    }
+    // T-P3.4: two retired tests removed here:
+    //
+    // * `architecture_hotspot_flag_pointer_text_references_per_student_block` —
+    //   asserted a flag-bullet pointer rendered inside the per-sprint
+    //   Section B. ARCHITECTURE_HOTSPOT now lives in `student_artifact_flags`
+    //   (project-keyed) and is rendered exclusively from
+    //   `write_artifact_section`; no per-sprint pointer exists.
+    // * `per_student_architecture_block_silent_when_hotspot_flag_did_not_fire` —
+    //   asserted the gating semantic at the per-sprint Section B layer.
+    //   Same gating now applies in `architecture_violations_per_student`
+    //   but is exercised by the multi-sprint tests below.
 
     #[test]
     fn truck_factor_humanizes_owner_csv_to_full_names() {
@@ -4549,83 +4502,90 @@ See the Architecture violations block in this dashboard for the attributed offen
     }
 
     #[test]
-    fn architecture_section_a_renders_total_only_no_per_rule_listing() {
-        // Section A summarises architecture conformance with a heading and
-        // a total-count line; the per-rule + per-file listing now lives
-        // exclusively in Section B's per-student block.
+    fn per_sprint_section_a_no_longer_renders_architecture_conformance_subsection() {
+        // T-P3.4: the per-sprint "Architecture conformance" subsection
+        // is gone. Architecture is artifact-shaped and rendered once at
+        // the top of the multi-sprint REPORT.md by `write_artifact_section`.
+        // `generate_markdown_report` (single-sprint helper) doesn't
+        // emit the top-level section either — the per-sprint single-doc
+        // path predates the multi-sprint renderer.
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO architecture_violations
-                (repo_full_name, sprint_id, file_path, rule_name,
-                 violation_kind, offending_import, severity)
+                (repo_full_name, file_path, rule_name,
+                 violation_kind, offending_import, severity, start_line, end_line)
              VALUES
-                ('udg/spring-foo', 10, 'A.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING'),
-                ('udg/spring-foo', 10, 'B.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING'),
-                ('udg/spring-foo', 10, 'C.java', 'domain-no-spring-web',
-                 'forbidden_import', 'org.springframework.web.RestController', 'WARNING');",
+                ('udg/spring-foo', 'A.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING', 1, 1),
+                ('udg/spring-foo', 'B.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING', 1, 1),
+                ('udg/spring-foo', 'C.java', 'domain-no-spring-web',
+                 'forbidden_import', 'org.springframework.web.RestController', 'WARNING', 1, 1);",
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
         let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("### Architecture conformance"));
-        assert!(body.contains("**Total violations:** 3"));
+        // Distinct markers of the retired per-sprint architecture roll-up.
+        // The "### Architecture conformance" string still appears in the
+        // glossary section as methodology prose; the test focuses on the
+        // *roll-up renderer's* output, not the documentation.
+        assert!(
+            !body.contains("**Total violations:** 3"),
+            "per-sprint Section A roll-up renderer must be retired: {body}"
+        );
         assert!(
             !body.contains("**Violations by rule:**"),
-            "per-rule block must no longer render in Section A: {body}"
+            "per-rule block must not render in Section A: {body}"
         );
-        // With no fingerprints seeded, no Section B per-student block exists,
-        // so file-level links must not leak from a removed Section A renderer.
         assert!(
             !body.contains("[`A.java`](https://github.com/udg/spring-foo/blob/HEAD/A.java"),
-            "no per-file listing must appear in Section A anymore: {body}"
+            "no per-file listing in Section A: {body}"
         );
     }
 
     #[test]
     fn per_student_architecture_block_lists_every_attributed_violation_with_weight_and_explanation()
     {
-        // Section B per-student arch block fires once ARCHITECTURE_HOTSPOT
-        // is on for the student. Every (student, violation) attribution row
-        // with weight > 0 renders as one bullet with: clickable file link
-        // (line anchor where known), humanised rule prose, severity badge,
-        // and a `· N% of lines` suffix derived from the blame weight.
+        // T-P3.4: artifact section renders one bullet per attributed
+        // violation under the offending student's subsection. The same
+        // `write_student_architecture_block` helper used to live in the
+        // per-sprint Section B; it now runs once at the top of REPORT.md
+        // gated by ARCHITECTURE_HOTSPOT in `student_artifact_flags`.
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO architecture_violations
-                (repo_full_name, sprint_id, file_path, rule_name,
+                (repo_full_name, file_path, rule_name,
                  violation_kind, offending_import, severity,
                  start_line, end_line, rule_kind, explanation)
              VALUES
-                ('udg/spring-foo', 10, 'A.java', 'HARDCODED_API_URL',
-                 'llm', 'HARDCODED_API_URL@L13', 'WARNING', 13, 13, 'llm',
+                ('udg/spring-foo', 'A.java', 'HARDCODED_API_URL',
+                 'llm', 'HARDCODED_API_URL', 'WARNING', 13, 13, 'llm',
                  'API URL should use BuildConfig instead of a literal string.'),
-                ('udg/spring-foo', 10, 'B.java', 'HARDCODED_API_URL',
-                 'llm', 'HARDCODED_API_URL@L26', 'WARNING', 26, 49, 'llm',
+                ('udg/spring-foo', 'B.java', 'HARDCODED_API_URL',
+                 'llm', 'HARDCODED_API_URL', 'WARNING', 26, 49, 'llm',
                  'Repository hits the network without checking the cache.'),
-                ('udg/spring-foo', 10, 'C.java', 'HARDCODED_API_URL',
-                 'llm', 'HARDCODED_API_URL@L7', 'WARNING', 7, 7, 'llm',
+                ('udg/spring-foo', 'C.java', 'HARDCODED_API_URL',
+                 'llm', 'HARDCODED_API_URL', 'WARNING', 7, 7, 'llm',
                  'Third hard-coded URL.'),
-                ('udg/spring-foo', 10, 'D.java', 'HARDCODED_API_URL',
-                 'llm', 'HARDCODED_API_URL@L9', 'WARNING', 9, 9, 'llm',
+                ('udg/spring-foo', 'D.java', 'HARDCODED_API_URL',
+                 'llm', 'HARDCODED_API_URL', 'WARNING', 9, 9, 'llm',
                  'Fourth hard-coded URL.');
              INSERT INTO architecture_violation_attribution
-                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
+                (violation_rowid, student_id, lines_authored, total_lines, weight)
                 SELECT rowid, 'u1',
                        CASE file_path WHEN 'A.java' THEN 1 WHEN 'B.java' THEN 12 ELSE 1 END,
                        CASE file_path WHEN 'A.java' THEN 1 WHEN 'B.java' THEN 24 ELSE 1 END,
-                       CASE file_path WHEN 'A.java' THEN 1.0 WHEN 'B.java' THEN 0.5 ELSE 1.0 END,
-                       10
-                FROM architecture_violations WHERE sprint_id = 10;
-             INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
-                VALUES ('u1', 10, 'ARCHITECTURE_HOTSPOT', 'WARNING',
+                       CASE file_path WHEN 'A.java' THEN 1.0 WHEN 'B.java' THEN 0.5 ELSE 1.0 END
+                FROM architecture_violations;
+             INSERT INTO student_artifact_flags
+                (student_id, project_id, flag_type, severity, details)
+                VALUES ('u1', 1, 'ARCHITECTURE_HOTSPOT', 'WARNING',
                         '{\"weighted\":3.5,\"min_weighted\":2.0}');",
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         // Single-line violation: `:L13` suffix and `#L13` anchor + 100% suffix.
         assert!(
@@ -4675,72 +4635,76 @@ See the Architecture violations block in this dashboard for the attributed offen
 
     #[test]
     fn per_student_architecture_attribution_resolves_bare_repo_basename_to_qualified_url() {
-        // Regression: the architecture stage may write `repo_full_name` as a
-        // bare repo (e.g. `spring-foo`) on legacy rows. The per-student arch
-        // block must resolve the qualified `<org>/<repo>` from `pull_requests`
+        // T-P3.4: when the architecture stage wrote `repo_full_name` as
+        // a bare repo (`spring-foo`), the artifact section's renderer
+        // must resolve the qualified `<org>/<repo>` from `pull_requests`
         // so the file URL is clickable.
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO pull_requests (id, repo_full_name)
                 VALUES ('pr1', 'udg-pds/spring-foo');
              INSERT INTO architecture_violations
-                (repo_full_name, sprint_id, file_path, rule_name,
-                 violation_kind, offending_import, severity)
+                (repo_full_name, file_path, rule_name,
+                 violation_kind, offending_import, severity, start_line, end_line)
              VALUES
-                ('spring-foo', 10, 'A.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING');
+                ('spring-foo', 'A.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING', 1, 1);
              INSERT INTO architecture_violation_attribution
-                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
-                SELECT rowid, 'u1', 1, 1, 1.0, 10 FROM architecture_violations
-                WHERE sprint_id = 10;
-             INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
-                VALUES ('u1', 10, 'ARCHITECTURE_HOTSPOT', 'WARNING',
+                (violation_rowid, student_id, lines_authored, total_lines, weight)
+                SELECT rowid, 'u1', 1, 1, 1.0 FROM architecture_violations;
+             INSERT INTO student_artifact_flags
+                (student_id, project_id, flag_type, severity, details)
+                VALUES ('u1', 1, 'ARCHITECTURE_HOTSPOT', 'WARNING',
                         '{\"weighted\":1.0,\"min_weighted\":0.5}');",
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(
             body.contains("**Architecture violations:** 1 (0 critical · 1 warning · 0 info)"),
             "missing per-student arch headline; got: {body}"
         );
+        // Line-suffix variant — the seeded violation has start_line=1.
         assert!(
-            body.contains("[`A.java`](https://github.com/udg-pds/spring-foo/blob/HEAD/A.java"),
+            body.contains("https://github.com/udg-pds/spring-foo/blob/HEAD/A.java"),
             "bare repo name must be resolved against pull_requests so the file link is clickable: {body}"
         );
     }
 
     #[test]
     fn per_student_architecture_block_uses_attribution_table_and_skips_zero_weight() {
-        // Two violated files. u1 has attribution rows for A.java (weight=1.0
-        // for two violations) but no row for C.java → C.java is unattributed
-        // and falls into Section A's "Unattributed violations" stub instead.
+        // T-P3.4: violations attributed to u1 surface under their
+        // member subsection in the artifact section. C.java has no
+        // attribution row → it doesn't appear under any student. The
+        // legacy "Unattributed violations" team stub was removed with
+        // the per-sprint Section A architecture roll-up.
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO architecture_violations
-                (repo_full_name, sprint_id, file_path, rule_name,
-                 violation_kind, offending_import, severity)
+                (repo_full_name, file_path, rule_name,
+                 violation_kind, offending_import, severity, start_line, end_line)
              VALUES
-                ('udg/spring-foo', 10, 'A.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING'),
-                ('udg/spring-foo', 10, 'A.java', 'domain-no-spring-web',
-                 'forbidden_import', 'org.springframework.web.RestController', 'CRITICAL'),
-                ('udg/spring-foo', 10, 'C.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repo.OtherRepo', 'WARNING');
+                ('udg/spring-foo', 'A.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING', 1, 1),
+                ('udg/spring-foo', 'A.java', 'domain-no-spring-web',
+                 'forbidden_import', 'org.springframework.web.RestController', 'CRITICAL', 1, 1),
+                ('udg/spring-foo', 'C.java', 'presentation->!infrastructure',
+                 'layer_dependency', 'com.x.repo.OtherRepo', 'WARNING', 1, 1);
              INSERT INTO architecture_violation_attribution
-                (violation_rowid, student_id, lines_authored, total_lines, weight, sprint_id)
-                SELECT rowid, 'u1', 1, 1, 1.0, 10 FROM architecture_violations
-                WHERE sprint_id = 10 AND file_path = 'A.java';
-             INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
-                VALUES ('u1', 10, 'ARCHITECTURE_HOTSPOT', 'WARNING',
+                (violation_rowid, student_id, lines_authored, total_lines, weight)
+                SELECT rowid, 'u1', 1, 1, 1.0 FROM architecture_violations
+                WHERE file_path = 'A.java';
+             INSERT INTO student_artifact_flags
+                (student_id, project_id, flag_type, severity, details)
+                VALUES ('u1', 1, 'ARCHITECTURE_HOTSPOT', 'WARNING',
                         '{\"weighted\":2.0,\"min_weighted\":1.0}');",
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        // Section B per-student block under Alice.
+        // Per-member block under u1 with two attributed rows.
         assert!(
             body.contains("**Architecture violations:** 2 (1 critical · 1 warning · 0 info)"),
             "missing per-student arch headline; got: {body}"
@@ -4750,17 +4714,10 @@ See the Architecture violations block in this dashboard for the attributed offen
             body.contains("**presentation** must not depend on **infrastructure**"),
             "layer rule must humanise; got:\n{body}"
         );
-        // Team-level severity breakdown reflects all three rows.
-        assert!(body.contains("**Total violations:** 3 (1 critical · 2 warning · 0 info)"));
-        // Unattributed stub picks up C.java.
-        assert!(
-            body.contains("**Unattributed violations:** 1"),
-            "unattributed stub missing; got:\n{body}"
-        );
-        // C.java does not appear under any per-student block.
+        // C.java doesn't appear under any per-student block — no attribution.
         assert!(
             !body.contains("[`C.java`]"),
-            "unattributed C.java must not surface in Section B; got:\n{body}"
+            "unattributed C.java must not surface under any student: {body}"
         );
     }
 
