@@ -362,7 +362,10 @@ pub fn run_pr_doc_evaluation_for_sprint_id(
                     count += evaluate_prs_heuristic(conn, sprint_id)?;
                 } else {
                     match DeepseekClient::new(&api_key, config.evaluate.model_id.clone()) {
-                        Ok(client) => count += evaluate_prs_llm(conn, sprint_id, &client)?,
+                        Ok(client) => {
+                            let client = client.with_thinking(config.evaluate.thinking.clone());
+                            count += evaluate_prs_llm(conn, sprint_id, &client)?;
+                        }
                         Err(e) => {
                             warn!(error = %e, "DeepSeek client init failed — heuristic fallback");
                             count += evaluate_prs_heuristic(conn, sprint_id)?;
@@ -834,7 +837,10 @@ pub fn score_task_descriptions_for_sprint_id(
                 return evaluate_tasks_heuristic(conn, sprint_id);
             }
             match DeepseekClient::new(&api_key, config.evaluate.model_id.clone()) {
-                Ok(client) => evaluate_tasks_llm(conn, sprint_id, &client),
+                Ok(client) => {
+                    let client = client.with_thinking(config.evaluate.thinking.clone());
+                    evaluate_tasks_llm(conn, sprint_id, &client)
+                }
                 Err(e) => {
                     warn!(error = %e, "DeepSeek client init failed — heuristic task scoring");
                     evaluate_tasks_heuristic(conn, sprint_id)
