@@ -232,15 +232,19 @@ impl Analyzer for SpotBugs {
 /// Reads the canonical `pr_compilation.compiles` boolean. The plan
 /// originally specified a `status = 'success'` column, but the actual
 /// schema uses `compiles BOOLEAN` (T-P0.x); we honour the live schema.
-pub fn latest_pr_compiled_ok(conn: &Connection, repo_full_name: &str, sprint_id: i64) -> bool {
+pub fn latest_pr_compiled_ok(conn: &Connection, repo_full_name: &str) -> bool {
+    // T-P3.4: artifact-shape — "did any PR for this repo ever compile
+    // successfully?". `pr_compilation` retains its per-sprint shape
+    // (governed by compile_stage), but the static-analysis gate only
+    // needs to know that *some* successful build exists for the repo
+    // so SpotBugs has class roots worth scanning.
     let row: rusqlite::Result<i64> = conn.query_row(
         "SELECT COUNT(*)
          FROM pr_compilation pc
          JOIN pull_requests pr ON pr.id = pc.pr_id
          WHERE pr.repo_full_name = ?
-           AND pc.sprint_id = ?
            AND pc.compiles = 1",
-        rusqlite::params![repo_full_name, sprint_id],
+        rusqlite::params![repo_full_name],
         |r| r.get(0),
     );
     matches!(row, Ok(n) if n > 0)
@@ -475,7 +479,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).unwrap();
         // No PRs at all.
-        assert!(!latest_pr_compiled_ok(&conn, "udg-pds/spring-x", 1));
+        assert!(!latest_pr_compiled_ok(&conn, "udg-pds/spring-x"));
 
         conn.execute(
             "INSERT INTO pull_requests (id, pr_number, repo_full_name, url, title, state, merged)
@@ -490,7 +494,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(!latest_pr_compiled_ok(&conn, "udg-pds/spring-x", 1));
+        assert!(!latest_pr_compiled_ok(&conn, "udg-pds/spring-x"));
 
         conn.execute(
             "INSERT INTO pull_requests (id, pr_number, repo_full_name, url, title, state, merged)
@@ -505,7 +509,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(latest_pr_compiled_ok(&conn, "udg-pds/spring-x", 1));
+        assert!(latest_pr_compiled_ok(&conn, "udg-pds/spring-x"));
     }
 
     #[test]
