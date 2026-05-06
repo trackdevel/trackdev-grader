@@ -59,21 +59,27 @@ pub use cli_judge::ClaudeCliJudge;
 pub use deepseek_judge::DeepseekJudge;
 pub use judge::{Judge, JudgeError, LlmJudge, LlmResponse, LlmViolation};
 
-/// One LLM-driven evaluation run over a cloned repo for a sprint.
-/// Inserts new rows into `architecture_violations` (idempotent: prior
-/// LLM rows for this `(repo, sprint)` are deleted first). Does **not**
-/// purge non-LLM rows — the AST + package-glob path owns those.
+/// One LLM-driven evaluation run over a cloned repo. Artifact-shape
+/// (T-P3.4): inserts rows into `architecture_violations` keyed by
+/// `(repo_full_name, file_path, rule_name, offending_import, start_line)`,
+/// sprint-free. Idempotent: prior LLM rows for this repo are deleted
+/// first. Does **not** purge non-LLM rows — the AST + package-glob
+/// path owns those.
 ///
 /// `workers` controls intra-repo concurrency for cache-miss judge calls.
 /// Cache lookups + DB writes stay serial on the single `Connection`;
-/// only the slow judge call (Anthropic API or `claude` CLI subprocess)
-/// fans out across the worker pool.
+/// only the slow judge call (Anthropic API, DeepSeek API, or `claude`
+/// CLI subprocess) fans out across the worker pool.
+///
+/// Telemetry: each `judge.judge` call emits an `info!` line with the
+/// per-file `elapsed_ms` + outcome; one per-repo summary at the end
+/// reports `judged_ok` / `judged_failed` / `cached` counts plus p50 /
+/// p95 wall-clock for the cache-miss calls.
 #[allow(clippy::too_many_arguments)]
 pub fn run_llm_review_for_repo(
     conn: &Connection,
     repo_path: &Path,
     repo_full_name: &str,
-    sprint_id: i64,
     rubric: &Rubric,
     stack: &str,
     judge: &(dyn Judge + Send + Sync),
@@ -92,21 +98,21 @@ pub fn run_llm_review_for_repo(
     };
     let rubric_key = rubric.cache_key_prefix();
 
-    // Idempotency: clear prior LLM rows for this (repo, sprint) and any
-    // attribution rows that pointed at them, then re-insert from cache /
-    // API responses. Mirrors crate `architecture`'s idiom.
+    // Idempotency: clear prior LLM rows for this repo and any attribution
+    // rows that pointed at them, then re-insert from cache / API responses.
+    // Mirrors crate `architecture`'s idiom.
     conn.execute(
         "DELETE FROM architecture_violation_attribution
          WHERE violation_rowid IN (
              SELECT rowid FROM architecture_violations
-             WHERE repo_full_name = ? AND sprint_id = ? AND rule_kind = 'llm'
+             WHERE repo_full_name = ? AND rule_kind = 'llm'
          )",
-        params![repo_full_name, sprint_id],
+        params![repo_full_name],
     )?;
     conn.execute(
         "DELETE FROM architecture_violations
-         WHERE repo_full_name = ? AND sprint_id = ? AND rule_kind = 'llm'",
-        params![repo_full_name, sprint_id],
+         WHERE repo_full_name = ? AND rule_kind = 'llm'",
+        params![repo_full_name],
     )?;
 
     // Phase 1: walk files, separate cache hits from misses. All DB I/O
@@ -163,12 +169,25 @@ pub fn run_llm_review_for_repo(
         }
     }
 
+    let cached_count = resolved.len();
+    let to_judge_count = to_judge.len();
+    let started_phase2 = std::time::Instant::now();
+    info!(
+        repo = repo_full_name,
+        cached = cached_count,
+        to_judge = to_judge_count,
+        workers,
+        "llm review starting"
+    );
+
     // Phase 2: parallel judge calls. Workers default to 1 (effectively
     // serial); higher values fan out across a Rayon pool. The pool is
     // local to this call so it doesn't contend with the workspace's
     // global `rayon::par_iter` pool elsewhere in the pipeline.
     let workers = workers.max(1);
-    let judge_outcomes: Vec<(String, String, u32, Result<String, JudgeError>)> = {
+    // Per-call telemetry: (file_sha, rel, total_lines, result, elapsed_ms).
+    type JudgeOutcome = (String, String, u32, Result<String, JudgeError>, i64);
+    let judge_outcomes: Vec<JudgeOutcome> = {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
             .build()
@@ -181,23 +200,51 @@ pub fn run_llm_review_for_repo(
             to_judge
                 .par_iter()
                 .map(|job| {
+                    let started = std::time::Instant::now();
                     let raw = judge
                         .judge(&job.rel, rubric_section, &job.bytes)
                         .and_then(|r| {
                             serde_json::to_string(&r).map_err(|e| JudgeError::Parse(e.to_string()))
                         });
-                    (job.file_sha.clone(), job.rel.clone(), job.total_lines, raw)
+                    let elapsed_ms = started.elapsed().as_millis() as i64;
+                    match &raw {
+                        Ok(_) => info!(
+                            repo = repo_full_name,
+                            file = %job.rel,
+                            elapsed_ms,
+                            "llm judge ok"
+                        ),
+                        Err(e) => info!(
+                            repo = repo_full_name,
+                            file = %job.rel,
+                            elapsed_ms,
+                            error = %e,
+                            "llm judge failed"
+                        ),
+                    }
+                    (
+                        job.file_sha.clone(),
+                        job.rel.clone(),
+                        job.total_lines,
+                        raw,
+                        elapsed_ms,
+                    )
                 })
                 .collect()
         })
     };
 
     // Phase 3: cache writes + roll cache hits and successful misses into
-    // a single `resolved` queue. Failed judge calls drop the file (warn
-    // logged once with the error).
-    for (file_sha, rel, total_lines, raw_result) in judge_outcomes {
+    // a single `resolved` queue. Failed judge calls drop the file. We
+    // also tally per-call elapsed times for the per-repo summary.
+    let mut judged_ok = 0usize;
+    let mut judged_failed = 0usize;
+    let mut elapsed_samples: Vec<i64> = Vec::with_capacity(judge_outcomes.len());
+    for (file_sha, rel, total_lines, raw_result, elapsed_ms) in judge_outcomes {
+        elapsed_samples.push(elapsed_ms);
         match raw_result {
             Ok(raw) => {
+                judged_ok += 1;
                 cache::insert(conn, &file_sha, &rubric_key, judge.model_id(), &raw)?;
                 resolved.push(ResolvedFile {
                     rel,
@@ -206,6 +253,7 @@ pub fn run_llm_review_for_repo(
                 });
             }
             Err(e) => {
+                judged_failed += 1;
                 warn!(file = %rel, error = %e, "judge call failed; skipping file");
             }
         }
@@ -238,14 +286,22 @@ pub fn run_llm_review_for_repo(
                 );
                 continue;
             }
-            insert_llm_violation(conn, repo_full_name, sprint_id, &rel, &rubric_key, &v)?;
+            insert_llm_violation(conn, repo_full_name, &rel, &rubric_key, &v)?;
             written += 1;
         }
     }
+
+    let (p50_ms, p95_ms) = percentile_pair(&mut elapsed_samples, 50, 95);
+    let phase2_total_ms = started_phase2.elapsed().as_millis() as i64;
     info!(
         repo = repo_full_name,
-        sprint_id,
         violations = written,
+        cached = cached_count,
+        judged_ok,
+        judged_failed,
+        p50_ms,
+        p95_ms,
+        phase2_total_ms,
         rubric_key = %rubric_key,
         workers,
         "llm architecture review complete"
@@ -256,27 +312,26 @@ pub fn run_llm_review_for_repo(
 fn insert_llm_violation(
     conn: &Connection,
     repo_full_name: &str,
-    sprint_id: i64,
     file_path: &str,
     rubric_key: &str,
     v: &LlmViolation,
 ) -> rusqlite::Result<()> {
-    // Disambiguator suffix: same rule_id can fire on multiple ranges in
-    // one file; the composite PK on architecture_violations would
-    // collapse them otherwise.
-    let descriptor = format!("{}@L{}", v.rule_id, v.start_line);
+    // The new artifact PK includes start_line, so the historical
+    // `<rule_id>@L<line>` disambiguator on `offending_import` is no
+    // longer needed for uniqueness. We keep `rule_id` itself in
+    // `offending_import` so queries that join on the column have a
+    // stable handle to the rule hit.
     conn.execute(
         "INSERT OR REPLACE INTO architecture_violations
-            (repo_full_name, sprint_id, file_path, rule_name,
+            (repo_full_name, file_path, rule_name,
              violation_kind, offending_import, severity,
              start_line, end_line, rule_kind, rule_version, explanation)
-         VALUES (?, ?, ?, ?, 'llm', ?, ?, ?, ?, 'llm', ?, ?)",
+         VALUES (?, ?, ?, 'llm', ?, ?, ?, ?, 'llm', ?, ?)",
         params![
             repo_full_name,
-            sprint_id,
             file_path,
             v.rule_id,
-            descriptor,
+            v.rule_id,
             v.severity,
             v.start_line as i64,
             v.end_line as i64,
@@ -285,6 +340,21 @@ fn insert_llm_violation(
         ],
     )?;
     Ok(())
+}
+
+/// Approximate p_a / p_b percentiles of a slice of i64 samples. Mutates
+/// the slice (in-place sort). Returns 0 / 0 when empty. Cheap nearest-rank.
+fn percentile_pair(samples: &mut [i64], p_a: u32, p_b: u32) -> (i64, i64) {
+    if samples.is_empty() {
+        return (0, 0);
+    }
+    samples.sort_unstable();
+    let pick = |p: u32| {
+        let n = samples.len();
+        let idx = ((p as usize * n).saturating_sub(1)) / 100;
+        samples[idx.min(n - 1)]
+    };
+    (pick(p_a), pick(p_b))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
