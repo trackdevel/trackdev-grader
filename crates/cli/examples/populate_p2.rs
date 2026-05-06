@@ -44,12 +44,12 @@ fn main() -> anyhow::Result<()> {
     if rules_path.is_file() {
         let rules = sprint_grader_architecture::ArchitectureRules::load(rules_path)?;
         let project_root = PathBuf::from("data/entregues").join(&project_name);
-        for sid in &sprint_ids {
-            match sprint_grader_architecture::scan_project_to_db(&conn, &project_root, *sid, &rules)
-            {
-                Ok(n) => println!("architecture sprint {sid}: {n} violations"),
-                Err(e) => eprintln!("architecture sprint {sid}: {e}"),
-            }
+        // T-P3.4: artifact-shape — one scan per project per run; sprint_ids
+        // are no longer involved.
+        let _ = sprint_ids;
+        match sprint_grader_architecture::scan_project_to_db(&conn, &project_root, &rules) {
+            Ok(n) => println!("architecture: {n} violations"),
+            Err(e) => eprintln!("architecture: {e}"),
         }
     } else {
         println!("architecture: config/architecture.toml not found, skipping");
