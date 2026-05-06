@@ -27,6 +27,10 @@ pub enum LlmError {
     },
     #[error("response missing text content: {raw}")]
     NoContent { raw: String },
+    #[error(
+        "model output truncated by max_tokens cap (finish_reason={finish_reason}); raise [architecture] / [evaluate] max_tokens or set thinking=\"disabled\""
+    )]
+    Truncated { finish_reason: String },
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 }
