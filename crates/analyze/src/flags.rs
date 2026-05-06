@@ -2154,75 +2154,12 @@ fn regularity_declining(
     Ok(flags)
 }
 
-/// ARCHITECTURE_DRIFT (T-P2.2). For each project covered by this sprint,
-/// compare the count of `architecture_violations` rows against the most
-/// recent prior sprint. Fire WARNING when the current count is strictly
-/// higher — i.e., the team regressed against the layered model.
-///
-/// The flag is project-scoped; we attribute it to a synthetic
-/// `PROJECT_<id>` student, matching `cross_team_similarity`'s convention
-/// so the renderer treats it as a team-level note rather than punishing
-/// any single member.
-fn architecture_drift(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
-    let project_id: Option<i64> = conn
-        .query_row(
-            "SELECT project_id FROM sprints WHERE id = ?",
-            [sprint_id],
-            |r| r.get(0),
-        )
-        .ok();
-    let project_id = match project_id {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
-    };
-    let current: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM architecture_violations av
-             JOIN sprints s ON s.id = av.sprint_id
-             WHERE s.project_id = ? AND av.sprint_id = ?",
-            params![project_id, sprint_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let prev: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT s.id, COUNT(av.sprint_id)
-             FROM sprints s
-             LEFT JOIN architecture_violations av ON av.sprint_id = s.id
-             JOIN sprints curr ON curr.id = ?
-             WHERE s.project_id = curr.project_id
-                   AND s.start_date < curr.start_date
-             GROUP BY s.id
-             ORDER BY s.start_date DESC LIMIT 1",
-            [sprint_id],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-        )
-        .ok();
-    let mut flags = Vec::new();
-    if let Some((prev_sprint_id, prev_count)) = prev {
-        if current > prev_count {
-            flags.push(Flag {
-                student_id: format!("PROJECT_{project_id}"),
-                flag_type: "ARCHITECTURE_DRIFT",
-                severity: "WARNING",
-                details: json!({
-                    "current": current,
-                    "previous": prev_count,
-                    "previous_sprint_id": prev_sprint_id,
-                    "delta": current - prev_count,
-                }),
-            });
-        }
-    }
-    Ok(flags)
-}
-
-/// ARCHITECTURE_HOTSPOT (T-P3.1). Per-student companion to
-/// `ARCHITECTURE_DRIFT`. Sums each student's blame-weighted contribution
-/// across this sprint's `architecture_violations` and fires when that sum
-/// is ≥ the configured threshold. The team-level drift flag tells you
-/// "the team regressed against the layered model"; the hotspot flag tells
-/// you *who* owns the offending lines.
+/// ARCHITECTURE_HOTSPOT (T-P3.1 / T-P3.4). Per-student artifact flag.
+/// Sums each student's blame-weighted contribution across this project's
+/// `architecture_violations` rows on main HEAD and fires when that sum
+/// is ≥ the configured threshold. Sprint-free: there is no team-level
+/// drift flag any more — artifact metrics describe the code as
+/// delivered, not the per-sprint trajectory.
 ///
 /// Severity is the maximum severity of the contributing violations (rows
 /// in `architecture_violations` carry their own severity from
@@ -2230,17 +2167,18 @@ fn architecture_drift(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec
 /// rules contributed.
 fn architecture_hotspot(
     conn: &Connection,
-    sprint_id: i64,
+    project_id: i64,
     min_weighted: f64,
 ) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(
         "SELECT a.student_id, av.severity, a.weight, av.rule_name, av.rule_kind, av.file_path
          FROM architecture_violation_attribution a
          JOIN architecture_violations av ON av.rowid = a.violation_rowid
-         WHERE a.sprint_id = ?",
+         JOIN students s ON s.id = a.student_id
+         WHERE s.team_project_id = ?",
     )?;
     let rows = stmt
-        .query_map([sprint_id], |r| {
+        .query_map([project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -2639,6 +2577,76 @@ fn persist_flags(conn: &Connection, sprint_id: i64, flags: &[Flag]) -> rusqlite:
     Ok(())
 }
 
+/// T-P3.4: persist project-keyed artifact flags (`student_artifact_flags`),
+/// the sibling table to `flags` for sprint-free per-student classifications
+/// of the delivered code (architecture, complexity, static analysis).
+fn persist_artifact_flags(
+    conn: &Connection,
+    project_id: i64,
+    flags: &[Flag],
+) -> rusqlite::Result<()> {
+    for f in flags {
+        conn.execute(
+            "INSERT INTO student_artifact_flags (student_id, project_id, flag_type, severity, details)
+             VALUES (?, ?, ?, ?, ?)",
+            params![
+                f.student_id,
+                project_id,
+                f.flag_type,
+                f.severity,
+                f.details.to_string(),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// T-P3.4: artifact-flag dispatcher — runs once per project per pipeline
+/// invocation, after the architecture / complexity / static-analysis
+/// scans have populated their attribution rows. Idempotent: the
+/// project's prior `student_artifact_flags` rows are deleted first.
+///
+/// PR 1 wires only `ARCHITECTURE_HOTSPOT`. PR 2 will add
+/// `COMPLEXITY_HOTSPOT`; PR 3 will add `STATIC_ANALYSIS_HOTSPOT`. Until
+/// then, those two stay in `detect_flags_for_sprint_id`.
+pub fn detect_artifact_flags_for_project_id(
+    conn: &Connection,
+    project_id: i64,
+    config: &Config,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM student_artifact_flags WHERE project_id = ?",
+        [project_id],
+    )?;
+    let dt = &config.detector_thresholds;
+
+    macro_rules! run {
+        ($name:expr, $e:expr) => {{
+            match $e {
+                Ok(v) => {
+                    let n = v.len();
+                    if n > 0 {
+                        info!("  {}: {} artifact flags (project {})", $name, n, project_id);
+                    }
+                    persist_artifact_flags(conn, project_id, &v)?;
+                    n
+                }
+                Err(e) => {
+                    warn!(flag = $name, project_id, error = %e, "artifact detector failed");
+                    0
+                }
+            }
+        }};
+    }
+
+    let mut total = 0usize;
+    total += run!(
+        "ARCHITECTURE_HOTSPOT",
+        architecture_hotspot(conn, project_id, dt.architecture_hotspot_min_weighted)
+    );
+    Ok(total)
+}
+
 /// Delete and re-run the three compile-dependent detectors for one sprint.
 ///
 /// Used after `compile --force` so that stale `PR_DOES_NOT_COMPILE`,
@@ -2758,15 +2766,9 @@ pub fn detect_flags_for_sprint_id(
         "REGULARITY_DECLINING",
         regularity_declining(conn, sprint_id, dt)
     );
-    total += run!("ARCHITECTURE_DRIFT", architecture_drift(conn, sprint_id));
-    total += run!(
-        "ARCHITECTURE_HOTSPOT",
-        architecture_hotspot(
-            conn,
-            sprint_id,
-            config.detector_thresholds.architecture_hotspot_min_weighted
-        )
-    );
+    // T-P3.4: ARCHITECTURE_DRIFT is gone (per-sprint trajectory has no
+    // meaning under the artifact-shape rewrite); ARCHITECTURE_HOTSPOT is
+    // now project-keyed and runs in `detect_artifact_flags_for_project_id`.
     total += run!(
         "STATIC_ANALYSIS_HOTSPOT",
         static_analysis_hotspot(
