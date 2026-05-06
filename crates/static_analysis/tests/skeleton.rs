@@ -32,7 +32,8 @@ fn schema_creates_static_analysis_tables_and_scan_is_a_noop() {
         "schema must create the three static-analysis tables"
     );
 
-    // Index sanity-check.
+    // T-P3.4 PR 3: the per-sprint indexes are gone; only the
+    // artifact-shape repo index remains.
     let indexes: Vec<String> = conn
         .prepare(
             "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sa_%' \
@@ -43,17 +44,11 @@ fn schema_creates_static_analysis_tables_and_scan_is_a_noop() {
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
-    assert_eq!(
-        indexes,
-        vec![
-            "idx_sa_attr_sprint".to_string(),
-            "idx_sa_findings_sprint".to_string(),
-        ],
-    );
+    assert_eq!(indexes, vec!["idx_sa_findings_repo".to_string()]);
 
     let tmp = tempfile::tempdir().unwrap();
     let rules = Rules::default();
-    let n = scan_repo_to_db(&conn, tmp.path(), "udg-pds/empty", 1, &rules).unwrap();
+    let n = scan_repo_to_db(&conn, tmp.path(), "udg-pds/empty", &rules).unwrap();
     assert_eq!(n, 0, "T1 stub must be a no-op");
 
     // No rows must have been inserted.

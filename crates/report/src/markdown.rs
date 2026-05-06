@@ -1902,17 +1902,10 @@ fn write_section_b(
             buf.push('\n');
         }
 
-        // T-P3.4: per-sprint architecture and complexity blocks were
-        // removed — both render once in `write_artifact_section` at the
-        // top of the document.
-
-        if let Some((sa_data, top_n)) = sa_per_student {
-            if let Some(findings) = sa_data.get(sid) {
-                if !findings.is_empty() {
-                    write_student_static_analysis_block(buf, findings, top_n);
-                }
-            }
-        }
+        // T-P3.4: per-sprint architecture / complexity / static-analysis
+        // blocks all moved to `write_artifact_section` at the top of the
+        // document — they're artifact-shape (sprint-free) now.
+        let _ = sa_per_student;
 
         buf.push_str("---\n\n");
     }
@@ -1922,20 +1915,30 @@ fn write_section_b(
 /// T-P3.4: top-level "Code quality on main" section. Rendered once per
 /// project at the top of the multi-sprint REPORT.md, before the
 /// per-sprint behavioural sections. Reads project-keyed
-/// `architecture_violations`, `method_complexity_findings`, and the
-/// `student_artifact_flags` rows fired by
-/// `detect_artifact_flags_for_project_id`. Per-member subsections list
-/// each student's blame-attributed violations and complexity findings
-/// on main HEAD, with clickable file links and student-friendly prose.
+/// `architecture_violations`, `method_complexity_findings`,
+/// `static_analysis_findings`, and the `student_artifact_flags` rows
+/// fired by `detect_artifact_flags_for_project_id`. Per-member
+/// subsections list each student's blame-attributed violations and
+/// findings on main HEAD, with clickable file links and
+/// student-friendly prose. The static-analysis sub-block is gated on
+/// `include_static_analysis` so the team-facing
+/// `sync-reports --push` view can opt out.
 fn write_artifact_section(
     buf: &mut String,
     conn: &Connection,
     project_id: i64,
     heading_level: usize,
+    include_static_analysis: bool,
 ) -> rusqlite::Result<()> {
     let arch_per_student = architecture_violations_per_student(conn, project_id)?;
     let complexity_per_student = complexity_findings_per_student(conn, project_id)?;
-    if arch_per_student.is_empty() && complexity_per_student.is_empty() {
+    let sa_per_student = if include_static_analysis {
+        static_analysis_per_student(conn, project_id)?
+    } else {
+        HashMap::new()
+    };
+    if arch_per_student.is_empty() && complexity_per_student.is_empty() && sa_per_student.is_empty()
+    {
         // Nothing to say at the artifact level on this project. Don't
         // emit an empty header — keeps minimal-fixture renders quiet.
         return Ok(());
@@ -1947,12 +1950,47 @@ fn write_artifact_section(
     let _ = writeln!(buf, "{} Code quality on main\n", h);
     let _ = writeln!(
         buf,
-        "Per-member breakdown of architecture violations and \
-complexity / testability findings surviving on the default branch. \
-Each bullet links to the offending file at HEAD; the `% of lines` \
-suffix on architecture rows is the student's blame share over the \
-offending range. Sprint-level behavioural metrics follow below.\n"
+        "Per-member breakdown of architecture violations, \
+complexity / testability findings, and static-analysis findings \
+surviving on the default branch. Each bullet links to the offending \
+file at HEAD; the `% of lines` suffix on architecture rows is the \
+student's blame share over the offending range. Sprint-level \
+behavioural metrics follow below.\n"
     );
+
+    // Team-level SA tally (preserved from the legacy Section B render).
+    if !sa_per_student.is_empty() {
+        let mut t_total = 0usize;
+        let mut t_crit = 0usize;
+        let mut t_warn = 0usize;
+        let mut t_info = 0usize;
+        for findings in sa_per_student.values() {
+            for f in findings {
+                t_total += 1;
+                match f.severity.to_ascii_uppercase().as_str() {
+                    "CRITICAL" => t_crit += 1,
+                    "WARNING" => t_warn += 1,
+                    "INFO" => t_info += 1,
+                    _ => {}
+                }
+            }
+        }
+        if t_total > 0 {
+            use sprint_grader_static_analysis::i18n as sai18n;
+            let _ = writeln!(
+                buf,
+                "**{}:** {} ({} {} · {} {} · {} {})\n",
+                sai18n::TEAM_TALLY_LABEL,
+                t_total,
+                t_crit,
+                sai18n::SEVERITY_CRITICAL_PLURAL,
+                t_warn,
+                sai18n::SEVERITY_WARNING_PLURAL,
+                t_info,
+                sai18n::SEVERITY_INFO_PLURAL,
+            );
+        }
+    }
 
     // Resolve student_id → display name once so the section reads in
     // student-friendly order (alphabetical by name) rather than ID order.
@@ -1970,9 +2008,11 @@ offending range. Sprint-level behavioural metrics follow below.\n"
     for (student_id, full_name) in students {
         let arch = arch_per_student.get(&student_id);
         let complexity = complexity_per_student.get(&student_id);
+        let sa = sa_per_student.get(&student_id);
         let has_arch = arch.is_some_and(|v| !v.is_empty());
         let has_complexity = complexity.is_some_and(|v| !v.is_empty());
-        if !has_arch && !has_complexity {
+        let has_sa = sa.is_some_and(|v| !v.is_empty());
+        if !has_arch && !has_complexity && !has_sa {
             continue;
         }
         let display = if full_name.is_empty() {
@@ -1986,6 +2026,9 @@ offending range. Sprint-level behavioural metrics follow below.\n"
         }
         if let Some(findings) = complexity {
             write_student_complexity_block(buf, findings, &qualified_by_basename);
+        }
+        if let Some(findings) = sa {
+            write_student_static_analysis_block(buf, findings, DEFAULT_TOP_N_PER_STUDENT);
         }
     }
 
@@ -2092,9 +2135,9 @@ struct SaFinding {
 
 fn static_analysis_per_student(
     conn: &Connection,
-    sprint_id: i64,
     project_id: i64,
 ) -> rusqlite::Result<HashMap<String, Vec<SaFinding>>> {
+    // T-P3.4 PR 3: artifact-shape, project-keyed (sprint-free).
     let mut stmt = conn.prepare(
         "SELECT a.student_id,
                 f.analyzer, f.rule_id, f.severity,
@@ -2104,11 +2147,11 @@ fn static_analysis_per_student(
          FROM static_analysis_finding_attribution a
          JOIN static_analysis_findings f ON f.id = a.finding_id
          JOIN students s ON s.id = a.student_id
-         WHERE a.sprint_id = ? AND s.team_project_id = ?
+         WHERE s.team_project_id = ?
          ORDER BY a.weight DESC, f.file_path, f.start_line",
     )?;
     let mut result: HashMap<String, Vec<SaFinding>> = HashMap::new();
-    let rows = stmt.query_map(rusqlite::params![sprint_id, project_id], |r| {
+    let rows = stmt.query_map([project_id], |r| {
         Ok((
             r.get::<_, String>(0)?,
             SaFinding {
@@ -3407,19 +3450,13 @@ pub fn generate_markdown_report_to_path_ex2(
         cumulative_sprint_ids,
         2,
     )?;
-    let sa_data = if include_static_analysis {
-        Some(static_analysis_per_student(conn, sprint_id, project_id)?)
-    } else {
-        None
-    };
-    write_section_b(
-        &mut buf,
-        conn,
-        sprint_id,
-        project_id,
-        2,
-        sa_data.as_ref().map(|d| (d, DEFAULT_TOP_N_PER_STUDENT)),
-    )?;
+    // T-P3.4 PR 3: SA is artifact-shape now and lives in the
+    // multi-sprint top-level section. Single-sprint render doesn't
+    // include the artifact summary and so doesn't render SA either —
+    // the include_static_analysis flag still threads to
+    // multi-sprint callers (`generate_markdown_report_multi_to_path_inner`).
+    let _ = include_static_analysis;
+    write_section_b(&mut buf, conn, sprint_id, project_id, 2, None)?;
     write_section_c(&mut buf, conn, sprint_id, project_id, 2)?;
     if let Some(sids) = cumulative_sprint_ids {
         if !sids.is_empty() {
@@ -3590,7 +3627,7 @@ fn generate_markdown_report_multi_to_path_inner(
     // T-P3.4: artifact-level "Code quality on main" section. Rendered
     // once before the per-sprint loop. Grades the code as delivered;
     // per-sprint sections cover the behavioural narrative.
-    write_artifact_section(&mut buf, conn, project_id, 2)?;
+    write_artifact_section(&mut buf, conn, project_id, 2, include_static_analysis)?;
 
     for (idx, sid) in sprint_ids_ordered.iter().enumerate() {
         let (sprint_name, start, end) = conn
@@ -3639,19 +3676,10 @@ fn generate_markdown_report_multi_to_path_inner(
             Some(&sprint_ids_ordered[..=idx]),
             3,
         )?;
-        let sa_data = if include_static_analysis {
-            Some(static_analysis_per_student(conn, *sid, project_id)?)
-        } else {
-            None
-        };
-        write_section_b(
-            &mut buf,
-            conn,
-            *sid,
-            project_id,
-            3,
-            sa_data.as_ref().map(|d| (d, DEFAULT_TOP_N_PER_STUDENT)),
-        )?;
+        // T-P3.4 PR 3: per-sprint Section B no longer renders SA — it
+        // moved to the top-level artifact section (rendered once
+        // before the per-sprint loop).
+        write_section_b(&mut buf, conn, *sid, project_id, 3, None)?;
         if professor_view {
             write_section_complexity_attribution(&mut buf, conn, *sid, project_id, 3)?;
         }
@@ -4006,25 +4034,26 @@ mod tests {
                 PRIMARY KEY (repo_full_name));
              CREATE TABLE static_analysis_findings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                repo_full_name TEXT NOT NULL, sprint_id INTEGER NOT NULL,
+                repo_full_name TEXT NOT NULL,
                 analyzer TEXT NOT NULL, analyzer_version TEXT,
                 rule_id TEXT NOT NULL, category TEXT, severity TEXT NOT NULL,
                 file_path TEXT NOT NULL, start_line INTEGER, end_line INTEGER,
                 message TEXT NOT NULL, help_uri TEXT,
                 fingerprint TEXT NOT NULL, head_sha TEXT,
-                UNIQUE (repo_full_name, sprint_id, fingerprint));
+                introduced_sprint_id INTEGER,
+                UNIQUE (repo_full_name, fingerprint));
              CREATE TABLE static_analysis_finding_attribution (
                 finding_id INTEGER NOT NULL, student_id TEXT NOT NULL,
                 lines_authored INTEGER NOT NULL, total_lines INTEGER NOT NULL,
-                weight REAL NOT NULL, sprint_id INTEGER NOT NULL,
+                weight REAL NOT NULL,
                 PRIMARY KEY (finding_id, student_id));
              CREATE TABLE static_analysis_runs (
-                repo_full_name TEXT NOT NULL, sprint_id INTEGER NOT NULL,
+                repo_full_name TEXT NOT NULL,
                 analyzer TEXT NOT NULL, status TEXT NOT NULL,
                 findings_count INTEGER NOT NULL DEFAULT 0,
                 duration_ms INTEGER, head_sha TEXT, diagnostics TEXT,
                 ran_at TEXT NOT NULL,
-                PRIMARY KEY (repo_full_name, sprint_id, analyzer));
+                PRIMARY KEY (repo_full_name, analyzer));
              CREATE TABLE task_similarity_groups (group_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sprint_id INTEGER, project_id INTEGER, representative_task_id INTEGER,
                 group_label TEXT, stack TEXT, layer TEXT, action TEXT,
@@ -4140,7 +4169,7 @@ mod tests {
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let map_idx = body
             .find("## Team identity map")
@@ -4152,7 +4181,7 @@ mod tests {
             map_idx < glossary_idx,
             "team identity map must precede the glossary: {body}"
         );
-        let h1_idx = body.find("# Sprint report").expect("H1 banner missing");
+        let h1_idx = body.find("# Project report").expect("H1 banner missing");
         assert!(
             h1_idx < map_idx,
             "H1 banner must precede the team identity map: {body}"
@@ -4205,7 +4234,7 @@ mod tests {
         .unwrap();
 
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
 
         assert!(
@@ -4227,15 +4256,15 @@ mod tests {
     fn markdown_report_contains_all_three_sections() {
         let conn = mk_conn();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         assert!(path.exists());
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.starts_with("# Sprint report"));
-        assert!(body.contains("## A. Team snapshot"));
-        assert!(body.contains("## B. Student dashboards"));
-        assert!(body.contains("## C. Peer-group analysis"));
+        assert!(body.starts_with("# Project report"));
+        assert!(body.contains("### A. Team snapshot"));
+        assert!(body.contains("### B. Student dashboards"));
+        assert!(body.contains("### C. Peer-group analysis"));
         // Student section renders
-        assert!(body.contains("### Alice Bob"));
+        assert!(body.contains("#### Alice Bob"));
         // PR link survives
         assert!(body.contains("https://github.com/udg-pds/spring-foo/pull/42"));
         // Flag bullet
@@ -4246,7 +4275,7 @@ mod tests {
     fn markdown_report_emits_table_of_contents_before_first_section() {
         let conn = mk_conn();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let toc_idx = body
             .find("## Table of contents")
@@ -4285,7 +4314,7 @@ mod tests {
     fn markdown_report_includes_glossary_before_section_a_with_toc_link() {
         let conn = mk_conn();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let glossary_idx = body
             .find("## 0. Glossary")
@@ -4473,7 +4502,7 @@ mod tests {
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         // Names + GitHub logins, not raw UUIDs.
         assert!(
@@ -4504,7 +4533,7 @@ mod tests {
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(
             body.contains("### Code ownership"),
@@ -4543,7 +4572,7 @@ mod tests {
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         // Distinct markers of the retired per-sprint architecture roll-up.
         // The "### Architecture conformance" string still appears in the
@@ -4834,7 +4863,7 @@ mod tests {
         .unwrap();
 
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("| Alice Bob | [alice-gh](https://github.com/alice-gh) |"));
         assert!(body.contains("| Fallback User | [fallback-gh](https://github.com/fallback-gh) |"));
@@ -4859,7 +4888,7 @@ mod tests {
         .unwrap();
 
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("| [#44](https://github.com/udg-pds/spring-foo/pull/44) | spring-foo | [No metric PR](https://github.com/udg-pds/spring-foo/pull/44) | +10 / -2 | 4 | 0 | 0 | 0 |"));
     }
@@ -4881,9 +4910,9 @@ mod tests {
     ) {
         conn.execute(
             "INSERT INTO static_analysis_findings
-                (id, repo_full_name, sprint_id, analyzer, rule_id, severity, category,
+                (id, repo_full_name, analyzer, rule_id, severity, category,
                  file_path, start_line, end_line, message, fingerprint)
-             VALUES (?, 'udg-pds/spring-foo', 10, ?, ?, ?, 'bug', ?, ?, ?, ?, ?)",
+             VALUES (?, 'udg-pds/spring-foo', ?, ?, ?, 'bug', ?, ?, ?, ?, ?)",
             rusqlite::params![
                 finding_id,
                 analyzer,
@@ -4899,8 +4928,8 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO static_analysis_finding_attribution
-                (finding_id, student_id, lines_authored, total_lines, weight, sprint_id)
-             VALUES (?, ?, 1, 1, ?, 10)",
+                (finding_id, student_id, lines_authored, total_lines, weight)
+             VALUES (?, ?, 1, 1, ?)",
             rusqlite::params![finding_id, student, weight],
         )
         .unwrap();
@@ -4923,7 +4952,7 @@ mod tests {
             0.8,
         );
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(
             body.contains(
@@ -5009,7 +5038,7 @@ mod tests {
             );
         }
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         for i in 0..8 {
             let needle = format!("`pmd:Rule{}`", i);
@@ -5096,7 +5125,7 @@ mod tests {
     fn per_student_complexity_block_silent_on_empty_db() {
         let conn = mk_conn();
         let tmp = TempDir::new().unwrap();
-        let path = generate_markdown_report(&conn, 10, 1, "pds26-1a", tmp.path()).unwrap();
+        let path = generate_markdown_report_multi(&conn, 1, "pds26-1a", &[10], tmp.path()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(
             !body.contains("## Code complexity & testability"),

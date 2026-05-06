@@ -1,38 +1,40 @@
 //! Per-student attribution of static-analysis findings via `git blame`.
 //!
 //! Mirrors `architecture::attribution::attribute_violations_for_repo`
-//! exactly — the algorithm is unchanged, only the table names differ:
+//! and `quality::testability::attribute_findings_for_repo`. T-P3.4:
+//! artifact-shape, sprint-free.
 //!
 //! - reads `static_analysis_findings` rows that carry a line range
 //! - blames the offending lines via `survival::blame::blame_file`
 //! - tallies lines per student over `[start_line..=end_line]`
 //! - writes one `static_analysis_finding_attribution` row per student
 //!   with `weight = lines_authored / total_lines` in `[0, 1]`
+//! - UPDATEs each finding's `introduced_sprint_id` to the earliest
+//!   sprint window containing any blamed commit's author-date
 //!
 //! The blame call applies `-w` (whitespace-insensitive) and
 //! `--ignore-revs-file`, so a 1-line typo fix on a 30-line offending
-//! method earns ~3 % weight, not 50 %. Same defence the architecture
-//! attribution and the survival stage already rely on.
+//! method earns ~3 % weight, not 50 %.
 //!
 //! ### Idempotency
 //!
-//! Pre-existing rows for `(repo, sprint)` are deleted before re-inserting,
-//! mirroring the `static_analysis_findings` write path. The two deletes
-//! happen in the same logical block (`scan_repo_to_db`) so partial state
-//! from a previous run can't survive into a re-run.
+//! Pre-existing rows for `repo_full_name` are deleted before
+//! re-inserting in the parent `scan_repo_to_db`, so partial state from
+//! a previous run can't survive into a re-run.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{params, Connection};
+use sprint_grader_core::time::{containing_sprint_id, load_sprint_windows, track_min_time};
 use sprint_grader_survival::blame::{blame_file, build_email_to_student_map, EmailStudentMap};
 use tracing::warn;
 
 /// Run blame attribution for every finding row currently in
-/// `static_analysis_findings` for `(repo_full_name, sprint_id)` that
-/// carries a `start_line` / `end_line`. Findings without a line range
-/// (rare — typically file-level analyzer outputs) are skipped: they have
-/// no anchor to blame.
+/// `static_analysis_findings` for `repo_full_name` that carries a
+/// `start_line` / `end_line`. Findings without a line range (file-level
+/// analyzer outputs) are skipped — no anchor to blame. Also UPDATEs
+/// each finding's `introduced_sprint_id`.
 ///
 /// Returns the number of `static_analysis_finding_attribution` rows
 /// written.
@@ -40,17 +42,17 @@ pub fn attribute_findings_for_repo(
     conn: &Connection,
     repo_path: &Path,
     repo_full_name: &str,
-    sprint_id: i64,
 ) -> rusqlite::Result<usize> {
     let email_map = build_email_to_student_map(conn)?;
+    let sprint_windows = load_sprint_windows(conn)?;
 
     let mut stmt = conn.prepare(
         "SELECT id, file_path, start_line, end_line
          FROM static_analysis_findings
-         WHERE repo_full_name = ? AND sprint_id = ?
+         WHERE repo_full_name = ?
            AND start_line IS NOT NULL AND end_line IS NOT NULL",
     )?;
-    let rows = stmt.query_map(params![repo_full_name, sprint_id], |r| {
+    let rows = stmt.query_map(params![repo_full_name], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -67,17 +69,14 @@ pub fn attribute_findings_for_repo(
     }
     drop(stmt);
 
-    // Clear previous attribution for this (repo, sprint) before re-inserting.
-    // The `ON DELETE CASCADE` on the FK would also clear these when the
-    // findings rows are deleted, but explicit deletes keep behaviour visible
-    // to operators reading the SQL.
+    // Clear previous attribution for this repo before re-inserting.
     conn.execute(
         "DELETE FROM static_analysis_finding_attribution
          WHERE finding_id IN (
              SELECT id FROM static_analysis_findings
-             WHERE repo_full_name = ? AND sprint_id = ?
+             WHERE repo_full_name = ?
          )",
-        params![repo_full_name, sprint_id],
+        params![repo_full_name],
     )?;
 
     let mut written = 0usize;
@@ -101,6 +100,7 @@ pub fn attribute_findings_for_repo(
         for (id, start, end) in findings {
             let mut per_student: HashMap<String, u32> = HashMap::new();
             let mut total: u32 = 0;
+            let mut min_author_time: Option<i64> = None;
             for ln in start..=end {
                 let bl = match blame.get(&ln) {
                     Some(b) => b,
@@ -110,7 +110,20 @@ pub fn attribute_findings_for_repo(
                 if let Some(student_id) = resolve_student(&email_map, &bl.author_email) {
                     *per_student.entry(student_id).or_default() += 1;
                 }
+                track_min_time(&mut min_author_time, bl.author_time);
             }
+
+            // T-P3.4: write the earliest containing sprint as
+            // `introduced_sprint_id`. Always update (even to NULL) so a
+            // re-run cleanly overwrites prior values.
+            let introduced = min_author_time.and_then(|t| containing_sprint_id(&sprint_windows, t));
+            conn.execute(
+                "UPDATE static_analysis_findings
+                 SET introduced_sprint_id = ?
+                 WHERE id = ?",
+                params![introduced, id],
+            )?;
+
             if total == 0 || per_student.is_empty() {
                 continue;
             }
@@ -119,16 +132,9 @@ pub fn attribute_findings_for_repo(
                 conn.execute(
                     "INSERT OR REPLACE INTO static_analysis_finding_attribution
                         (finding_id, student_id, lines_authored,
-                         total_lines, weight, sprint_id)
-                     VALUES (?, ?, ?, ?, ?, ?)",
-                    params![
-                        id,
-                        student_id,
-                        lines as i64,
-                        total as i64,
-                        weight,
-                        sprint_id
-                    ],
+                         total_lines, weight)
+                     VALUES (?, ?, ?, ?, ?)",
+                    params![id, student_id, lines as i64, total as i64, weight],
                 )?;
                 written += 1;
             }
@@ -240,11 +246,9 @@ mod tests {
         .unwrap();
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn insert_finding(
         conn: &Connection,
         repo_full_name: &str,
-        sprint_id: i64,
         file_path: &str,
         rule_id: &str,
         start: Option<u32>,
@@ -253,12 +257,11 @@ mod tests {
         let fingerprint = format!("fp-{rule_id}-{}-{}", file_path, start.unwrap_or(0));
         conn.execute(
             "INSERT INTO static_analysis_findings
-                (repo_full_name, sprint_id, analyzer, rule_id, severity, file_path,
+                (repo_full_name, analyzer, rule_id, severity, file_path,
                  start_line, end_line, message, fingerprint)
-             VALUES (?, ?, 'pmd', ?, 'WARNING', ?, ?, ?, 'msg', ?)",
+             VALUES (?, 'pmd', ?, 'WARNING', ?, ?, ?, 'msg', ?)",
             params![
                 repo_full_name,
-                sprint_id,
                 rule_id,
                 file_path,
                 start.map(|n| n as i64),
@@ -289,8 +292,8 @@ mod tests {
             "all alice",
         );
 
-        let fid = insert_finding(&conn, "udg/x", 1, "Foo.java", "R1", Some(3), Some(7));
-        let n = attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        let fid = insert_finding(&conn, "udg/x", "Foo.java", "R1", Some(3), Some(7));
+        let n = attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
         assert!(n > 0, "expected at least one attribution row");
 
         let (sid, lines, total, weight): (String, i64, i64, f64) = conn
@@ -342,8 +345,8 @@ mod tests {
             "bob typo fix",
         );
 
-        let fid = insert_finding(&conn, "udg/x", 1, "Foo.java", "R1", Some(1), Some(30));
-        let n = attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        let fid = insert_finding(&conn, "udg/x", "Foo.java", "R1", Some(1), Some(30));
+        let n = attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
         assert_eq!(n, 2, "alice + bob");
 
         let mut rows: Vec<(String, i64, i64, f64)> = conn
@@ -374,10 +377,10 @@ mod tests {
         let (_g, repo) = init_repo();
         let body = (1..=5).map(|i| format!("// l{i}\n")).collect::<String>();
         commit_file(&repo, "F.java", &body, "alice@example.com", "Alice", "init");
-        let _fid = insert_finding(&conn, "udg/x", 1, "F.java", "R", Some(1), Some(5));
+        let _fid = insert_finding(&conn, "udg/x", "F.java", "R", Some(1), Some(5));
 
-        let n1 = attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
-        let n2 = attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        let n1 = attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
+        let n2 = attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
         assert_eq!(n1, n2);
         let total: i64 = conn
             .query_row(
@@ -409,10 +412,10 @@ mod tests {
         );
 
         // Two findings: one with a real range, one with start_line = NULL.
-        let _real = insert_finding(&conn, "udg/x", 1, "F.java", "R1", Some(1), Some(1));
-        let _file_level = insert_finding(&conn, "udg/x", 1, "F.java", "R2", None, None);
+        let _real = insert_finding(&conn, "udg/x", "F.java", "R1", Some(1), Some(1));
+        let _file_level = insert_finding(&conn, "udg/x", "F.java", "R2", None, None);
 
-        let n = attribute_findings_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        let n = attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
         assert_eq!(
             n, 1,
             "only the finding with a line range should produce attribution rows"

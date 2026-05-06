@@ -2251,22 +2251,23 @@ fn severity_rank(sev: &str) -> u8 {
     }
 }
 
-/// STATIC_ANALYSIS_HOTSPOT (T-SA). Per-student companion to the
-/// PMD/Checkstyle/SpotBugs scan. Sums each student's blame-attribution
-/// `weight` across this sprint's `static_analysis_findings` and fires
-/// when that sum is ≥ the configured threshold. Mirror of
-/// `architecture_hotspot`, joined on the new tables; the offender JSON
-/// includes the analyzer id, rule id, and category so the report can
-/// render which tool flagged what.
+/// STATIC_ANALYSIS_HOTSPOT (T-SA / T-P3.4). Per-student artifact flag.
+/// Sums each student's blame-attribution `weight` across the project's
+/// `static_analysis_findings` rows and fires when that sum is ≥ the
+/// configured threshold. Sprint-free: scoping is by student team
+/// membership, since findings have no project_id column of their own
+/// (a foreign key on repo_full_name → pull_requests would be incorrect:
+/// the `f.project_id` rollup the complexity findings carry isn't
+/// present here).
 ///
 /// Severity is the maximum severity of the contributing findings;
 /// per-tool severity normalisation already happened in
-/// `static_analysis::sarif::parse`. Default threshold (`10.0`) keeps
-/// the flag effectively silent until an instructor lowers it — phase-1
-/// sign-off was "feedback only".
+/// `static_analysis::sarif::parse`. Default threshold keeps the flag
+/// effectively silent until an instructor lowers it — phase-1 sign-off
+/// was "feedback only".
 fn static_analysis_hotspot(
     conn: &Connection,
-    sprint_id: i64,
+    project_id: i64,
     min_weighted: f64,
 ) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(
@@ -2274,10 +2275,11 @@ fn static_analysis_hotspot(
                 f.category, f.file_path
          FROM static_analysis_finding_attribution a
          JOIN static_analysis_findings f ON f.id = a.finding_id
-         WHERE a.sprint_id = ?",
+         JOIN students s ON s.id = a.student_id
+         WHERE s.team_project_id = ?",
     )?;
     let rows = stmt
-        .query_map([sprint_id], |r| {
+        .query_map([project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -2606,8 +2608,8 @@ fn persist_artifact_flags(
 /// scans have populated their attribution rows. Idempotent: the
 /// project's prior `student_artifact_flags` rows are deleted first.
 ///
-/// PR 1 wired `ARCHITECTURE_HOTSPOT`. PR 2 adds `COMPLEXITY_HOTSPOT`.
-/// PR 3 will add `STATIC_ANALYSIS_HOTSPOT`.
+/// PR 1 wired `ARCHITECTURE_HOTSPOT`. PR 2 added `COMPLEXITY_HOTSPOT`.
+/// PR 3 added `STATIC_ANALYSIS_HOTSPOT`.
 pub fn detect_artifact_flags_for_project_id(
     conn: &Connection,
     project_id: i64,
@@ -2651,6 +2653,10 @@ pub fn detect_artifact_flags_for_project_id(
             dt.complexity_hotspot_warn,
             dt.complexity_hotspot_crit,
         )
+    );
+    total += run!(
+        "STATIC_ANALYSIS_HOTSPOT",
+        static_analysis_hotspot(conn, project_id, dt.static_analysis_hotspot_min_weighted)
     );
     Ok(total)
 }
@@ -2774,20 +2780,9 @@ pub fn detect_flags_for_sprint_id(
         "REGULARITY_DECLINING",
         regularity_declining(conn, sprint_id, dt)
     );
-    // T-P3.4: ARCHITECTURE_DRIFT is gone; ARCHITECTURE_HOTSPOT and
-    // COMPLEXITY_HOTSPOT are project-keyed and run in
-    // `detect_artifact_flags_for_project_id`. STATIC_ANALYSIS_HOTSPOT
-    // moves there in PR 3.
-    total += run!(
-        "STATIC_ANALYSIS_HOTSPOT",
-        static_analysis_hotspot(
-            conn,
-            sprint_id,
-            config
-                .detector_thresholds
-                .static_analysis_hotspot_min_weighted
-        )
-    );
+    // T-P3.4: ARCHITECTURE_DRIFT is retired; ARCHITECTURE_HOTSPOT,
+    // COMPLEXITY_HOTSPOT, and STATIC_ANALYSIS_HOTSPOT are all
+    // project-keyed and run in `detect_artifact_flags_for_project_id`.
     total += run!(
         "LOW_MUTATION_SCORE",
         low_mutation_score(

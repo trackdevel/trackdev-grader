@@ -1,11 +1,12 @@
-//! Java static-analysis stage (PMD / Checkstyle / SpotBugs) — T1 skeleton.
+//! Java static-analysis stage (PMD / Checkstyle / SpotBugs).
 //!
-//! Mirrors the shape of `sprint-grader-architecture` (T-P2.2/T-P3.1):
-//! per-repo + per-sprint scan, blame-based per-student attribution, and a
-//! `STATIC_ANALYSIS_HOTSPOT` flag in `analyze`. T1 ships only the type
-//! surface and the SQL tables — no analyzer impls, no pipeline wiring.
-//! Subsequent tasks (T2..T6) fill in PMD, Checkstyle, attribution,
-//! pipeline+CLI, report rendering, and SpotBugs.
+//! T-P3.4: artifact-shape (sprint-free). Per-repo scan, blame-based
+//! per-student attribution, and a project-keyed
+//! `STATIC_ANALYSIS_HOTSPOT` flag in `analyze` that fires from
+//! `detect_artifact_flags_for_project_id` and lands in
+//! `student_artifact_flags`. The scan grades the code as delivered on
+//! main; `static_analysis_findings.introduced_sprint_id` carries
+//! sprint provenance for rendering.
 
 pub mod adapter;
 pub mod attribution;
@@ -34,13 +35,14 @@ use std::time::Duration;
 use rusqlite::{params, Connection};
 use tracing::{info, warn};
 
-/// Scan one cloned repo for one sprint: run enabled analyzers, persist
-/// findings to `static_analysis_findings`, write outcome rows to
+/// Scan one cloned repo: run enabled analyzers, persist findings to
+/// `static_analysis_findings`, write outcome rows to
 /// `static_analysis_runs`, then run blame-based per-student attribution.
+/// T-P3.4: artifact-shape, sprint-free.
 ///
-/// Idempotent: pre-existing rows for `(repo_full_name, sprint_id)` in
-/// all three tables are deleted up-front so re-runs reflect the current
-/// working tree without duplicating.
+/// Idempotent: pre-existing rows for `repo_full_name` in all three
+/// tables are deleted up-front so re-runs reflect the current working
+/// tree without duplicating.
 ///
 /// Returns the number of `static_analysis_finding_attribution` rows
 /// written. Any analyzer that crashes, times out, or isn't installed is
@@ -51,30 +53,27 @@ pub fn scan_repo_to_db(
     conn: &Connection,
     repo_path: &Path,
     repo_full_name: &str,
-    sprint_id: i64,
     rules: &Rules,
 ) -> rusqlite::Result<usize> {
-    // Idempotency: clear all three tables for this (repo, sprint) before
-    // we re-populate. The FK on `_attribution` has ON DELETE CASCADE so
+    // Idempotency: clear all three tables for this repo before we
+    // re-populate. The FK on `_attribution` has ON DELETE CASCADE so
     // dropping the findings rows would suffice, but explicit deletes
     // keep behaviour visible.
     conn.execute(
         "DELETE FROM static_analysis_finding_attribution
          WHERE finding_id IN (
              SELECT id FROM static_analysis_findings
-             WHERE repo_full_name = ? AND sprint_id = ?
+             WHERE repo_full_name = ?
          )",
-        params![repo_full_name, sprint_id],
+        params![repo_full_name],
     )?;
     conn.execute(
-        "DELETE FROM static_analysis_findings
-         WHERE repo_full_name = ? AND sprint_id = ?",
-        params![repo_full_name, sprint_id],
+        "DELETE FROM static_analysis_findings WHERE repo_full_name = ?",
+        params![repo_full_name],
     )?;
     conn.execute(
-        "DELETE FROM static_analysis_runs
-         WHERE repo_full_name = ? AND sprint_id = ?",
-        params![repo_full_name, sprint_id],
+        "DELETE FROM static_analysis_runs WHERE repo_full_name = ?",
+        params![repo_full_name],
     )?;
 
     let head_sha = git_head_sha(repo_path);
@@ -108,7 +107,6 @@ pub fn scan_repo_to_db(
                     &cfg,
                     repo_path,
                     repo_full_name,
-                    sprint_id,
                     head_sha.as_deref(),
                     rules,
                     work_dir.path(),
@@ -144,7 +142,6 @@ pub fn scan_repo_to_db(
                     &cfg,
                     repo_path,
                     repo_full_name,
-                    sprint_id,
                     head_sha.as_deref(),
                     rules,
                     work_dir.path(),
@@ -169,20 +166,20 @@ pub fn scan_repo_to_db(
     // silent.
     if rules.spotbugs.enabled {
         let class_roots = spotbugs::discover_class_roots(repo_path);
-        let compile_ok = spotbugs::latest_pr_compiled_ok(conn, repo_full_name, sprint_id);
+        let compile_ok = spotbugs::latest_pr_compiled_ok(conn, repo_full_name);
         if class_roots.is_empty() || !compile_ok {
             let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
             let diagnostics = if !compile_ok {
-                "no successful PR build for this sprint".to_string()
+                "no successful PR build on record for this repo".to_string()
             } else {
                 "no class roots found under build/".to_string()
             };
             conn.execute(
                 "INSERT OR REPLACE INTO static_analysis_runs
-                    (repo_full_name, sprint_id, analyzer, status, findings_count,
+                    (repo_full_name, analyzer, status, findings_count,
                      duration_ms, head_sha, diagnostics, ran_at)
-                 VALUES (?, ?, 'spotbugs', 'SKIPPED_NO_CLASSES', 0, 0, ?, ?, ?)",
-                params![repo_full_name, sprint_id, head_sha, diagnostics, now],
+                 VALUES (?, 'spotbugs', 'SKIPPED_NO_CLASSES', 0, 0, ?, ?, ?)",
+                params![repo_full_name, head_sha, diagnostics, now],
             )?;
         } else {
             match SpotBugs::discover(rules.spotbugs.include_findsecbugs) {
@@ -209,7 +206,6 @@ pub fn scan_repo_to_db(
                         &cfg,
                         repo_path,
                         repo_full_name,
-                        sprint_id,
                         head_sha.as_deref(),
                         rules,
                         work_dir.path(),
@@ -228,15 +224,14 @@ pub fn scan_repo_to_db(
         }
     }
 
-    // Attribution. Mirrors the architecture crate's lib.rs:100-111: log
+    // Attribution. Mirrors the architecture crate's lib.rs idiom: log
     // and continue on error, so a single team's broken git repo can't
     // abort the wider pipeline.
-    match attribute_findings_for_repo(conn, repo_path, repo_full_name, sprint_id) {
+    match attribute_findings_for_repo(conn, repo_path, repo_full_name) {
         Ok(n) => Ok(n),
         Err(e) => {
             warn!(
                 repo = repo_full_name,
-                sprint_id = sprint_id,
                 error = %e,
                 "static-analysis attribution failed; continuing"
             );
@@ -246,12 +241,11 @@ pub fn scan_repo_to_db(
 }
 
 /// Project-level convenience: walk repo subdirectories under
-/// `project_root` and call `scan_repo_to_db` for each. Mirrors
-/// `architecture::scan_project_to_db`.
+/// `project_root` and call `scan_repo_to_db` for each
+/// (T-P3.4: artifact-shape, sprint-free).
 pub fn scan_project_to_db(
     conn: &Connection,
     project_root: &Path,
-    sprint_id: i64,
     rules: &Rules,
 ) -> rusqlite::Result<usize> {
     if !project_root.is_dir() {
@@ -273,7 +267,7 @@ pub fn scan_project_to_db(
         let repo_path = entry.path();
         let bare = entry.file_name().to_string_lossy().into_owned();
         let repo_full_name = resolve_qualified_repo_name(conn, &bare).unwrap_or(bare);
-        total += scan_repo_to_db(conn, &repo_path, &repo_full_name, sprint_id, rules)?;
+        total += scan_repo_to_db(conn, &repo_path, &repo_full_name, rules)?;
     }
     Ok(total)
 }
@@ -285,7 +279,6 @@ fn run_analyzer_into_db(
     cfg: &AnalyzerConfig,
     repo_path: &Path,
     repo_full_name: &str,
-    sprint_id: i64,
     head_sha: Option<&str>,
     rules: &Rules,
     work_dir: &Path,
@@ -298,7 +291,6 @@ fn run_analyzer_into_db(
         cfg,
         repo_path,
         repo_full_name,
-        sprint_id,
         head_sha,
         rules,
         work_dir,
@@ -315,7 +307,6 @@ fn run_analyzer_with_classes(
     cfg: &AnalyzerConfig,
     repo_path: &Path,
     repo_full_name: &str,
-    sprint_id: i64,
     head_sha: Option<&str>,
     rules: &Rules,
     work_dir: &Path,
@@ -347,7 +338,6 @@ fn run_analyzer_with_classes(
     info!(
         analyzer = analyzer_id,
         repo = repo_full_name,
-        sprint_id,
         "running static analyzer"
     );
     let output = analyzer.run(&input, cfg);
@@ -367,15 +357,14 @@ fn run_analyzer_with_classes(
     if matches!(output.status, AnalyzerStatus::Ok) {
         let mut stmt = conn.prepare(
             "INSERT OR IGNORE INTO static_analysis_findings
-                (repo_full_name, sprint_id, analyzer, analyzer_version, rule_id,
+                (repo_full_name, analyzer, analyzer_version, rule_id,
                  category, severity, file_path, start_line, end_line, message,
                  help_uri, fingerprint, head_sha)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )?;
         for f in &findings {
             stmt.execute(params![
                 repo_full_name,
-                sprint_id,
                 f.analyzer,
                 analyzer.version(),
                 f.rule_id,
@@ -395,12 +384,11 @@ fn run_analyzer_with_classes(
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     conn.execute(
         "INSERT OR REPLACE INTO static_analysis_runs
-            (repo_full_name, sprint_id, analyzer, status, findings_count,
+            (repo_full_name, analyzer, status, findings_count,
              duration_ms, head_sha, diagnostics, ran_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             repo_full_name,
-            sprint_id,
             analyzer_id,
             output.status.as_str(),
             findings_count,
@@ -501,8 +489,8 @@ mod tests {
         rules.checkstyle.enabled = false;
         rules.spotbugs.enabled = false;
 
-        let n1 = scan_repo_to_db(&conn, tmp.path(), "udg/x", 1, &rules).unwrap();
-        let n2 = scan_repo_to_db(&conn, tmp.path(), "udg/x", 1, &rules).unwrap();
+        let n1 = scan_repo_to_db(&conn, tmp.path(), "udg/x", &rules).unwrap();
+        let n2 = scan_repo_to_db(&conn, tmp.path(), "udg/x", &rules).unwrap();
         assert_eq!(n1, 0);
         assert_eq!(n2, 0);
 
@@ -535,7 +523,7 @@ mod tests {
     fn scan_project_to_db_returns_zero_for_missing_dir() {
         let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).unwrap();
-        let n = scan_project_to_db(&conn, Path::new("/no/such/dir"), 1, &Rules::default()).unwrap();
+        let n = scan_project_to_db(&conn, Path::new("/no/such/dir"), &Rules::default()).unwrap();
         assert_eq!(n, 0);
     }
 }

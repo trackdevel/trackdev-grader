@@ -866,6 +866,7 @@ pub fn testability_findings_for_file(file_path: &str, source: &[u8]) -> Vec<Find
 use std::collections::HashMap;
 
 use rusqlite::{params, Connection};
+use sprint_grader_core::time::{containing_sprint_id, load_sprint_windows, track_min_time};
 use sprint_grader_survival::blame::{blame_file, build_email_to_student_map, EmailStudentMap};
 use tracing::warn;
 
@@ -1144,7 +1145,7 @@ pub fn attribute_findings_for_repo(
                     *per_student_lines.entry(sid.clone()).or_default() += 1;
                     *per_student_weight.entry(sid).or_default() += w;
                 }
-                track_min_time(&mut min_author_time, bl);
+                track_min_time(&mut min_author_time, bl.author_time);
             }
 
             // T-P3.4: write the earliest containing sprint as
@@ -1177,61 +1178,6 @@ pub fn attribute_findings_for_repo(
         }
     }
     Ok(written)
-}
-
-fn track_min_time(slot: &mut Option<i64>, bl: &sprint_grader_survival::blame::BlameLine) {
-    if bl.author_time <= 0 {
-        return;
-    }
-    match slot {
-        Some(prev) => {
-            if bl.author_time < *prev {
-                *slot = Some(bl.author_time);
-            }
-        }
-        None => *slot = Some(bl.author_time),
-    }
-}
-
-/// `[(sprint_id, start_unix, end_unix)]` ordered by start ascending.
-type SprintWindows = Vec<(i64, i64, i64)>;
-
-fn load_sprint_windows(conn: &Connection) -> rusqlite::Result<SprintWindows> {
-    let mut stmt = conn.prepare(
-        "SELECT id, start_date, end_date FROM sprints
-         WHERE start_date IS NOT NULL AND end_date IS NOT NULL
-         ORDER BY start_date ASC",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-        ))
-    })?;
-    let mut out: SprintWindows = Vec::new();
-    for r in rows {
-        let (id, start, end) = r?;
-        let s = match sprint_grader_core::time::parse_iso(&start) {
-            Some(dt) => dt.timestamp(),
-            None => continue,
-        };
-        let e = match sprint_grader_core::time::parse_iso(&end) {
-            Some(dt) => dt.timestamp(),
-            None => continue,
-        };
-        out.push((id, s, e));
-    }
-    Ok(out)
-}
-
-fn containing_sprint_id(windows: &SprintWindows, ts: i64) -> Option<i64> {
-    for (id, s, e) in windows {
-        if ts >= *s && ts <= *e {
-            return Some(*id);
-        }
-    }
-    None
 }
 
 // ----------------------------------------------------------------------

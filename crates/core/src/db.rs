@@ -136,6 +136,29 @@ impl Database {
                 .execute("DROP INDEX IF EXISTS idx_mca_sprint", [])?;
         }
 
+        // T-P3.4 PR 3: same shape collapse for static-analysis findings
+        // — static_analysis_findings, static_analysis_finding_attribution,
+        // static_analysis_runs all lose sprint_id; UNIQUE on findings
+        // becomes (repo_full_name, fingerprint); runs PK becomes
+        // (repo_full_name, analyzer). Detect on the findings table.
+        let saf_cols = self
+            .column_names("static_analysis_findings")
+            .unwrap_or_default();
+        if saf_cols.iter().any(|c| c == "sprint_id") {
+            self.conn.execute(
+                "DROP TABLE IF EXISTS static_analysis_finding_attribution",
+                [],
+            )?;
+            self.conn
+                .execute("DROP TABLE IF EXISTS static_analysis_findings", [])?;
+            self.conn
+                .execute("DROP TABLE IF EXISTS static_analysis_runs", [])?;
+            self.conn
+                .execute("DROP INDEX IF EXISTS idx_sa_findings_sprint", [])?;
+            self.conn
+                .execute("DROP INDEX IF EXISTS idx_sa_attr_sprint", [])?;
+        }
+
         Ok(())
     }
 
@@ -784,6 +807,87 @@ mod tests {
         let n: i64 = db
             .conn
             .query_row("SELECT count(*) FROM method_complexity_findings", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0, "legacy rows must be dropped along with the old shape");
+    }
+
+    /// Regression for T-P3.4 PR 3: a DB carrying the legacy per-sprint
+    /// static-analysis shape (sprint_id in static_analysis_findings)
+    /// must be rewritten to the artifact-level shape on the next
+    /// `create_tables` call.
+    #[test]
+    fn migration_drops_legacy_per_sprint_static_analysis_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grading.db");
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE static_analysis_findings (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo_full_name TEXT NOT NULL,
+                    sprint_id      INTEGER NOT NULL,
+                    analyzer       TEXT NOT NULL,
+                    rule_id        TEXT NOT NULL,
+                    severity       TEXT NOT NULL,
+                    file_path      TEXT NOT NULL,
+                    message        TEXT NOT NULL,
+                    fingerprint    TEXT NOT NULL,
+                    UNIQUE (repo_full_name, sprint_id, fingerprint)
+                );
+                 CREATE TABLE static_analysis_finding_attribution (
+                    finding_id     INTEGER NOT NULL,
+                    student_id     TEXT    NOT NULL,
+                    lines_authored INTEGER NOT NULL,
+                    total_lines    INTEGER NOT NULL,
+                    weight         REAL NOT NULL,
+                    sprint_id      INTEGER NOT NULL,
+                    PRIMARY KEY (finding_id, student_id)
+                );
+                 CREATE TABLE static_analysis_runs (
+                    repo_full_name TEXT NOT NULL,
+                    sprint_id      INTEGER NOT NULL,
+                    analyzer       TEXT NOT NULL,
+                    status         TEXT NOT NULL,
+                    findings_count INTEGER NOT NULL DEFAULT 0,
+                    ran_at         TEXT NOT NULL,
+                    PRIMARY KEY (repo_full_name, sprint_id, analyzer)
+                );
+                 INSERT INTO static_analysis_findings
+                    (repo_full_name, sprint_id, analyzer, rule_id, severity,
+                     file_path, message, fingerprint)
+                    VALUES ('udg-pds/spring-x', 70, 'pmd', 'UnusedField',
+                            'WARNING', 'Foo.java', 'unused', 'fp-1');",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        db.create_tables().unwrap();
+
+        let cols = db.column_names("static_analysis_findings").unwrap();
+        assert!(
+            !cols.iter().any(|c| c == "sprint_id"),
+            "legacy sprint_id column must be dropped, got: {cols:?}"
+        );
+        assert!(
+            cols.iter().any(|c| c == "introduced_sprint_id"),
+            "new introduced_sprint_id column must be present, got: {cols:?}"
+        );
+
+        let attr_cols = db
+            .column_names("static_analysis_finding_attribution")
+            .unwrap();
+        assert!(
+            !attr_cols.iter().any(|c| c == "sprint_id"),
+            "attribution sprint_id must be dropped, got: {attr_cols:?}"
+        );
+
+        let n: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM static_analysis_findings", [], |r| {
                 r.get(0)
             })
             .unwrap();
