@@ -67,6 +67,11 @@ pub struct EvaluateConfig {
     /// Path to the Claude Code CLI binary. Default `"claude"`
     /// (resolved against `$PATH`).
     pub claude_cli_path: String,
+    /// DeepSeek-only: V4 `thinking` mode. `Some("enabled")` or
+    /// `Some("disabled")` is forwarded as `{"thinking": {"type": ...}}`
+    /// in the request body; `None` lets DeepSeek apply its server-side
+    /// default. Ignored by `claude-cli` and `anthropic-api` backends.
+    pub thinking: Option<String>,
 }
 
 /// Sentinel returned by [`EvaluateConfig::default`]. It deliberately
@@ -83,6 +88,7 @@ impl Default for EvaluateConfig {
             judge_workers: 4,
             judge_timeout_seconds: 180,
             claude_cli_path: "claude".to_string(),
+            thinking: None,
         }
     }
 }
@@ -125,6 +131,8 @@ pub struct ArchitectureConfig {
     /// against `$PATH`); override if the CLI is in a non-standard
     /// location.
     pub claude_cli_path: String,
+    /// DeepSeek-only: V4 `thinking` mode. See [`EvaluateConfig::thinking`].
+    pub thinking: Option<String>,
 }
 
 /// Sentinel returned by [`ArchitectureConfig::default`]. It deliberately
@@ -149,6 +157,7 @@ impl Default for ArchitectureConfig {
             judge_workers: 1,
             judge_timeout_seconds: 180,
             claude_cli_path: "claude".to_string(),
+            thinking: None,
         }
     }
 }
@@ -477,6 +486,8 @@ struct RawEvaluate {
     judge_timeout_seconds: Option<u64>,
     #[serde(default)]
     claude_cli_path: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -499,6 +510,8 @@ struct RawArchitecture {
     judge_timeout_seconds: Option<u64>,
     #[serde(default)]
     claude_cli_path: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -647,6 +660,27 @@ fn default_mutation_timeout_seconds() -> u64 {
 
 fn default_mutation_report_path() -> String {
     "build/reports/pitest/mutations.xml".to_string()
+}
+
+/// Validate a `[architecture] thinking` / `[evaluate] thinking` value
+/// from `course.toml`. The DeepSeek V4 API accepts only `"enabled"` or
+/// `"disabled"`; anything else would be silently ignored by the server,
+/// so we reject loudly at config-load instead of at request time. Empty
+/// or missing → `None` (let server pick default).
+fn parse_thinking_mode(raw: Option<String>, section: &str) -> Result<Option<String>> {
+    let Some(v) = raw else {
+        return Ok(None);
+    };
+    let trimmed = v.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed {
+        "enabled" | "disabled" => Ok(Some(trimmed.to_string())),
+        other => Err(Error::ConfigInvalid(format!(
+            "[{section}] thinking must be \"enabled\" or \"disabled\", got {other:?}"
+        ))),
+    }
 }
 
 /// Reject overlay paths that are absolute or contain a `..` segment.
@@ -1119,6 +1153,7 @@ impl Config {
                         "[architecture] model_id must not be empty".to_string(),
                     ));
                 }
+                let arch_thinking = parse_thinking_mode(raw.architecture.thinking, "architecture")?;
                 ArchitectureConfig {
                     llm_review: raw.architecture.llm_review,
                     judge: raw.architecture.judge.unwrap_or(arch_defaults.judge),
@@ -1148,6 +1183,7 @@ impl Config {
                         .architecture
                         .claude_cli_path
                         .unwrap_or(arch_defaults.claude_cli_path),
+                    thinking: arch_thinking,
                 }
             },
             evaluate: {
@@ -1168,6 +1204,7 @@ impl Config {
                         "[evaluate] model_id must not be empty".to_string(),
                     ));
                 }
+                let eval_thinking = parse_thinking_mode(raw.evaluate.thinking, "evaluate")?;
                 EvaluateConfig {
                     judge: raw.evaluate.judge.unwrap_or(eval_defaults.judge),
                     model_id: eval_model_id,
@@ -1184,6 +1221,7 @@ impl Config {
                         .evaluate
                         .claude_cli_path
                         .unwrap_or(eval_defaults.claude_cli_path),
+                    thinking: eval_thinking,
                 }
             },
         })
@@ -1392,6 +1430,39 @@ contribution_imbalance_stddev = 1.5
         assert!(cfg.architecture.llm_review);
         assert_eq!(cfg.evaluate.judge, "deepseek-api");
         assert_eq!(cfg.evaluate.model_id, "deepseek-chat");
+        assert!(cfg.architecture.thinking.is_none());
+        assert!(cfg.evaluate.thinking.is_none());
+    }
+
+    #[test]
+    fn deepseek_thinking_knob_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n\
+             [architecture]\nllm_review = true\njudge = \"deepseek-api\"\nmodel_id = \"deepseek-v4-pro\"\nthinking = \"enabled\"\n\
+             [evaluate]\njudge = \"deepseek-api\"\nmodel_id = \"deepseek-v4-flash\"\nthinking = \"disabled\"\n"
+        );
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("load deepseek thinking knob");
+        assert_eq!(cfg.architecture.thinking.as_deref(), Some("enabled"));
+        assert_eq!(cfg.evaluate.thinking.as_deref(), Some("disabled"));
+    }
+
+    #[test]
+    fn deepseek_thinking_rejects_unknown_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n\
+             [architecture]\nmodel_id = \"x\"\nthinking = \"sometimes\"\n\
+             [evaluate]\nmodel_id = \"y\"\n"
+        );
+        write_config(tmp.path(), &body);
+        let err = Config::load(tmp.path()).expect_err("must reject unknown mode");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[architecture] thinking must be"),
+            "error must name the rejected value: {msg}"
+        );
     }
 
     #[test]

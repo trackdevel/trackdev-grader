@@ -1290,8 +1290,11 @@ pub fn run_pipeline(
                             config.architecture.model_id.clone(),
                             config.architecture.max_tokens,
                         ) {
-                            Ok(j) => Some(Box::new(j)
-                                as Box<dyn sprint_grader_architecture_llm::Judge + Send + Sync>),
+                            Ok(j) => {
+                                let j = j.with_thinking(config.architecture.thinking.clone());
+                                Some(Box::new(j)
+                                    as Box<dyn sprint_grader_architecture_llm::Judge + Send + Sync>)
+                            }
                             Err(e) => {
                                 warn!(error = %e, "could not construct DeepSeek client; skipping LLM review");
                                 None

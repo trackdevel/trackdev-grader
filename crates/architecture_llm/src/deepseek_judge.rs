@@ -26,6 +26,12 @@ impl DeepseekJudge {
             max_tokens,
         })
     }
+
+    /// Builder: pin V4 thinking mode on the underlying client.
+    pub fn with_thinking(mut self, thinking: Option<String>) -> Self {
+        self.client = self.client.with_thinking(thinking);
+        self
+    }
 }
 
 impl Judge for DeepseekJudge {
