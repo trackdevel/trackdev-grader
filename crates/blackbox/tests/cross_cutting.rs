@@ -131,12 +131,14 @@ fn t_t4_2_schema_includes_all_p2_derived_tables() {
 fn t_t4_3_markdown_report_includes_new_p2_sections() {
     let tmp = tempfile::tempdir().unwrap();
     let (conn, paths) = Fixture::new().build(tmp.path()).unwrap();
+    // T-P3.4: architecture_violations is sprint-free. Seed one row with
+    // a line range so the new shape's PK (which includes start_line) holds.
     conn.execute(
         "INSERT INTO architecture_violations
-            (repo_full_name, sprint_id, file_path, rule_name, violation_kind,
-             offending_import, severity)
-         VALUES ('udg/r', ?, 'A.java', 'rule', 'layer_dependency', 'com.x.y', 'WARNING')",
-        [ids::SPRINT_ID],
+            (repo_full_name, file_path, rule_name, violation_kind,
+             offending_import, severity, start_line, end_line)
+         VALUES ('udg/r', 'A.java', 'rule', 'layer_dependency', 'com.x.y', 'WARNING', 1, 1)",
+        [],
     )
     .unwrap();
     // Build the renderer's repo dir target.

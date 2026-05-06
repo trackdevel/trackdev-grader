@@ -1,8 +1,8 @@
-//! Per-student attribution of architecture violations via `git blame` (T-P3.1).
+//! Per-student attribution of architecture violations via `git blame` (T-P3.1 / T-P3.4).
 //!
-//! For every row in `architecture_violations` for a given (repo, sprint), we
-//! blame the offending lines and tally how many lines each student authored.
-//! Each student that contributed to the offending range gets one row in
+//! For every row in `architecture_violations` for a given repo, we blame the
+//! offending lines and tally how many lines each student authored. Each
+//! student that contributed to the offending range gets one row in
 //! `architecture_violation_attribution`:
 //!
 //! - `lines_authored` — count of lines blamed to the student.
@@ -16,45 +16,52 @@
 //! `--ignore-revs-file`), so the same defences this codebase uses for
 //! statement survival apply here too.
 //!
-//! ### Idempotency
+//! ## `introduced_sprint_id` (T-P3.4)
 //!
-//! Pre-existing rows for `(repo, sprint)` are deleted before re-inserting,
-//! mirroring the `architecture_violations` write path. The two deletes
-//! happen in the same logical block (`scan_repo_to_db`) so partial state
-//! from a previous run can't survive into a re-run.
+//! While computing per-student attribution we also derive the earliest
+//! sprint window containing any blamed commit's author-date for the
+//! offending range, and write that back to
+//! `architecture_violations.introduced_sprint_id`. Same blame call;
+//! near-zero added cost. NULL when no sprint window contains the date.
+//!
+//! ## Idempotency
+//!
+//! Pre-existing rows for `(repo)` are deleted before re-inserting,
+//! mirroring the `architecture_violations` write path. The deletes
+//! happen in the parent `scan_repo_to_db` so partial state from a
+//! previous run can't survive into a re-run.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{params, Connection};
-use sprint_grader_survival::blame::{blame_file, build_email_to_student_map, EmailStudentMap};
+use sprint_grader_survival::blame::{
+    blame_file, build_email_to_student_map, BlameLine, EmailStudentMap,
+};
 use tracing::warn;
 
 /// Run blame attribution for every violation row currently in
-/// `architecture_violations` for `(repo_full_name, sprint_id)` that carries
-/// a `start_line` / `end_line`. Rows without a line range are skipped (they
-/// were produced before T-P3.1 added attribution and have no anchor to
-/// blame).
+/// `architecture_violations` for `repo_full_name` that carries a
+/// `start_line` / `end_line`. Rows without a line range are skipped
+/// (they can't be anchored to lines for blame).
 ///
-/// Returns the number of `architecture_violation_attribution` rows written.
+/// Returns the number of `architecture_violation_attribution` rows
+/// written. Also UPDATEs each violation row's `introduced_sprint_id`.
 pub fn attribute_violations_for_repo(
     conn: &Connection,
     repo_path: &Path,
     repo_full_name: &str,
-    sprint_id: i64,
 ) -> rusqlite::Result<usize> {
-    // Build the email/login → student map once per call.
     let email_map = build_email_to_student_map(conn)?;
+    let sprint_windows = load_sprint_windows(conn)?;
 
-    // Collect (rowid, file_path, start_line, end_line) for every violation
-    // we care about.
     let mut stmt = conn.prepare(
         "SELECT rowid, file_path, start_line, end_line
          FROM architecture_violations
-         WHERE repo_full_name = ? AND sprint_id = ?
+         WHERE repo_full_name = ?
            AND start_line IS NOT NULL AND end_line IS NOT NULL",
     )?;
-    let rows = stmt.query_map(params![repo_full_name, sprint_id], |r| {
+    let rows = stmt.query_map(params![repo_full_name], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -71,20 +78,18 @@ pub fn attribute_violations_for_repo(
     }
     drop(stmt);
 
-    // Clear previous attribution for this (repo, sprint) before re-inserting.
+    // Clear previous attribution for this repo before re-inserting.
     conn.execute(
         "DELETE FROM architecture_violation_attribution
          WHERE violation_rowid IN (
              SELECT rowid FROM architecture_violations
-             WHERE repo_full_name = ? AND sprint_id = ?
+             WHERE repo_full_name = ?
          )",
-        params![repo_full_name, sprint_id],
+        params![repo_full_name],
     )?;
 
     let mut written = 0usize;
     for (file_path, violations) in by_file {
-        // One blame call per file, regardless of how many violations point
-        // into that file.
         let blame = blame_file(repo_path, &file_path);
         if blame.is_empty() {
             warn!(
@@ -97,6 +102,7 @@ pub fn attribute_violations_for_repo(
         for (rowid, start, end) in violations {
             let mut per_student: HashMap<String, u32> = HashMap::new();
             let mut total: u32 = 0;
+            let mut min_author_time: Option<i64> = None;
             for ln in start..=end {
                 let bl = match blame.get(&ln) {
                     Some(b) => b,
@@ -106,7 +112,20 @@ pub fn attribute_violations_for_repo(
                 if let Some(student_id) = resolve_student(&email_map, &bl.author_email) {
                     *per_student.entry(student_id).or_default() += 1;
                 }
+                track_min_time(&mut min_author_time, bl);
             }
+
+            // T-P3.4: write the earliest containing sprint as
+            // `introduced_sprint_id`. Always update the column (even to
+            // NULL) so a re-run cleanly overwrites prior values.
+            let introduced = min_author_time.and_then(|t| containing_sprint_id(&sprint_windows, t));
+            conn.execute(
+                "UPDATE architecture_violations
+                 SET introduced_sprint_id = ?
+                 WHERE rowid = ?",
+                params![introduced, rowid],
+            )?;
+
             if total == 0 || per_student.is_empty() {
                 continue;
             }
@@ -115,16 +134,9 @@ pub fn attribute_violations_for_repo(
                 conn.execute(
                     "INSERT OR REPLACE INTO architecture_violation_attribution
                         (violation_rowid, student_id, lines_authored,
-                         total_lines, weight, sprint_id)
-                     VALUES (?, ?, ?, ?, ?, ?)",
-                    params![
-                        rowid,
-                        student_id,
-                        lines as i64,
-                        total as i64,
-                        weight,
-                        sprint_id
-                    ],
+                         total_lines, weight)
+                     VALUES (?, ?, ?, ?, ?)",
+                    params![rowid, student_id, lines as i64, total as i64, weight],
                 )?;
                 written += 1;
             }
@@ -138,14 +150,72 @@ fn resolve_student(map: &EmailStudentMap, email: &str) -> Option<String> {
     if let Some((sid, _)) = map.get(&key) {
         return Some(sid.clone());
     }
-    // Fallback: GitHub no-reply emails encode the login as the local part.
     if let Some(local) = key.split('@').next() {
         if let Some((sid, _)) = map.get(local) {
             return Some(sid.clone());
         }
-        // Also try the no-reply form explicitly.
         if let Some((sid, _)) = map.get(&format!("{local}@users.noreply.github.com")) {
             return Some(sid.clone());
+        }
+    }
+    None
+}
+
+fn track_min_time(slot: &mut Option<i64>, bl: &BlameLine) {
+    if bl.author_time <= 0 {
+        return;
+    }
+    match slot {
+        Some(prev) => {
+            if bl.author_time < *prev {
+                *slot = Some(bl.author_time);
+            }
+        }
+        None => *slot = Some(bl.author_time),
+    }
+}
+
+/// `[(sprint_id, start_unix, end_unix)]` ordered by start ascending.
+type SprintWindows = Vec<(i64, i64, i64)>;
+
+fn load_sprint_windows(conn: &Connection) -> rusqlite::Result<SprintWindows> {
+    let mut stmt = conn.prepare(
+        "SELECT id, start_date, end_date FROM sprints
+         WHERE start_date IS NOT NULL AND end_date IS NOT NULL
+         ORDER BY start_date ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut out: SprintWindows = Vec::new();
+    for r in rows {
+        let (id, start, end) = r?;
+        let s = match sprint_grader_core::time::parse_iso(&start) {
+            Some(dt) => dt.timestamp(),
+            None => continue,
+        };
+        let e = match sprint_grader_core::time::parse_iso(&end) {
+            Some(dt) => dt.timestamp(),
+            None => continue,
+        };
+        out.push((id, s, e));
+    }
+    Ok(out)
+}
+
+/// First sprint window whose `[start..=end]` (inclusive) contains the
+/// timestamp. Sprint windows can overlap by a few hours at sprint
+/// boundaries; we deliberately pick the *earliest* (i.e. the first one
+/// that contains the timestamp) — semantically "the sprint the work was
+/// introduced during".
+fn containing_sprint_id(windows: &SprintWindows, ts: i64) -> Option<i64> {
+    for (id, s, e) in windows {
+        if ts >= *s && ts <= *e {
+            return Some(*id);
         }
     }
     None
@@ -189,9 +259,7 @@ mod tests {
         run_git(repo, &["commit", "-q", "-m", msg]);
     }
 
-    fn seed_db(conn: &Connection, sprint_id: i64) {
-        // Minimal seed: a project, a sprint, and two students whose emails
-        // match the test commits.
+    fn seed_db(conn: &Connection) {
         conn.execute(
             "INSERT OR REPLACE INTO projects (id, slug, name) VALUES (1, 'p', 'P')",
             [],
@@ -199,8 +267,8 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO sprints (id, project_id, name, start_date, end_date)
-             VALUES (?, 1, 's1', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')",
-            [sprint_id],
+             VALUES (1, 1, 's1', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')",
+            [],
         )
         .unwrap();
         conn.execute(
@@ -217,11 +285,9 @@ mod tests {
         .unwrap();
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn insert_violation(
         conn: &Connection,
         repo_full_name: &str,
-        sprint_id: i64,
         file_path: &str,
         rule_name: &str,
         offending: &str,
@@ -230,12 +296,11 @@ mod tests {
     ) -> i64 {
         conn.execute(
             "INSERT INTO architecture_violations
-                (repo_full_name, sprint_id, file_path, rule_name, violation_kind,
+                (repo_full_name, file_path, rule_name, violation_kind,
                  offending_import, severity, start_line, end_line, rule_kind)
-             VALUES (?, ?, ?, ?, 'ast_forbidden_field_type', ?, 'WARNING', ?, ?, 'ast_forbidden_field_type')",
+             VALUES (?, ?, ?, 'ast_forbidden_field_type', ?, 'WARNING', ?, ?, 'ast_forbidden_field_type')",
             params![
                 repo_full_name,
-                sprint_id,
                 file_path,
                 rule_name,
                 offending,
@@ -251,7 +316,7 @@ mod tests {
     fn single_author_gets_full_weight() {
         let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).unwrap();
-        seed_db(&conn, 1);
+        seed_db(&conn);
 
         let (_g, repo) = init_repo();
         let body = (1..=10)
@@ -266,8 +331,8 @@ mod tests {
             "all alice",
         );
 
-        let vid = insert_violation(&conn, "udg/x", 1, "Foo.java", "rule", "anchor", 3, 7);
-        let n = attribute_violations_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        let vid = insert_violation(&conn, "udg/x", "Foo.java", "rule", "anchor", 3, 7);
+        let n = attribute_violations_for_repo(&conn, &repo, "udg/x").unwrap();
         assert!(n > 0, "expected at least one attribution row");
 
         let (sid, lines, total, weight): (String, i64, i64, f64) = conn
@@ -288,11 +353,10 @@ mod tests {
     fn typo_fix_gets_proportional_weight() {
         let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).unwrap();
-        seed_db(&conn, 1);
+        seed_db(&conn);
 
         let (_g, repo) = init_repo();
 
-        // Initial commit: alice writes 30 numbered lines.
         let mut body = String::new();
         for i in 1..=30 {
             body.push_str(&format!("// alice line {i}\n"));
@@ -306,9 +370,6 @@ mod tests {
             "alice writes",
         );
 
-        // Bob fixes a typo on line 15 only. Use a non-trivial textual edit
-        // so `git blame` reattributes the line (not just whitespace, which
-        // would be elided by `-w`).
         let mut lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
         lines[14] = "// alice line 15 (fixed by bob)".to_string();
         let after = lines.join("\n") + "\n";
@@ -321,9 +382,8 @@ mod tests {
             "bob typo fix",
         );
 
-        // Violation spans lines 1..30 (the whole offending method).
-        let vid = insert_violation(&conn, "udg/x", 1, "Foo.java", "rule", "anchor", 1, 30);
-        let n = attribute_violations_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        let vid = insert_violation(&conn, "udg/x", "Foo.java", "rule", "anchor", 1, 30);
+        let n = attribute_violations_for_repo(&conn, &repo, "udg/x").unwrap();
         assert_eq!(n, 2, "alice + bob");
 
         let mut rows: Vec<(String, i64, i64, f64)> = conn
@@ -350,14 +410,14 @@ mod tests {
     fn rerun_replaces_attribution_idempotently() {
         let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).unwrap();
-        seed_db(&conn, 1);
+        seed_db(&conn);
         let (_g, repo) = init_repo();
         let body = (1..=5).map(|i| format!("// l{i}\n")).collect::<String>();
         commit_file(&repo, "F.java", &body, "alice@example.com", "Alice", "init");
-        let _vid = insert_violation(&conn, "udg/x", 1, "F.java", "r", "x", 1, 5);
+        let _vid = insert_violation(&conn, "udg/x", "F.java", "r", "x", 1, 5);
 
-        let n1 = attribute_violations_for_repo(&conn, &repo, "udg/x", 1).unwrap();
-        let n2 = attribute_violations_for_repo(&conn, &repo, "udg/x", 1).unwrap();
+        let n1 = attribute_violations_for_repo(&conn, &repo, "udg/x").unwrap();
+        let n2 = attribute_violations_for_repo(&conn, &repo, "udg/x").unwrap();
         assert_eq!(n1, n2);
         let total: i64 = conn
             .query_row(
@@ -367,5 +427,92 @@ mod tests {
             )
             .unwrap();
         assert_eq!(total, n1 as i64, "duplicates must not accumulate");
+    }
+
+    #[test]
+    fn introduced_sprint_id_is_filled_when_commit_lands_in_a_window() {
+        // Sprint window 2026-01-01..2026-02-01. The commit happens "now"
+        // in the test, which is past 2026-02-01 in the project's timeline
+        // — so we DON'T expect a window match. Instead we use a sprint
+        // whose [start..end] is wide enough to contain real-world wall
+        // clock at test time.
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        // Replace the seed sprint with a sprint window that covers all of 2020..2099.
+        conn.execute(
+            "INSERT OR REPLACE INTO projects (id, slug, name) VALUES (1, 'p', 'P')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO sprints (id, project_id, name, start_date, end_date)
+             VALUES (42, 1, 'wide', '2020-01-01T00:00:00Z', '2099-12-31T23:59:59Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO students (id, username, github_login, full_name, email, team_project_id)
+             VALUES ('alice', 'alice', 'alice', 'Alice', 'alice@example.com', 1)",
+            [],
+        )
+        .unwrap();
+
+        let (_g, repo) = init_repo();
+        let body = (1..=4).map(|i| format!("// l{i}\n")).collect::<String>();
+        commit_file(&repo, "F.java", &body, "alice@example.com", "Alice", "init");
+        let vid = insert_violation(&conn, "udg/x", "F.java", "r", "x", 1, 4);
+
+        attribute_violations_for_repo(&conn, &repo, "udg/x").unwrap();
+        let introduced: Option<i64> = conn
+            .query_row(
+                "SELECT introduced_sprint_id FROM architecture_violations WHERE rowid = ?",
+                [vid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            introduced,
+            Some(42),
+            "blame author-date must resolve to the wide sprint window"
+        );
+    }
+
+    #[test]
+    fn introduced_sprint_id_is_null_when_no_window_matches() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        // Sprint window in the year 1900 — no commit will land here.
+        conn.execute(
+            "INSERT OR REPLACE INTO projects (id, slug, name) VALUES (1, 'p', 'P')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO sprints (id, project_id, name, start_date, end_date)
+             VALUES (1, 1, 'old', '1900-01-01T00:00:00Z', '1900-02-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO students (id, username, github_login, full_name, email, team_project_id)
+             VALUES ('alice', 'alice', 'alice', 'Alice', 'alice@example.com', 1)",
+            [],
+        )
+        .unwrap();
+
+        let (_g, repo) = init_repo();
+        let body = "// solo line\n".to_string();
+        commit_file(&repo, "F.java", &body, "alice@example.com", "Alice", "init");
+        let vid = insert_violation(&conn, "udg/x", "F.java", "r", "x", 1, 1);
+
+        attribute_violations_for_repo(&conn, &repo, "udg/x").unwrap();
+        let introduced: Option<i64> = conn
+            .query_row(
+                "SELECT introduced_sprint_id FROM architecture_violations WHERE rowid = ?",
+                [vid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(introduced, None, "no window matches; column must be NULL");
     }
 }

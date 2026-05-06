@@ -1,15 +1,19 @@
-//! Architecture conformance scanning (T-P2.2).
+//! Architecture conformance scanning (T-P2.2 / T-P3.1 / T-P3.4).
 //!
 //! Replaces the manual "did the team respect the layered architecture"
 //! review pass with a course-config-driven scan. Reads the rules from
 //! `architecture.toml`, walks every Java file in the cloned repo,
 //! extracts (package, imports), and writes one `architecture_violations`
-//! row per (file × broken rule × offending import).
+//! row per (file × broken rule × offending import × line range).
 //!
-//! `analyze::flags::architecture_drift` (the ARCHITECTURE_DRIFT detector)
-//! reads the resulting counts and fires WARNING when this sprint
-//! strictly exceeds the previous sprint — i.e., the team is regressing
-//! against the layered model.
+//! ## Artifact-shape (T-P3.4)
+//!
+//! The scan grades **the code as delivered on `main`**, not the
+//! per-sprint trajectory. Each `(repo_full_name)` produces one set of
+//! violation rows; sprint provenance for each violation lives on
+//! `architecture_violations.introduced_sprint_id`, derived from blame.
+//! Re-runs against an unchanged `head_sha` skip cleanly via
+//! `architecture_runs`.
 
 pub mod ast_rules;
 pub mod attribution;
@@ -28,56 +32,165 @@ pub use rules::{ArchitectureRules, Forbidden, Layer};
 pub use scanner::{parse_java, scan_repo, ImportLine, JavaFileFacts};
 
 use std::path::Path;
+use std::time::Instant;
 
 use rusqlite::{params, Connection};
 use tracing::{info, warn};
 
-/// Scan one cloned repo for one sprint, persist violations, then run
-/// blame attribution. Idempotent: pre-existing rows for
-/// `(repo_full_name, sprint_id)` are deleted first (both the violation
-/// table and the attribution table) so re-runs reflect the current state
-/// of the working tree without duplicating.
+const STATUS_OK: &str = "OK";
+const STATUS_SKIPPED_HEAD_UNCHANGED: &str = "SKIPPED_HEAD_UNCHANGED";
+const STATUS_SKIPPED_NO_SOURCES: &str = "SKIPPED_NO_SOURCES";
+
+/// `git rev-parse HEAD` for `repo_path`. Returns `None` when not a git
+/// working tree or git is missing on `$PATH`.
+fn git_head_sha(repo_path: &Path) -> Option<String> {
+    let path = repo_path.to_str()?;
+    let out = std::process::Command::new("git")
+        .args(["-C", path, "rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Last successful run's recorded HEAD sha for this repo, or `None` when
+/// no `OK` row exists. Compared against `git_head_sha` to short-circuit
+/// the rescan.
+fn cached_head_sha(conn: &Connection, repo_full_name: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT head_sha FROM architecture_runs
+         WHERE repo_full_name = ? AND status = ?",
+        params![repo_full_name, STATUS_OK],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_run(
+    conn: &Connection,
+    repo_full_name: &str,
+    status: &str,
+    findings_count: usize,
+    duration_ms: i64,
+    head_sha: Option<&str>,
+    diagnostics: Option<&str>,
+) -> rusqlite::Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR REPLACE INTO architecture_runs
+            (repo_full_name, status, findings_count,
+             duration_ms, head_sha, diagnostics, ran_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![
+            repo_full_name,
+            status,
+            findings_count as i64,
+            duration_ms,
+            head_sha,
+            diagnostics,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Scan one cloned repo, persist violations + attribution. Idempotent at
+/// `(repo_full_name)` granularity: pre-existing rows for the repo are
+/// dropped before re-insert. Short-circuits when `architecture_runs`
+/// records the same `head_sha` as the working tree currently has — the
+/// prior `OK` row's findings remain valid and stay in the DB untouched.
 pub fn scan_repo_to_db(
     conn: &Connection,
     repo_path: &Path,
     repo_full_name: &str,
-    sprint_id: i64,
     rules: &ArchitectureRules,
 ) -> rusqlite::Result<usize> {
-    // Clear attribution + violation rows that match this repo for this
-    // sprint. The architecture stage used to write `repo_full_name` as the
-    // BARE directory name (e.g. `spring-pds26_4c`); it now writes the
-    // org-qualified `<org>/<repo>` form. The two forms don't share a key,
-    // so a plain `WHERE repo_full_name = ?` would leave stale legacy rows
-    // alive on every re-run after the qualifier-fix landed. Delete BOTH
-    // the qualified form (current writes) and the bare basename
-    // (legacy writes) before re-inserting.
+    let started = Instant::now();
+    let head = git_head_sha(repo_path);
+
+    // Head-sha skip: cached HEAD matches current working tree.
+    if let (Some(current), Some(cached)) = (head.as_deref(), cached_head_sha(conn, repo_full_name))
+    {
+        if current == cached {
+            let kept: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM architecture_violations
+                     WHERE repo_full_name = ?",
+                    params![repo_full_name],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            record_run(
+                conn,
+                repo_full_name,
+                STATUS_SKIPPED_HEAD_UNCHANGED,
+                kept as usize,
+                started.elapsed().as_millis() as i64,
+                Some(current),
+                None,
+            )?;
+            info!(
+                repo = repo_full_name,
+                head = %current,
+                cached = kept,
+                "architecture scan skipped (head unchanged)"
+            );
+            return Ok(0);
+        }
+    }
+
+    // The architecture stage used to write `repo_full_name` as the bare
+    // directory name (e.g. `spring-pds26_4c`); it now writes the
+    // org-qualified `<org>/<repo>` form. Delete BOTH the qualified form
+    // (current writes) and the bare basename (legacy writes) before
+    // re-inserting so stale rows can't linger.
     let bare = repo_full_name.rsplit('/').next().unwrap_or(repo_full_name);
     conn.execute(
         "DELETE FROM architecture_violation_attribution
          WHERE violation_rowid IN (
              SELECT rowid FROM architecture_violations
-             WHERE sprint_id = ?
-               AND (repo_full_name = ? OR repo_full_name = ?)
+             WHERE repo_full_name = ? OR repo_full_name = ?
          )",
-        params![sprint_id, repo_full_name, bare],
+        params![repo_full_name, bare],
     )?;
     conn.execute(
         "DELETE FROM architecture_violations
-         WHERE sprint_id = ?
-           AND (repo_full_name = ? OR repo_full_name = ?)",
-        params![sprint_id, repo_full_name, bare],
+         WHERE repo_full_name = ? OR repo_full_name = ?",
+        params![repo_full_name, bare],
     )?;
+
     let files = scan_repo(repo_path);
+    if files.is_empty() {
+        record_run(
+            conn,
+            repo_full_name,
+            STATUS_SKIPPED_NO_SOURCES,
+            0,
+            started.elapsed().as_millis() as i64,
+            head.as_deref(),
+            None,
+        )?;
+        info!(repo = repo_full_name, "architecture scan: no sources");
+        return Ok(0);
+    }
+
     let mut written = 0usize;
     for file in &files {
         // Legacy package-glob and forbidden-import rules.
         for v in check_file(rules, file) {
-            insert_violation(conn, repo_full_name, sprint_id, &rules.severity, &v)?;
+            insert_violation(conn, repo_full_name, &rules.severity, &v)?;
             written += 1;
         }
-        // AST rules (T-P3.1). Skip files we couldn't read for AST input —
-        // most commonly those that scan_repo already filtered.
+        // AST rules (T-P3.1).
         if !rules.ast_rules.is_empty() {
             let abs = repo_path.join(&file.rel_path);
             if let Ok(src) = std::fs::read(&abs) {
@@ -88,34 +201,45 @@ pub fn scan_repo_to_db(
                     &src,
                 );
                 for v in ast_violations {
-                    insert_violation(conn, repo_full_name, sprint_id, &rules.severity, &v)?;
+                    insert_violation(conn, repo_full_name, &rules.severity, &v)?;
                     written += 1;
                 }
             }
         }
     }
 
-    // Blame attribution runs once per (repo, sprint) — one git invocation
-    // per file regardless of how many violations point into it.
-    let attributed = match attribution::attribute_violations_for_repo(
+    // Blame attribution runs once per repo — one git invocation per file
+    // regardless of how many violations point into it. Also fills
+    // `introduced_sprint_id` on each violation row.
+    let attributed =
+        match attribution::attribute_violations_for_repo(conn, repo_path, repo_full_name) {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(
+                    repo = repo_full_name,
+                    error = %e,
+                    "blame attribution failed; continuing without it"
+                );
+                0
+            }
+        };
+
+    record_run(
         conn,
-        repo_path,
         repo_full_name,
-        sprint_id,
-    ) {
-        Ok(n) => n,
-        Err(e) => {
-            warn!(repo = repo_full_name, error = %e, "blame attribution failed; continuing without it");
-            0
-        }
-    };
+        STATUS_OK,
+        written,
+        started.elapsed().as_millis() as i64,
+        head.as_deref(),
+        None,
+    )?;
 
     info!(
         repo = repo_full_name,
-        sprint_id,
         files = files.len(),
         violations = written,
         attribution_rows = attributed,
+        head = head.as_deref().unwrap_or("(none)"),
         "architecture scan complete"
     );
     Ok(written)
@@ -124,20 +248,18 @@ pub fn scan_repo_to_db(
 fn insert_violation(
     conn: &Connection,
     repo_full_name: &str,
-    sprint_id: i64,
     default_severity: &str,
     v: &Violation,
 ) -> rusqlite::Result<()> {
     let rule_kind = v.kind.as_str();
     conn.execute(
         "INSERT OR REPLACE INTO architecture_violations
-            (repo_full_name, sprint_id, file_path, rule_name,
+            (repo_full_name, file_path, rule_name,
              violation_kind, offending_import, severity,
              start_line, end_line, rule_kind)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             repo_full_name,
-            sprint_id,
             v.file_path,
             v.rule_name,
             rule_kind,
@@ -151,14 +273,12 @@ fn insert_violation(
     Ok(())
 }
 
-/// Convenience: scan every directory under `entregues_dir/<project_name>`
-/// that looks like a cloned repo. Returns the total violation count
-/// across all repos for the sprint. Skips silently when the project
-/// directory or its repo subdirs are missing.
+/// Scan every directory under `project_root` that looks like a cloned
+/// repo. Returns the total violation count across all repos. Skips
+/// silently when the project directory or its repo subdirs are missing.
 pub fn scan_project_to_db(
     conn: &Connection,
     project_root: &Path,
-    sprint_id: i64,
     rules: &ArchitectureRules,
 ) -> rusqlite::Result<usize> {
     if !project_root.is_dir() {
@@ -179,12 +299,8 @@ pub fn scan_project_to_db(
         }
         let repo_path = entry.path();
         let bare = entry.file_name().to_string_lossy().into_owned();
-        // Persist the org-qualified `<org>/<repo>` form when we can find one
-        // in `pull_requests.repo_full_name` (collect already wrote it). Fall
-        // back to the bare directory name only if no PR row references it,
-        // so existing reports still build a GitHub URL whenever possible.
         let repo_full_name = resolve_qualified_repo_name(conn, &bare).unwrap_or(bare);
-        total += scan_repo_to_db(conn, &repo_path, &repo_full_name, sprint_id, rules)?;
+        total += scan_repo_to_db(conn, &repo_path, &repo_full_name, rules)?;
     }
     Ok(total)
 }
@@ -207,22 +323,6 @@ fn resolve_qualified_repo_name(conn: &Connection, bare: &str) -> Option<String> 
     .filter(|s| s.contains('/'))
 }
 
-/// Total violations recorded for one (project, sprint). Used by the
-/// ARCHITECTURE_DRIFT detector and by report consumers.
-pub fn count_for_project_sprint(
-    conn: &Connection,
-    sprint_id: i64,
-    project_id: i64,
-) -> rusqlite::Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM architecture_violations av
-         JOIN sprints s ON s.id = av.sprint_id
-         WHERE s.project_id = ? AND av.sprint_id = ?",
-        params![project_id, sprint_id],
-        |r| r.get(0),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +333,25 @@ mod tests {
         let p = dir.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, body).unwrap();
+    }
+
+    /// Initialise `dir` as a git repo with a single commit so the
+    /// architecture scan's head_sha lookup succeeds.
+    fn git_init(dir: &Path) {
+        use std::process::Command;
+        let run = |args: &[&str]| {
+            let s = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git invocation");
+            assert!(s.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
     }
 
     const RULES: &str = r#"
@@ -262,11 +381,12 @@ may_depend_on = []
              import com.x.repository.UserRepository;\n\
              public class UserController {}",
         );
+        git_init(tmp.path());
         let conn = Connection::open_in_memory().unwrap();
         sprint_grader_core::db::apply_schema(&conn).unwrap();
         let rules = ArchitectureRules::from_toml_str(RULES).unwrap();
 
-        let n = scan_repo_to_db(&conn, tmp.path(), "udg/spring-x", 10, &rules).unwrap();
+        let n = scan_repo_to_db(&conn, tmp.path(), "udg/spring-x", &rules).unwrap();
         assert_eq!(n, 1, "controller→repository must produce one violation");
 
         let kind: String = conn
@@ -277,15 +397,23 @@ may_depend_on = []
             )
             .unwrap();
         assert_eq!(kind, "layer_dependency");
+
+        // architecture_runs must record the OK row with the current head_sha.
+        let (status, findings, head): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, findings_count, head_sha FROM architecture_runs
+                 WHERE repo_full_name = ?",
+                ["udg/spring-x"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "OK");
+        assert_eq!(findings, 1);
+        assert!(head.is_some(), "head_sha must be recorded");
     }
 
     #[test]
     fn rerun_purges_legacy_bare_name_rows() {
-        // Regression: scan_project_to_db now writes the org-qualified
-        // `<org>/<repo>` form, but pre-fix runs left bare-name rows in the
-        // table. scan_repo_to_db must delete BOTH forms for the sprint
-        // before re-inserting, otherwise stale bogus violations from a
-        // pre-fix run linger forever.
         let tmp = TempDir::new().unwrap();
         write_java(
             tmp.path(),
@@ -294,28 +422,29 @@ may_depend_on = []
              import com.x.repository.UserRepository;\n\
              public class Bad {}",
         );
+        git_init(tmp.path());
         let conn = Connection::open_in_memory().unwrap();
         sprint_grader_core::db::apply_schema(&conn).unwrap();
 
-        // Seed legacy bare-name rows from a hypothetical old run.
+        // Seed a bare-name row from a hypothetical pre-qualifier-fix run.
         conn.execute(
             "INSERT INTO architecture_violations
-                (repo_full_name, sprint_id, file_path, rule_name, violation_kind,
-                 offending_import, severity, rule_kind)
+                (repo_full_name, file_path, rule_name, violation_kind,
+                 offending_import, severity, start_line, end_line, rule_kind)
              VALUES
-                ('spring-x', 10, 'OldFile.java', 'domain->!infrastructure',
-                 'layer_dependency', 'jakarta.persistence.Entity', 'WARNING', 'layer_dependency')",
+                ('spring-x', 'OldFile.java', 'domain->!infrastructure',
+                 'layer_dependency', 'jakarta.persistence.Entity', 'WARNING',
+                 1, 1, 'layer_dependency')",
             [],
         )
         .unwrap();
 
-        // New code path writes under qualified name and must purge the legacy row.
         let rules = ArchitectureRules::from_toml_str(RULES).unwrap();
-        scan_repo_to_db(&conn, tmp.path(), "udg-x/spring-x", 10, &rules).unwrap();
+        scan_repo_to_db(&conn, tmp.path(), "udg-x/spring-x", &rules).unwrap();
         let stale: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM architecture_violations
-                 WHERE repo_full_name = 'spring-x' AND sprint_id = 10",
+                 WHERE repo_full_name = 'spring-x'",
                 [],
                 |r| r.get(0),
             )
@@ -333,18 +462,32 @@ may_depend_on = []
              import com.x.repository.UserRepository;\n\
              public class Bad {}",
         );
+        git_init(tmp.path());
         let conn = Connection::open_in_memory().unwrap();
         sprint_grader_core::db::apply_schema(&conn).unwrap();
         let rules = ArchitectureRules::from_toml_str(RULES).unwrap();
-        let first = scan_repo_to_db(&conn, tmp.path(), "udg/x", 10, &rules).unwrap();
-        let second = scan_repo_to_db(&conn, tmp.path(), "udg/x", 10, &rules).unwrap();
-        assert_eq!(first, second, "deterministic re-run");
+        let first = scan_repo_to_db(&conn, tmp.path(), "udg/x", &rules).unwrap();
+        // Second run: head_sha unchanged, returns 0 (skipped) but findings preserved.
+        let second = scan_repo_to_db(&conn, tmp.path(), "udg/x", &rules).unwrap();
+        assert_eq!(first, 1, "first scan writes the violation");
+        assert_eq!(second, 0, "second scan skips on head_sha match");
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM architecture_violations", [], |r| {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(total, 1, "row count must not duplicate");
+        assert_eq!(total, 1, "head-sha skip preserves the prior row");
+
+        // architecture_runs should now have a SKIPPED_HEAD_UNCHANGED row
+        // (the OK row is overwritten by INSERT OR REPLACE on the same key).
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM architecture_runs WHERE repo_full_name = 'udg/x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "SKIPPED_HEAD_UNCHANGED");
     }
 
     #[test]
@@ -359,18 +502,17 @@ may_depend_on = []
              import com.x.repository.UserRepository;\n\
              public class Bad {}",
         );
+        git_init(&repo);
 
         let conn = Connection::open_in_memory().unwrap();
         sprint_grader_core::db::apply_schema(&conn).unwrap();
-        // Seed a PR row carrying the org-qualified repo name; this is what
-        // collect normally writes during the GitHub fetch.
         conn.execute(
             "INSERT INTO pull_requests (id, repo_full_name) VALUES ('p1', 'udg-3c/spring-x')",
             [],
         )
         .unwrap();
         let rules = ArchitectureRules::from_toml_str(RULES).unwrap();
-        scan_project_to_db(&conn, &project, 10, &rules).unwrap();
+        scan_project_to_db(&conn, &project, &rules).unwrap();
 
         let stored: String = conn
             .query_row(
@@ -397,10 +539,11 @@ may_depend_on = []
              import com.x.repository.UserRepository;\n\
              public class Bad {}",
         );
+        git_init(&repo);
         let conn = Connection::open_in_memory().unwrap();
         sprint_grader_core::db::apply_schema(&conn).unwrap();
         let rules = ArchitectureRules::from_toml_str(RULES).unwrap();
-        scan_project_to_db(&conn, &project, 10, &rules).unwrap();
+        scan_project_to_db(&conn, &project, &rules).unwrap();
         let stored: String = conn
             .query_row(
                 "SELECT repo_full_name FROM architecture_violations LIMIT 1",

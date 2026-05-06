@@ -82,7 +82,6 @@ fn llm_review_writes_violations_then_caches() {
         &conn,
         tmp.path(),
         "udg/spring-x",
-        42,
         &rubric,
         "spring",
         &judge,
@@ -102,7 +101,6 @@ fn llm_review_writes_violations_then_caches() {
         &conn,
         tmp.path(),
         "udg/spring-x",
-        42,
         &rubric,
         "spring",
         &judge,
@@ -142,8 +140,8 @@ fn rerun_idempotent_does_not_duplicate() {
         calls: std::sync::atomic::AtomicU32::new(0),
     };
 
-    run_llm_review_for_repo(&conn, tmp.path(), "x", 1, &rubric, "spring", &judge, &[], 1).unwrap();
-    run_llm_review_for_repo(&conn, tmp.path(), "x", 1, &rubric, "spring", &judge, &[], 1).unwrap();
+    run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, "spring", &judge, &[], 1).unwrap();
+    run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, "spring", &judge, &[], 1).unwrap();
 
     let count: i64 = conn
         .query_row(
@@ -171,7 +169,6 @@ fn skip_globs_filter_files_before_llm_call() {
         &conn,
         tmp.path(),
         "x",
-        1,
         &rubric,
         "spring",
         &judge,
@@ -224,8 +221,8 @@ fn out_of_range_line_numbers_are_dropped() {
     let judge = LiarJudge {
         model: "stub".into(),
     };
-    let n = run_llm_review_for_repo(&conn, tmp.path(), "x", 1, &rubric, "spring", &judge, &[], 1)
-        .unwrap();
+    let n =
+        run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, "spring", &judge, &[], 1).unwrap();
     assert_eq!(n, 1, "OK row inserted, BAD row dropped");
     let kept_rule: String = conn
         .query_row(

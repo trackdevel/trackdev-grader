@@ -86,6 +86,35 @@ impl Database {
         // Retired helper table — drop if present.
         self.conn
             .execute("DROP TABLE IF EXISTS task_similarity_scores", [])?;
+
+        // T-P3.4: artifact-level migration. Architecture violations used to
+        // carry `sprint_id` in the PK so the same delivered code was rescored
+        // n_sprints times per project. The artifact-shape rewrite drops
+        // sprint_id from violations entirely (one row per surviving
+        // violation on main HEAD) and from the attribution table (each
+        // attribution row is now sprint-free; the parent violation carries
+        // an `introduced_sprint_id` derived from blame).
+        //
+        // Detection heuristic: presence of `sprint_id` in the
+        // architecture_violations column list means we're on the legacy
+        // schema. DROP both tables; the canonical schema below recreates
+        // them with the new shape and PR 1's run-all repopulates them
+        // from a fresh scan.
+        let arch_cols = self
+            .column_names("architecture_violations")
+            .unwrap_or_default();
+        if arch_cols.iter().any(|c| c == "sprint_id") {
+            self.conn.execute(
+                "DROP TABLE IF EXISTS architecture_violation_attribution",
+                [],
+            )?;
+            self.conn
+                .execute("DROP TABLE IF EXISTS architecture_violations", [])?;
+            // The old per-sprint index goes with its column; harmless if absent.
+            self.conn
+                .execute("DROP INDEX IF EXISTS idx_arch_attr_sprint", [])?;
+        }
+
         Ok(())
     }
 
@@ -573,6 +602,126 @@ pub fn list_tables(conn: &Connection) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::Database;
+    use rusqlite::Connection;
+
+    /// Regression for T-P3.4 schema migration: a DB carrying the legacy
+    /// per-sprint architecture_violations shape (sprint_id in the PK)
+    /// must be rewritten to the artifact-level shape on the next
+    /// `create_tables` call, preserving no rows. The new shape has
+    /// `introduced_sprint_id` (not `sprint_id`); the attribution table
+    /// loses its `sprint_id` column entirely; the old per-sprint index
+    /// is gone.
+    #[test]
+    fn migration_drops_legacy_per_sprint_architecture_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grading.db");
+
+        // Hand-build the legacy schema and seed one row.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE architecture_violations (
+                    repo_full_name   TEXT NOT NULL,
+                    sprint_id        INTEGER NOT NULL,
+                    file_path        TEXT NOT NULL,
+                    rule_name        TEXT NOT NULL,
+                    violation_kind   TEXT NOT NULL,
+                    offending_import TEXT NOT NULL,
+                    severity         TEXT NOT NULL,
+                    PRIMARY KEY (repo_full_name, sprint_id, file_path, rule_name, offending_import)
+                );
+                 CREATE TABLE architecture_violation_attribution (
+                    violation_rowid INTEGER NOT NULL,
+                    student_id      TEXT NOT NULL,
+                    lines_authored  INTEGER NOT NULL,
+                    total_lines     INTEGER NOT NULL,
+                    weight          REAL NOT NULL,
+                    sprint_id       INTEGER NOT NULL,
+                    PRIMARY KEY (violation_rowid, student_id)
+                );
+                 CREATE INDEX idx_arch_attr_sprint
+                    ON architecture_violation_attribution(sprint_id);
+                 INSERT INTO architecture_violations
+                    (repo_full_name, sprint_id, file_path, rule_name,
+                     violation_kind, offending_import, severity)
+                    VALUES ('udg-pds/spring-x', 70, 'Foo.java', 'rule-a',
+                            'layer_dependency', 'org.example', 'WARNING');",
+            )
+            .unwrap();
+        }
+
+        // Open + migrate.
+        let db = Database::open(&path).unwrap();
+        db.create_tables().unwrap();
+
+        let viol_cols = db.column_names("architecture_violations").unwrap();
+        assert!(
+            !viol_cols.iter().any(|c| c == "sprint_id"),
+            "legacy sprint_id column must be dropped, got cols: {viol_cols:?}"
+        );
+        assert!(
+            viol_cols.iter().any(|c| c == "introduced_sprint_id"),
+            "new introduced_sprint_id column must be present, got cols: {viol_cols:?}"
+        );
+
+        let attr_cols = db
+            .column_names("architecture_violation_attribution")
+            .unwrap();
+        assert!(
+            !attr_cols.iter().any(|c| c == "sprint_id"),
+            "attribution sprint_id must be dropped, got cols: {attr_cols:?}"
+        );
+
+        // Old data is gone; data regenerates on next run-all.
+        let n: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM architecture_violations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0, "legacy rows must be dropped along with the old shape");
+
+        // Sibling tables that only exist in the new shape are present.
+        for table in ["architecture_runs", "student_artifact_flags"] {
+            let cols = db.column_names(table).unwrap();
+            assert!(
+                !cols.is_empty(),
+                "{table} must be created by the canonical schema"
+            );
+        }
+    }
+
+    /// Idempotency: running the migration on an already-new-shape DB
+    /// must be a no-op (no DROP, no data loss).
+    #[test]
+    fn migration_is_noop_on_already_new_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grading.db");
+        let db = Database::open(&path).unwrap();
+        db.create_tables().unwrap();
+
+        // Seed a row in the new shape.
+        db.conn
+            .execute(
+                "INSERT INTO architecture_violations
+                    (repo_full_name, file_path, rule_name, violation_kind,
+                     offending_import, severity, start_line, end_line)
+                    VALUES ('udg-pds/spring-x', 'Foo.java', 'rule-a',
+                            'layer_dependency', 'org.example', 'WARNING', 12, 12)",
+                [],
+            )
+            .unwrap();
+
+        // Re-run create_tables (which calls the migration). Row must survive.
+        db.create_tables().unwrap();
+        let n: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM architecture_violations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 1, "no-op migration must preserve new-shape rows");
+    }
 
     #[test]
     fn sprint_task_reconciliation_replaces_links_and_removes_missing_tasks() {

@@ -1107,28 +1107,26 @@ pub fn run_pipeline(
         }
     }
 
-    // T-P2.2: architecture conformance scan. Gated on projects with new data
-    // (run-all) or all projects (go/go-quick). The scan is deterministic and
-    // does DELETE + re-INSERT per (project, sprint), so skipping unchanged
-    // projects preserves valid prior results and avoids redundant I/O.
+    // T-P3.4: architecture conformance scan, artifact-shape (per-repo,
+    // sprint-free). Runs once per project per pipeline invocation; the
+    // architecture_runs head_sha gate (inside scan_project_to_db) skips
+    // repos whose working tree hasn't moved since the last successful
+    // run. We deliberately do NOT gate on `projects_with_new_data` here —
+    // that's a PR/task collection proxy and misses out-of-band merges
+    // and force-pushes; head_sha is the correct cache key for "did the
+    // artifact change".
     let arch_rules_path = opts.config_dir.join("architecture.toml");
     if arch_rules_path.is_file() {
         match sprint_grader_architecture::ArchitectureRules::load(&arch_rules_path) {
             Ok(arch_rules) => {
-                for g in groups
-                    .iter()
-                    .filter(|g| projects_with_new_data.contains(&g.project_id))
-                {
+                for g in &groups {
                     let project_root = opts.entregues_dir.join(&g.name);
-                    for sid in &g.sprint_ids {
-                        if let Err(e) = sprint_grader_architecture::scan_project_to_db(
-                            &db.conn,
-                            &project_root,
-                            *sid,
-                            &arch_rules,
-                        ) {
-                            warn!(project = %g.name, sprint_id = sid, error = %e, "architecture scan failed");
-                        }
+                    if let Err(e) = sprint_grader_architecture::scan_project_to_db(
+                        &db.conn,
+                        &project_root,
+                        &arch_rules,
+                    ) {
+                        warn!(project = %g.name, error = %e, "architecture scan failed");
                     }
                 }
             }
@@ -1324,61 +1322,14 @@ pub fn run_pipeline(
                         "[architecture] running LLM review"
                     );
                     let judge = judge_box;
-                    for g in groups
-                        .iter()
-                        .filter(|g| projects_with_new_data.contains(&g.project_id))
-                    {
-                        let project_root = opts.entregues_dir.join(&g.name);
-                        for sid in &g.sprint_ids {
-                            let entries = match std::fs::read_dir(&project_root) {
-                                Ok(e) => e,
-                                Err(_) => continue,
-                            };
-                            for entry in entries.flatten() {
-                                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-                                    continue;
-                                }
-                                let repo_path = entry.path();
-                                let repo_full_name =
-                                    entry.file_name().to_string_lossy().into_owned();
-                                let stack = if repo_full_name.starts_with("android-") {
-                                    "android"
-                                } else {
-                                    "spring"
-                                };
-                                // The judge implementation does its own
-                                // intra-repo concurrency via run_llm_review_for_repo;
-                                // we currently iterate (repo, sprint) pairs
-                                // sequentially in the orchestrator. Worker-pool
-                                // concurrency for the per-file calls happens
-                                // inside `run_llm_review_for_repo` (see
-                                // architecture_llm/src/lib.rs) when
-                                // `architecture.judge_workers > 1`.
-                                if let Err(e) =
-                                    sprint_grader_architecture_llm::run_llm_review_for_repo(
-                                        &db.conn,
-                                        &repo_path,
-                                        &repo_full_name,
-                                        *sid,
-                                        &rubric,
-                                        stack,
-                                        judge.as_ref(),
-                                        &config.architecture.llm_skip_globs,
-                                        workers,
-                                    )
-                                {
-                                    warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "LLM architecture review failed");
-                                }
-                            }
-                        }
-                    }
-                    // Architecture stage wrote new violation rows; re-run
-                    // attribution per (repo, sprint) so the LLM rows pick
-                    // up blame weights too.
-                    for g in groups
-                        .iter()
-                        .filter(|g| projects_with_new_data.contains(&g.project_id))
-                    {
+                    // T-P3.4: artifact-shape — one LLM pass per repo,
+                    // sprint-free. Worker-pool concurrency for the per-file
+                    // calls happens inside `run_llm_review_for_repo`. The
+                    // per-file cache (architecture_llm_cache) absorbs
+                    // unchanged files; the head_sha gate is governed by
+                    // the AST scan stage above (the LLM stage uses the
+                    // file_sha cache instead — finer-grained).
+                    for g in &groups {
                         let project_root = opts.entregues_dir.join(&g.name);
                         let entries = match std::fs::read_dir(&project_root) {
                             Ok(e) => e,
@@ -1390,17 +1341,48 @@ pub fn run_pipeline(
                             }
                             let repo_path = entry.path();
                             let repo_full_name = entry.file_name().to_string_lossy().into_owned();
-                            for sid in &g.sprint_ids {
-                                if let Err(e) =
-                                    sprint_grader_architecture::attribute_violations_for_repo(
-                                        &db.conn,
-                                        &repo_path,
-                                        &repo_full_name,
-                                        *sid,
-                                    )
-                                {
-                                    warn!(repo = %repo_full_name, sprint_id = sid, error = %e, "post-LLM attribution failed");
-                                }
+                            let stack = if repo_full_name.starts_with("android-") {
+                                "android"
+                            } else {
+                                "spring"
+                            };
+                            if let Err(e) = sprint_grader_architecture_llm::run_llm_review_for_repo(
+                                &db.conn,
+                                &repo_path,
+                                &repo_full_name,
+                                &rubric,
+                                stack,
+                                judge.as_ref(),
+                                &config.architecture.llm_skip_globs,
+                                workers,
+                            ) {
+                                warn!(repo = %repo_full_name, error = %e, "LLM architecture review failed");
+                            }
+                        }
+                    }
+                    // The LLM stage writes new violation rows; re-run
+                    // blame attribution per repo so the LLM rows pick up
+                    // both per-student weights and `introduced_sprint_id`.
+                    for g in &groups {
+                        let project_root = opts.entregues_dir.join(&g.name);
+                        let entries = match std::fs::read_dir(&project_root) {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
+                        for entry in entries.flatten() {
+                            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                                continue;
+                            }
+                            let repo_path = entry.path();
+                            let repo_full_name = entry.file_name().to_string_lossy().into_owned();
+                            if let Err(e) =
+                                sprint_grader_architecture::attribute_violations_for_repo(
+                                    &db.conn,
+                                    &repo_path,
+                                    &repo_full_name,
+                                )
+                            {
+                                warn!(repo = %repo_full_name, error = %e, "post-LLM attribution failed");
                             }
                         }
                     }
@@ -1428,6 +1410,21 @@ pub fn run_pipeline(
                     ord,
                 );
             }
+        }
+    }
+
+    // T-P3.4: artifact-flag detection — runs once per project after the
+    // architecture / complexity / static-analysis scans have populated
+    // their attribution rows. Idempotent (deletes the project's prior
+    // student_artifact_flags rows). PR 1 wires only ARCHITECTURE_HOTSPOT;
+    // PR 2 / PR 3 will plug in COMPLEXITY_HOTSPOT and STATIC_ANALYSIS_HOTSPOT.
+    for g in &groups {
+        if let Err(e) = sprint_grader_analyze::detect_artifact_flags_for_project_id(
+            &db.conn,
+            g.project_id,
+            config,
+        ) {
+            warn!(project = %g.name, error = %e, "artifact-flag detection failed");
         }
     }
 

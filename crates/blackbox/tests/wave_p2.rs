@@ -20,7 +20,13 @@ fn count_flags(conn: &rusqlite::Connection, sprint_id: i64, ftype: &str) -> i64 
     .unwrap()
 }
 
-// ─── T-T3.2 — Architecture scan + ARCHITECTURE_DRIFT (P2.2) ───────────────
+// ─── T-T3.2 — Architecture scan, artifact shape (P2.2 / P3.4) ─────────────
+//
+// T-P3.4 retired ARCHITECTURE_DRIFT — per-sprint trajectory has no meaning
+// when the scan grades the code-on-main as a single artifact. The surface
+// contract is now: scanning a repo writes one set of sprint-free
+// `architecture_violations` rows; running the project-keyed artifact-flag
+// dispatcher emits ARCHITECTURE_HOTSPOT entries in `student_artifact_flags`.
 
 const ARCHITECTURE_TOML: &str = r#"
 severity = "WARNING"
@@ -58,19 +64,13 @@ fn t_t3_2_architecture_scan_writes_violations_and_flag_fires() {
     );
     let rules =
         sprint_grader_architecture::ArchitectureRules::from_toml_str(ARCHITECTURE_TOML).unwrap();
-    sprint_grader_architecture::scan_repo_to_db(
-        &conn,
-        &android_root,
-        ids::ANDROID_REPO,
-        ids::SPRINT_ID,
-        &rules,
-    )
-    .unwrap();
+    sprint_grader_architecture::scan_repo_to_db(&conn, &android_root, ids::ANDROID_REPO, &rules)
+        .unwrap();
 
     let nrows: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM architecture_violations WHERE sprint_id = ?",
-            [ids::SPRINT_ID],
+            "SELECT COUNT(*) FROM architecture_violations WHERE repo_full_name = ?",
+            [ids::ANDROID_REPO],
             |r| r.get(0),
         )
         .unwrap();
@@ -79,10 +79,27 @@ fn t_t3_2_architecture_scan_writes_violations_and_flag_fires() {
         "expected ≥1 architecture_violations row, got {nrows}"
     );
 
-    // Prior sprint had zero violations, current has ≥1 → ARCHITECTURE_DRIFT fires.
-    detect_flags_for_sprint_id(&conn, ids::SPRINT_ID, &Config::test_default()).unwrap();
-    let drift = count_flags(&conn, ids::SPRINT_ID, "ARCHITECTURE_DRIFT");
-    assert_eq!(drift, 1, "ARCHITECTURE_DRIFT should fire 0→N");
+    // Run the artifact-flag dispatcher. Without git/blame data, no
+    // attribution rows exist, so no ARCHITECTURE_HOTSPOT can fire — that's
+    // the silent half of the contract. ARCHITECTURE_DRIFT is gone.
+    sprint_grader_analyze::detect_artifact_flags_for_project_id(
+        &conn,
+        ids::PROJECT_ID,
+        &Config::test_default(),
+    )
+    .unwrap();
+    let hotspot: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM student_artifact_flags
+             WHERE project_id = ? AND flag_type = 'ARCHITECTURE_HOTSPOT'",
+            [ids::PROJECT_ID],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        hotspot, 0,
+        "no blame data → no hotspot fires; rows live in student_artifact_flags now"
+    );
 }
 
 // T-T3.2b — AST rules + per-student blame attribution (T-P3.1).
@@ -120,20 +137,14 @@ fn t_t3_2b_ast_rules_record_line_ranges_and_rule_kind() {
     );
     let rules = sprint_grader_architecture::ArchitectureRules::from_toml_str(ARCHITECTURE_TOML_AST)
         .unwrap();
-    sprint_grader_architecture::scan_repo_to_db(
-        &conn,
-        &android_root,
-        ids::ANDROID_REPO,
-        ids::SPRINT_ID,
-        &rules,
-    )
-    .unwrap();
+    sprint_grader_architecture::scan_repo_to_db(&conn, &android_root, ids::ANDROID_REPO, &rules)
+        .unwrap();
 
     let (rule_kind, start, end): (Option<String>, Option<i64>, Option<i64>) = conn
         .query_row(
             "SELECT rule_kind, start_line, end_line FROM architecture_violations
-             WHERE sprint_id = ? AND rule_name = 'controller-no-repository-field'",
-            [ids::SPRINT_ID],
+             WHERE repo_full_name = ? AND rule_name = 'controller-no-repository-field'",
+            [ids::ANDROID_REPO],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
@@ -145,11 +156,23 @@ fn t_t3_2b_ast_rules_record_line_ranges_and_rule_kind() {
     assert!(start.unwrap() >= 1 && end.unwrap() >= start.unwrap());
 
     // The fixture's project dir is not a git repo, so attribution skips
-    // silently and the per-student hotspot flag stays quiet.
-    detect_flags_for_sprint_id(&conn, ids::SPRINT_ID, &Config::test_default()).unwrap();
+    // silently and the per-student artifact hotspot flag stays quiet.
+    sprint_grader_analyze::detect_artifact_flags_for_project_id(
+        &conn,
+        ids::PROJECT_ID,
+        &Config::test_default(),
+    )
+    .unwrap();
+    let hotspot: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM student_artifact_flags
+             WHERE project_id = ? AND flag_type = 'ARCHITECTURE_HOTSPOT'",
+            [ids::PROJECT_ID],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(
-        count_flags(&conn, ids::SPRINT_ID, "ARCHITECTURE_HOTSPOT"),
-        0,
+        hotspot, 0,
         "no blame data → no hotspot fires; this is the silent half of the contract"
     );
 }
