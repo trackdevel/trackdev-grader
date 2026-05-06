@@ -23,16 +23,15 @@ const DIMENSIONS: &[Dim] = &[
               GROUP BY t.assignee_id",
         needs_project_id: false,
     },
+    // Reads the per-student commit_count already aggregated by
+    // metrics.rs::compute_metrics_for_sprint_id (which counts via
+    // tasks.assignee_id, the canonical TrackDev source). Avoids the
+    // per-pr-author rollup that silently dropped NULL-author PRs.
     Dim {
         name: "commit_count",
-        sql: "SELECT pr.author_id AS student_id,
-                     COUNT(DISTINCT pc.sha) AS value
-              FROM pull_requests pr
-              JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
-              JOIN tasks t ON t.id = tpr.task_id
-              JOIN pr_commits pc ON pc.pr_id = pr.id
-              WHERE t.sprint_id = ? AND t.type != 'USER_STORY' AND pr.author_id IS NOT NULL
-              GROUP BY pr.author_id",
+        sql: "SELECT student_id, COALESCE(commit_count, 0) AS value
+              FROM student_sprint_metrics
+              WHERE sprint_id = ?",
         needs_project_id: false,
     },
     Dim {

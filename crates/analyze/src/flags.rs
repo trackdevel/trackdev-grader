@@ -523,12 +523,16 @@ fn single_commit_dump(
             )
             .unwrap_or(0);
         if commit_count == 1 && total_lines > thresh.single_commit_dump_lines as i64 {
+            // Primary task assignee (max points, ties → max task count → id)
+            // matches the report-layer 'Author' rule. The earlier LIMIT 1 was
+            // insertion-order-dependent and could cycle on multi-assignee PRs.
             let sid: Option<String> = conn
                 .query_row(
-                    "SELECT t.assignee_id FROM tasks t
-                     JOIN task_pull_requests tpr ON tpr.task_id = t.id
-                     WHERE tpr.pr_id = ? AND t.sprint_id = ? AND t.type != 'USER_STORY' LIMIT 1",
-                    params![&pr_id, sprint_id],
+                    "SELECT student_id FROM pr_authors
+                     WHERE pr_id = ?
+                     ORDER BY author_points DESC, author_task_count DESC, student_id
+                     LIMIT 1",
+                    [&pr_id],
                     |r| r.get::<_, Option<String>>(0),
                 )
                 .ok()
@@ -581,12 +585,14 @@ fn no_reviews_received(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Ve
             )
             .unwrap_or(0);
         if reviews == 0 {
+            // Primary task assignee (canonical, deterministic).
             let sid: Option<String> = conn
                 .query_row(
-                    "SELECT t.assignee_id FROM tasks t
-                     JOIN task_pull_requests tpr ON tpr.task_id = t.id
-                     WHERE tpr.pr_id = ? AND t.sprint_id = ? AND t.type != 'USER_STORY' LIMIT 1",
-                    params![&pr_id, sprint_id],
+                    "SELECT student_id FROM pr_authors
+                     WHERE pr_id = ?
+                     ORDER BY author_points DESC, author_task_count DESC, student_id
+                     LIMIT 1",
+                    [&pr_id],
                     |r| r.get::<_, Option<String>>(0),
                 )
                 .ok()
@@ -1384,6 +1390,10 @@ fn pr_evidence_for_author(
     project_id: i64,
     student_id: &str,
 ) -> rusqlite::Result<Vec<Value>> {
+    // PR ↔ student membership comes from pr_authors (task_pull_requests →
+    // tasks.assignee_id), not pr.author_id. A PR with two task assignees
+    // therefore appears in evidence for BOTH students, which is what the
+    // domain model says: each is a TrackDev-scoped author of that PR.
     let mut stmt = conn.prepare(
         "SELECT DISTINCT pr.id, pr.pr_number, pr.repo_full_name, pr.title, pr.url,
                 pr.additions, pr.deletions, pr.changed_files,
@@ -1392,10 +1402,10 @@ fn pr_evidence_for_author(
          FROM pull_requests pr
          JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
          JOIN tasks t ON t.id = tpr.task_id
-         JOIN students s ON s.id = pr.author_id
+         JOIN students s ON s.id = t.assignee_id
          LEFT JOIN pr_line_metrics plm ON plm.pr_id = pr.id AND plm.sprint_id = ?
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY'
-           AND pr.author_id = ? AND s.team_project_id = ?
+           AND t.assignee_id = ? AND s.team_project_id = ?
          ORDER BY pr.repo_full_name, pr.pr_number, pr.id",
     )?;
     let rows: Vec<DonePrFullRow> = stmt
@@ -1540,9 +1550,9 @@ fn team_inequality_member_value(
                  JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
                  JOIN tasks t ON t.id = tpr.task_id
                  JOIN pr_commits pc ON pc.pr_id = pr.id
-                 JOIN students s ON s.id = pr.author_id
+                 JOIN students s ON s.id = t.assignee_id
                  WHERE t.sprint_id = ? AND t.type != 'USER_STORY'
-                   AND pr.author_id = ? AND s.team_project_id = ?",
+                   AND t.assignee_id = ? AND s.team_project_id = ?",
                 params![sprint_id, student_id, project_id],
                 |r| r.get::<_, i64>(0),
             )
