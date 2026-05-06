@@ -472,14 +472,20 @@ fn write_prs_sheet(
         }
     }
 
-    // PRs for the team — only those linked to DONE TASK/BUG rows.
+    // PRs for the team — only those linked to DONE TASK/BUG rows. Author
+    // membership is derived from task_pull_requests → tasks.assignee_id (the
+    // canonical TrackDev source) via the `pr_authors` view, NOT from
+    // pull_requests.author_id (which is a git identity and is NULL for ~25%
+    // of PRs in collected DBs). PRs whose linked DONE tasks are assigned to
+    // a member of this team are listed here, regardless of `pr.author_id`'s
+    // resolution state.
     let mut stmt = conn.prepare(
         "SELECT DISTINCT pr.id, pr.pr_number, pr.repo_full_name, pr.title, pr.url,
-                pr.author_id, pr.additions, pr.deletions, pr.changed_files
+                pr.additions, pr.deletions, pr.changed_files
          FROM pull_requests pr
          JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
          JOIN tasks t ON t.id = tpr.task_id
-         JOIN students s ON s.id = pr.author_id
+         JOIN students s ON s.id = t.assignee_id
          WHERE t.sprint_id = ?
            AND t.type != 'USER_STORY' AND t.status = 'DONE'
            AND s.team_project_id = ?
@@ -491,7 +497,6 @@ fn write_prs_sheet(
         repo_full_name: Option<String>,
         title: Option<String>,
         url: Option<String>,
-        author_id: Option<String>,
         additions: i64,
         deletions: i64,
         changed_files: i64,
@@ -504,10 +509,9 @@ fn write_prs_sheet(
                 repo_full_name: r.get::<_, Option<String>>(2)?,
                 title: r.get::<_, Option<String>>(3)?,
                 url: r.get::<_, Option<String>>(4)?,
-                author_id: r.get::<_, Option<String>>(5)?,
-                additions: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                deletions: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
-                changed_files: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
+                additions: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                deletions: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                changed_files: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -548,19 +552,29 @@ fn write_prs_sheet(
             .collect::<Vec<_>>()
             .join(", ");
 
-        // Author name
-        let author_name: String = pr
-            .author_id
-            .as_ref()
-            .and_then(|aid| {
-                conn.query_row(
-                    "SELECT COALESCE(full_name, github_login, '') FROM students WHERE id = ?",
-                    [aid],
-                    |r| r.get::<_, String>(0),
-                )
-                .ok()
-            })
-            .unwrap_or_default();
+        // Author rendering: TrackDev-scoped author set comes from pr_authors.
+        // Primary author = assignee with the most accumulated estimation points
+        // on this PR's tasks (ties → most tasks → full_name → student_id).
+        // Co-assignees, if any, are rendered as an inline `(also: A, B)`
+        // footnote. The git-side identity (pr.github_author_login) is not
+        // surfaced here; AUTHOR_MISMATCH speaks to that.
+        let mut author_stmt = conn.prepare(
+            "SELECT COALESCE(s.full_name, s.github_login, '')
+             FROM pr_authors pa
+             JOIN students s ON s.id = pa.student_id
+             WHERE pa.pr_id = ?
+             ORDER BY pa.author_points DESC, pa.author_task_count DESC,
+                      s.full_name, s.id",
+        )?;
+        let author_names: Vec<String> = author_stmt
+            .query_map([&pr.id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(author_stmt);
+        let author_name: String = match author_names.as_slice() {
+            [] => String::new(),
+            [primary] => primary.clone(),
+            [primary, rest @ ..] => format!("{} (also: {})", primary, rest.join(", ")),
+        };
 
         let commits = count_i64(
             conn,
@@ -893,9 +907,12 @@ fn write_pr_timing_sheet(
     let any: i64 = count_i64(
         conn,
         "SELECT COUNT(*) FROM pr_submission_tiers pst
-         JOIN pull_requests pr ON pr.id = pst.pr_id
-         JOIN students s ON s.id = pr.author_id
-         WHERE pst.sprint_id = ? AND s.team_project_id = ?",
+         WHERE pst.sprint_id = ?
+           AND EXISTS (
+             SELECT 1 FROM pr_authors pa
+             JOIN students s ON s.id = pa.student_id
+             WHERE pa.pr_id = pst.pr_id AND s.team_project_id = ?
+           )",
         &[&sprint_id, &project_id],
     );
     if any == 0 {
@@ -920,12 +937,26 @@ fn write_pr_timing_sheet(
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
+    // Per-student tier counts. Each PR is credited to its primary
+    // assignee only (max points, ties → max task count → student_id). This
+    // preserves the conservation property that the column totals across
+    // students sum to the team's total PR count, even on multi-assignee PRs.
     let mut wrote: u32 = 0;
     for (sid, name) in &students {
         let mut tier_stmt = conn.prepare(
-            "SELECT pst.tier, COUNT(*) FROM pr_submission_tiers pst
-             JOIN pull_requests pr ON pr.id = pst.pr_id
-             WHERE pst.sprint_id = ? AND pr.author_id = ?
+            "WITH primary_author AS (
+                 SELECT pa.pr_id, pa.student_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY pa.pr_id
+                            ORDER BY pa.author_points DESC,
+                                     pa.author_task_count DESC,
+                                     pa.student_id
+                        ) AS rn
+                 FROM pr_authors pa
+             )
+             SELECT pst.tier, COUNT(*) FROM pr_submission_tiers pst
+             JOIN primary_author p ON p.pr_id = pst.pr_id AND p.rn = 1
+             WHERE pst.sprint_id = ? AND p.student_id = ?
              GROUP BY pst.tier",
         )?;
         let mut counts: HashMap<String, i64> =
@@ -1498,6 +1529,15 @@ mod tests {
                 team_a_project_id INTEGER, team_b_project_id INTEGER,
                 file_path_a TEXT, file_path_b TEXT, method_name TEXT,
                 fingerprint TEXT);
+             CREATE VIEW IF NOT EXISTS pr_authors AS
+                SELECT pr.id AS pr_id, t.assignee_id AS student_id,
+                       SUM(COALESCE(t.estimation_points, 0)) AS author_points,
+                       COUNT(*) AS author_task_count
+                FROM pull_requests pr
+                JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
+                JOIN tasks t ON t.id = tpr.task_id
+                WHERE t.type != 'USER_STORY' AND t.assignee_id IS NOT NULL
+                GROUP BY pr.id, t.assignee_id;
              INSERT INTO projects VALUES (1, 'pds26-1a');
              INSERT INTO sprints VALUES (10, 1, 'Sprint 1', '2026-02-16', '2026-03-08');
              INSERT INTO students VALUES ('u1', 'Alice', 'alice-gh', 1, 'alice@example.com');

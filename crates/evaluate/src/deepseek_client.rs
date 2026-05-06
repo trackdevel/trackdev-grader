@@ -165,6 +165,23 @@ fn extract_text(json: &Value) -> Result<String, LlmError> {
     let choices = json.get("choices").and_then(Value::as_array);
     if let Some(arr) = choices {
         if let Some(first) = arr.first() {
+            // DeepSeek/OpenAI surface the truncation reason in
+            // `finish_reason`. "length" means the model hit the
+            // `max_tokens` cap before emitting `</s>`; on V4 with
+            // thinking enabled, reasoning tokens count against this
+            // cap, so a too-low budget silently yields half-written
+            // JSON that downstream parsers reject. Convert to a typed
+            // error so the call site logs an actionable message
+            // instead of "EOF while parsing a list".
+            let finish_reason = first
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if finish_reason == "length" {
+                return Err(LlmError::Truncated {
+                    finish_reason: finish_reason.to_string(),
+                });
+            }
             if let Some(text) = first
                 .get("message")
                 .and_then(|m| m.get("content"))
@@ -215,7 +232,8 @@ mod tests {
 
     #[test]
     fn build_body_omits_thinking_field_by_default() {
-        let body = fixture_client().build_body("sys", &[json!({"role": "user", "content": "x"})], 16);
+        let body =
+            fixture_client().build_body("sys", &[json!({"role": "user", "content": "x"})], 16);
         assert!(body.get("thinking").is_none(), "thinking must default-omit");
     }
 
@@ -250,5 +268,22 @@ mod tests {
     fn extract_text_errors_on_missing_choices() {
         let v = json!({"choices": []});
         assert!(matches!(extract_text(&v), Err(LlmError::NoContent { .. })));
+    }
+
+    #[test]
+    fn extract_text_surfaces_finish_reason_length_as_truncated() {
+        let v = json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "{\"violations\":[{"},
+                "finish_reason": "length"
+            }]
+        });
+        match extract_text(&v) {
+            Err(LlmError::Truncated { finish_reason }) => {
+                assert_eq!(finish_reason, "length");
+            }
+            other => panic!("expected Truncated, got {other:?}"),
+        }
     }
 }

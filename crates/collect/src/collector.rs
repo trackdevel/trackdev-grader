@@ -867,28 +867,61 @@ fn collect_github_users(gh: &GitHubClient, db: &Database) -> Result<(), CollectE
     Ok(())
 }
 
-/// Resolve PR author → TrackDev student. Priority:
-/// 1. github_author_login → students.github_login
-/// 2. fallback via github_users.student_id
-/// 3. sole task assignee across linked non-USER_STORY tasks
+/// Resolve PR author → TrackDev student. Priority order matches the
+/// workspace convention (task-assignee is the canonical source for
+/// TrackDev-scoped attribution; github identity is a git-side fallback):
+///
+/// 1. **Task assignee** (`task_pull_requests → tasks.assignee_id`).
+///    - Single distinct assignee → resolved.
+///    - Multiple distinct assignees → pick the most-points assignee
+///      (ties → most tasks → smallest student_id), record an
+///      attribution_errors entry so professors can spot the ambiguity.
+///      Mirrors the `pr_authors` view ordering used in the report layer.
+/// 2. **GitHub identity** (consulted only if no task assignees exist —
+///    typically orphan PRs). Look up:
+///      - `pr.github_author_login` against `student_github_identity`
+///        (login kind), then `github_users.student_id`, then
+///        `students.github_login`.
+///      - Each row in `pr_commits` for this PR: `author_login` against
+///        the same login chain, `author_email` against
+///        `student_github_identity` (email kind).
+///
+///    If all candidate students agree, attribute to that student.
+///    If they disagree, leave NULL with an attribution_errors entry.
+/// 3. **Last-known author_id** is preserved if all of the above failed.
+///
+/// `--projects` scoping: the work-set covers PRs linked to ANY task whose
+/// assignee belongs to the targeted projects, plus PRs whose currently
+/// recorded `author_id` is in those projects. The previous implementation
+/// joined on `pr.author_id`, which silently skipped every PR with a NULL
+/// author — exactly the rows that needed re-resolution most.
 fn resolve_pr_authors(db: &Database, project_ids: Option<&[i64]>) -> Result<(), CollectError> {
     let rows: Vec<(String, Option<String>, Option<String>)> = if let Some(ids) = project_ids {
         if ids.is_empty() {
             return Ok(());
         }
-        // Scope the loop to PRs authored by students of the targeted
-        // projects. Without this, `--projects` re-resolves every PR in the
-        // entire DB (1000+) on every collect pass.
         let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        // PRs are in scope when ANY linked task's assignee, or the PR's own
+        // author_id (carry-over for re-resolution), belongs to a target
+        // project. The pr_authors view already filters out USER_STORY parents.
         let sql = format!(
-            "SELECT pr.id, pr.author_id, pr.github_author_login
+            "SELECT DISTINCT pr.id, pr.author_id, pr.github_author_login
              FROM pull_requests pr
-             JOIN students s ON s.id = pr.author_id
-             WHERE s.team_project_id IN ({placeholders})"
+             WHERE pr.id IN (
+                 SELECT pa.pr_id FROM pr_authors pa
+                 JOIN students s ON s.id = pa.student_id
+                 WHERE s.team_project_id IN ({placeholders})
+             )
+             OR pr.author_id IN (
+                 SELECT id FROM students WHERE team_project_id IN ({placeholders})
+             )"
         );
         let mut stmt = db.conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
-            ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        let params: Vec<&dyn rusqlite::ToSql> = ids
+            .iter()
+            .chain(ids.iter())
+            .map(|i| i as &dyn rusqlite::ToSql)
+            .collect();
         let collected = stmt
             .query_map(params.as_slice(), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
@@ -909,88 +942,114 @@ fn resolve_pr_authors(db: &Database, project_ids: Option<&[i64]>) -> Result<(), 
     let mut error_count = 0usize;
     let total = rows.len();
 
-    for (pr_id, trackdev_author_id, gh_login) in rows {
+    for (pr_id, prior_author_id, gh_login) in rows {
         let mut errors: Vec<String> = Vec::new();
         let mut resolved_id: Option<String> = None;
 
-        // Strategy 1 — direct + github_users fallback.
-        if let Some(login) = gh_login.as_deref() {
-            let direct: Option<String> = db
-                .conn
-                .query_row(
-                    "SELECT id FROM students WHERE LOWER(github_login) = LOWER(?)",
-                    [login],
-                    |r| r.get(0),
-                )
-                .ok();
-            if direct.is_some() {
-                resolved_id = direct;
-            } else {
-                let via_gu: Option<String> = db
+        // Strategy 1 — task assignee (canonical TrackDev source). Reads
+        // pr_authors so the points-aware ordering is identical to the
+        // primary-author rule used everywhere in the report layer.
+        let mut stmt1 = db.conn.prepare(
+            "SELECT student_id, author_points, author_task_count
+             FROM pr_authors
+             WHERE pr_id = ?
+             ORDER BY author_points DESC, author_task_count DESC, student_id",
+        )?;
+        let assignees: Vec<(String, i64, i64)> = stmt1
+            .query_map([&pr_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt1);
+
+        match assignees.as_slice() {
+            [only] => resolved_id = Some(only.0.clone()),
+            [primary, rest @ ..] if !rest.is_empty() => {
+                // Multi-assignee — pick most-points (already at index 0
+                // thanks to ORDER BY) and record the ambiguity for review.
+                resolved_id = Some(primary.0.clone());
+                let mut names: Vec<String> = Vec::with_capacity(assignees.len());
+                for (aid, points, _) in &assignees {
+                    let full_name: Option<String> = db
+                        .conn
+                        .query_row("SELECT full_name FROM students WHERE id = ?", [aid], |r| {
+                            r.get(0)
+                        })
+                        .ok()
+                        .flatten();
+                    let label = full_name.unwrap_or_else(|| aid.clone());
+                    names.push(format!("{label} ({points}pts)"));
+                }
+                errors.push(format!(
+                    "PR linked to tasks with multiple distinct assignees, picked the most-points one: {names:?}"
+                ));
+            }
+            _ => {
+                // Strategy 2 — github identity. Only reachable for orphan
+                // PRs (no linked task assignees). Single source of truth:
+                // student_github_identity. github_users and
+                // students.github_login are kept as cold-start backstops
+                // until the resolver has run.
+                let mut candidates: HashSet<String> = HashSet::new();
+
+                if let Some(login) = gh_login.as_deref() {
+                    if let Some(sid) = lookup_student_by_login(db, login)? {
+                        candidates.insert(sid);
+                    }
+                }
+
+                let mut commit_stmt = db
                     .conn
-                    .query_row(
-                        "SELECT student_id FROM github_users WHERE LOWER(login) = LOWER(?)",
-                        [login],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                if let Some(Some(sid)) = via_gu.map(Some) {
-                    resolved_id = Some(sid);
-                }
-            }
-        }
+                    .prepare("SELECT author_login, author_email FROM pr_commits WHERE pr_id = ?")?;
+                let commit_rows: Vec<(Option<String>, Option<String>)> = commit_stmt
+                    .query_map([&pr_id], |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                drop(commit_stmt);
 
-        // Strategy 2 — task assignee fallback.
-        if resolved_id.is_none() {
-            let mut stmt2 = db.conn.prepare(
-                "SELECT DISTINCT t.assignee_id
-                 FROM tasks t
-                 JOIN task_pull_requests tpr ON tpr.task_id = t.id
-                 WHERE tpr.pr_id = ? AND t.assignee_id IS NOT NULL
-                   AND t.type != 'USER_STORY'",
-            )?;
-            let assignees: Vec<String> = stmt2
-                .query_map([&pr_id], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            match assignees.as_slice() {
-                [only] => resolved_id = Some(only.clone()),
-                [] => {
-                    if let Some(login) = gh_login.as_deref() {
+                for (login, email) in &commit_rows {
+                    if let Some(login) = login.as_deref().filter(|s| !s.is_empty()) {
+                        if let Some(sid) = lookup_student_by_login(db, login)? {
+                            candidates.insert(sid);
+                        }
+                    }
+                    if let Some(email) = email.as_deref().filter(|s| !s.is_empty()) {
+                        if let Some(sid) = lookup_student_by_email(db, email)? {
+                            candidates.insert(sid);
+                        }
+                    }
+                }
+
+                match candidates.len() {
+                    1 => resolved_id = candidates.into_iter().next(),
+                    0 => {
+                        errors.push(if gh_login.is_some() || !commit_rows.is_empty() {
+                            "GitHub identities on this PR did not match any student".to_string()
+                        } else {
+                            "No GitHub author login, no task assignee, no commit identities"
+                                .to_string()
+                        });
+                    }
+                    _ => {
                         errors.push(format!(
-                            "GitHub login '{login}' not matched to any student and no task assignee available"
+                            "PR has conflicting GitHub identities resolving to {} different students; left unresolved",
+                            candidates.len()
                         ));
-                    } else {
-                        errors.push(
-                            "No GitHub author login and no task assignee available".to_string(),
-                        );
                     }
-                }
-                many => {
-                    // Multiple distinct assignees → error + best guess.
-                    let mut names: Vec<String> = Vec::new();
-                    for aid in many {
-                        let full_name: Option<String> = db
-                            .conn
-                            .query_row("SELECT full_name FROM students WHERE id = ?", [aid], |r| {
-                                r.get(0)
-                            })
-                            .ok();
-                        names.push(full_name.unwrap_or_else(|| aid.clone()));
-                    }
-                    errors.push(format!(
-                        "PR linked to tasks with different assignees: {names:?}"
-                    ));
-                    resolved_id = Some(many[0].clone());
                 }
             }
         }
 
-        let final_id = resolved_id.clone().or(trackdev_author_id);
+        let final_id = resolved_id.clone().or(prior_author_id);
 
-        // T-P1.5: switched from overwriting attribution_errors with this
-        // loop's String list to merging each error as a structured
-        // {kind, detail, observed_at} entry. Preserves anything already
-        // written upstream (HTTP failures, null commit authors).
         db.conn.execute(
             "UPDATE pull_requests SET author_id = ? WHERE id = ?",
             params![final_id, pr_id],
@@ -1014,4 +1073,403 @@ fn resolve_pr_authors(db: &Database, project_ids: Option<&[i64]>) -> Result<(), 
         "PR author resolution"
     );
     Ok(())
+}
+
+/// Resolve a github login to a TrackDev `student_id`, consulting (in
+/// order) `student_github_identity` (the resolver's accumulated evidence),
+/// `github_users.student_id` (cold-start mapping populated when fetching
+/// profiles), and `students.github_login` (manual seed).
+///
+/// The identity table stores values lowercased; the helper lowercases the
+/// input in the same way to keep matches consistent.
+fn lookup_student_by_login(db: &Database, login: &str) -> rusqlite::Result<Option<String>> {
+    let needle = login.to_lowercase();
+    if let Ok(sid) = db.conn.query_row(
+        "SELECT student_id FROM student_github_identity
+         WHERE identity_kind = 'login' AND identity_value = ?
+         ORDER BY weight DESC, confidence DESC, student_id
+         LIMIT 1",
+        [&needle],
+        |r| r.get::<_, String>(0),
+    ) {
+        return Ok(Some(sid));
+    }
+    if let Ok(sid) = db.conn.query_row(
+        "SELECT student_id FROM github_users
+         WHERE LOWER(login) = ? AND student_id IS NOT NULL
+         LIMIT 1",
+        [&needle],
+        |r| r.get::<_, String>(0),
+    ) {
+        return Ok(Some(sid));
+    }
+    Ok(db
+        .conn
+        .query_row(
+            "SELECT id FROM students WHERE LOWER(github_login) = ? LIMIT 1",
+            [&needle],
+            |r| r.get::<_, String>(0),
+        )
+        .ok())
+}
+
+/// Resolve a commit `author_email` to a TrackDev `student_id`. Only the
+/// identity table is consulted — `students.email` is TrackDev's email,
+/// which only matches a github commit email by accident.
+fn lookup_student_by_email(db: &Database, email: &str) -> rusqlite::Result<Option<String>> {
+    let needle = email.to_lowercase();
+    Ok(db
+        .conn
+        .query_row(
+            "SELECT student_id FROM student_github_identity
+             WHERE identity_kind = 'email' AND identity_value = ?
+             ORDER BY weight DESC, confidence DESC, student_id
+             LIMIT 1",
+            [&needle],
+            |r| r.get::<_, String>(0),
+        )
+        .ok())
+}
+
+#[cfg(test)]
+mod resolve_pr_authors_tests {
+    //! End-to-end tests for resolve_pr_authors. They cover the four bugs
+    //! the rewrite addresses:
+    //!   - NULL pr.author_id with a single task assignee resolves via Strategy 1
+    //!     (the headline bug; ~25% of PRs in production were stuck NULL).
+    //!   - Multi-assignee PR picks the most-points assignee deterministically.
+    //!   - Orphan PR resolves through the github lookup chain
+    //!     (student_github_identity → github_users → students.github_login)
+    //!     and via pr_commits when github_author_login is NULL.
+    //!   - --projects scoping no longer drops NULL-author PRs from the work-set.
+
+    use super::*;
+    use rusqlite::Connection;
+    use sprint_grader_core::db::apply_schema;
+    use std::path::PathBuf;
+
+    fn mk_db() -> Database {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        Database {
+            db_path: PathBuf::new(),
+            conn,
+        }
+    }
+
+    fn seed_team(db: &Database) {
+        db.conn
+            .execute_batch(
+                "INSERT INTO projects (id, slug, name) VALUES (1, 'team-alpha', 'Team Alpha');
+                 INSERT INTO projects (id, slug, name) VALUES (2, 'team-beta',  'Team Beta');
+                 INSERT INTO students (id, full_name, github_login, team_project_id) VALUES
+                    ('alice', 'Alice Adams',  'alice-gh', 1),
+                    ('bob',   'Bob Brown',    NULL,       1),
+                    ('carol', 'Carol Carter', NULL,       1),
+                    ('dave',  'Dave Davis',   NULL,       2);",
+            )
+            .unwrap();
+    }
+
+    fn seed_task(db: &Database, id: i64, assignee: &str, points: i64) {
+        db.conn
+            .execute(
+                "INSERT INTO tasks (id, task_key, name, type, status, estimation_points,
+                                    assignee_id, sprint_id)
+                 VALUES (?, ?, ?, 'TASK', 'DONE', ?, ?, 10)",
+                params![
+                    id,
+                    format!("T-{}", id),
+                    format!("Task {}", id),
+                    points,
+                    assignee
+                ],
+            )
+            .unwrap();
+    }
+
+    fn seed_pr_with_null_author(db: &Database, pr_id: &str, github_author_login: Option<&str>) {
+        db.conn
+            .execute(
+                "INSERT INTO pull_requests (id, pr_number, repo_full_name, title, url,
+                                            author_id, github_author_login, merged)
+                 VALUES (?, 1, 'org/repo', 't', NULL, NULL, ?, 1)",
+                params![pr_id, github_author_login],
+            )
+            .unwrap();
+    }
+
+    fn link(db: &Database, task_id: i64, pr_id: &str) {
+        db.conn
+            .execute(
+                "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (?, ?)",
+                params![task_id, pr_id],
+            )
+            .unwrap();
+    }
+
+    fn author_of(db: &Database, pr_id: &str) -> Option<String> {
+        db.conn
+            .query_row(
+                "SELECT author_id FROM pull_requests WHERE id = ?",
+                [pr_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn null_author_pr_with_single_assignee_resolves_via_task_assignment() {
+        let db = mk_db();
+        seed_team(&db);
+        seed_task(&db, 1, "alice", 5);
+        seed_pr_with_null_author(&db, "pr-1", None);
+        link(&db, 1, "pr-1");
+
+        resolve_pr_authors(&db, None).unwrap();
+
+        assert_eq!(
+            author_of(&db, "pr-1"),
+            Some("alice".to_string()),
+            "NULL author_id with single linked-task assignee must resolve to the assignee"
+        );
+    }
+
+    #[test]
+    fn multi_assignee_pr_picks_the_most_points_assignee() {
+        let db = mk_db();
+        seed_team(&db);
+        // Bob 8 points, Alice 3 points → Bob wins on points alone.
+        seed_task(&db, 1, "alice", 3);
+        seed_task(&db, 2, "bob", 8);
+        seed_pr_with_null_author(&db, "pr-multi", None);
+        link(&db, 1, "pr-multi");
+        link(&db, 2, "pr-multi");
+
+        resolve_pr_authors(&db, None).unwrap();
+
+        assert_eq!(
+            author_of(&db, "pr-multi"),
+            Some("bob".to_string()),
+            "primary author = max-points assignee"
+        );
+
+        // Ambiguity must be recorded so professors can audit.
+        let attrib_errors: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT attribution_errors FROM pull_requests WHERE id = 'pr-multi'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let detail = attrib_errors.unwrap_or_default();
+        assert!(
+            detail.contains("multiple distinct assignees"),
+            "ambiguity must be reported in attribution_errors, got: {detail}"
+        );
+    }
+
+    #[test]
+    fn multi_assignee_tie_break_falls_through_to_task_count_then_id() {
+        let db = mk_db();
+        seed_team(&db);
+        // Bob & Carol each at 5 points; Bob has two tasks, Carol one.
+        seed_task(&db, 1, "bob", 3);
+        seed_task(&db, 2, "bob", 2);
+        seed_task(&db, 3, "carol", 5);
+        seed_pr_with_null_author(&db, "pr-tie", None);
+        link(&db, 1, "pr-tie");
+        link(&db, 2, "pr-tie");
+        link(&db, 3, "pr-tie");
+
+        resolve_pr_authors(&db, None).unwrap();
+
+        assert_eq!(
+            author_of(&db, "pr-tie"),
+            Some("bob".to_string()),
+            "tie on points → most tasks wins (Bob: 2, Carol: 1)"
+        );
+    }
+
+    #[test]
+    fn orphan_pr_resolves_via_student_github_identity() {
+        let db = mk_db();
+        seed_team(&db);
+        // No task linked → Strategy 1 returns nothing → Strategy 2 kicks in.
+        // student_github_identity holds the resolver-learned mapping.
+        db.conn
+            .execute(
+                "INSERT INTO student_github_identity
+                    (student_id, identity_kind, identity_value, weight, confidence)
+                 VALUES ('alice', 'login', 'alice-gh', 10.0, 1.0)",
+                [],
+            )
+            .unwrap();
+        seed_pr_with_null_author(&db, "pr-orphan", Some("alice-gh"));
+
+        resolve_pr_authors(&db, None).unwrap();
+
+        assert_eq!(
+            author_of(&db, "pr-orphan"),
+            Some("alice".to_string()),
+            "orphan PR with github_author_login resolves via student_github_identity"
+        );
+    }
+
+    #[test]
+    fn orphan_pr_with_null_login_resolves_via_pr_commits() {
+        let db = mk_db();
+        seed_team(&db);
+        // PR has no github_author_login but has a commit whose author_email
+        // matches student_github_identity.
+        db.conn
+            .execute(
+                "INSERT INTO student_github_identity
+                    (student_id, identity_kind, identity_value, weight, confidence)
+                 VALUES ('bob', 'email', 'bob@example.com', 5.0, 1.0)",
+                [],
+            )
+            .unwrap();
+        seed_pr_with_null_author(&db, "pr-no-login", None);
+        db.conn
+            .execute(
+                "INSERT INTO pr_commits (pr_id, sha, author_login, author_email)
+                 VALUES ('pr-no-login', 'sha1', NULL, 'bob@example.com')",
+                [],
+            )
+            .unwrap();
+
+        resolve_pr_authors(&db, None).unwrap();
+
+        assert_eq!(
+            author_of(&db, "pr-no-login"),
+            Some("bob".to_string()),
+            "null github_author_login must fall through to pr_commits author_email"
+        );
+    }
+
+    #[test]
+    fn orphan_pr_with_conflicting_github_identities_left_null_with_error() {
+        let db = mk_db();
+        seed_team(&db);
+        db.conn
+            .execute_batch(
+                "INSERT INTO student_github_identity
+                    (student_id, identity_kind, identity_value, weight, confidence) VALUES
+                    ('alice', 'login', 'alice-gh', 10.0, 1.0),
+                    ('bob',   'email', 'bob@example.com', 5.0, 1.0);",
+            )
+            .unwrap();
+        seed_pr_with_null_author(&db, "pr-conflict", Some("alice-gh"));
+        db.conn
+            .execute(
+                "INSERT INTO pr_commits (pr_id, sha, author_login, author_email)
+                 VALUES ('pr-conflict', 'sha1', NULL, 'bob@example.com')",
+                [],
+            )
+            .unwrap();
+
+        resolve_pr_authors(&db, None).unwrap();
+
+        assert_eq!(
+            author_of(&db, "pr-conflict"),
+            None,
+            "conflicting github identities must leave author_id NULL — \
+             attribution silently picking one would mask a real ambiguity"
+        );
+        let detail: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT attribution_errors FROM pull_requests WHERE id = 'pr-conflict'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            detail
+                .unwrap_or_default()
+                .contains("conflicting GitHub identities"),
+            "conflict is recorded in attribution_errors"
+        );
+    }
+
+    #[test]
+    fn projects_scoping_includes_prs_with_null_author_id() {
+        // The bug this guards against: the previous --projects work-set
+        // filter joined on pr.author_id and silently dropped every NULL row
+        // — exactly the rows that needed re-resolution.
+        let db = mk_db();
+        seed_team(&db);
+        seed_task(&db, 1, "alice", 5);
+        seed_pr_with_null_author(&db, "pr-null", None);
+        link(&db, 1, "pr-null");
+
+        resolve_pr_authors(&db, Some(&[1])).unwrap();
+
+        assert_eq!(
+            author_of(&db, "pr-null"),
+            Some("alice".to_string()),
+            "scoped run must still pick up Alice's NULL-author PR via the \
+             task_pull_requests → tasks.assignee_id path"
+        );
+    }
+
+    #[test]
+    fn projects_scoping_excludes_prs_belonging_to_other_teams() {
+        let db = mk_db();
+        seed_team(&db);
+        // Dave is in project 2; his PR must not be touched when we scope
+        // to project 1.
+        db.conn
+            .execute(
+                "INSERT INTO tasks (id, task_key, name, type, status, estimation_points,
+                                    assignee_id, sprint_id)
+                 VALUES (99, 'D-1', 'Dave task', 'TASK', 'DONE', 5, 'dave', 20)",
+                [],
+            )
+            .unwrap();
+        seed_pr_with_null_author(&db, "pr-dave", None);
+        link(&db, 99, "pr-dave");
+
+        resolve_pr_authors(&db, Some(&[1])).unwrap();
+
+        assert_eq!(
+            author_of(&db, "pr-dave"),
+            None,
+            "PR linked only to a project-2 task must be untouched by a \
+             project-1-scoped resolution pass"
+        );
+    }
+
+    #[test]
+    fn previously_resolved_pr_is_not_overwritten_by_strategy_2_when_strategy_1_succeeds() {
+        // If Strategy 1 succeeds the value is the authoritative answer.
+        // Strategy 2 (github lookup) is only consulted for orphan PRs.
+        let db = mk_db();
+        seed_team(&db);
+        // The github identity points to Bob, but the linked task is
+        // Alice's — task assignment wins.
+        db.conn
+            .execute(
+                "INSERT INTO student_github_identity
+                    (student_id, identity_kind, identity_value, weight, confidence)
+                 VALUES ('bob', 'login', 'bob-gh', 10.0, 1.0)",
+                [],
+            )
+            .unwrap();
+        seed_task(&db, 1, "alice", 5);
+        seed_pr_with_null_author(&db, "pr-mixed", Some("bob-gh"));
+        link(&db, 1, "pr-mixed");
+
+        resolve_pr_authors(&db, None).unwrap();
+
+        assert_eq!(
+            author_of(&db, "pr-mixed"),
+            Some("alice".to_string()),
+            "task-assignee (Alice) is canonical even when github identity \
+             would resolve to Bob — that mismatch is the AUTHOR_MISMATCH \
+             flag's job, not the resolver's"
+        );
+    }
 }

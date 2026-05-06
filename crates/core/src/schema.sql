@@ -1028,3 +1028,23 @@ CREATE TABLE IF NOT EXISTS identity_resolution_warnings (
     observed_at    TEXT NOT NULL,
     PRIMARY KEY (identity_kind, identity_value, kind)
 );
+
+-- Canonical TrackDev-scoped author set for every PR. Derives the SET of
+-- student authors of a PR from task_pull_requests → tasks.assignee_id, NOT
+-- from pull_requests.author_id (the latter is a git/github identity, used
+-- only for blame and review-graph attribution). One row per (pr, assignee)
+-- with the assignee's accumulated points and task count over that PR.
+-- Status-agnostic: callers that want only DONE-task PRs filter at the
+-- call site (e.g. `JOIN tasks t ON t.assignee_id = pa.student_id WHERE
+-- t.status = 'DONE'`). USER_STORY parents are excluded — they aren't
+-- gradeable units.
+CREATE VIEW IF NOT EXISTS pr_authors AS
+SELECT pr.id                                       AS pr_id,
+       t.assignee_id                               AS student_id,
+       SUM(COALESCE(t.estimation_points, 0))       AS author_points,
+       COUNT(*)                                    AS author_task_count
+FROM pull_requests pr
+JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
+JOIN tasks t ON t.id = tpr.task_id
+WHERE t.type != 'USER_STORY' AND t.assignee_id IS NOT NULL
+GROUP BY pr.id, t.assignee_id;

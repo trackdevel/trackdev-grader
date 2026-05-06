@@ -111,18 +111,23 @@ fn gather_signals(
         }
         drop(stmt);
 
-        let mut pr_lines: HashMap<String, i64> = HashMap::new();
+        // PR-line signal — read the canonical proportional split out of
+        // student_sprint_metrics.weighted_pr_lines (computed upstream by
+        // metrics.rs via distribute_pr_weights_for_sprint, which splits each
+        // PR's lines across its linked tasks proportionally to
+        // estimation_points and routes each task's share to its assignee).
+        // The previous implementation rolled its own GROUP BY pr.author_id,
+        // which (a) skipped PRs with NULL author_id and (b) attributed all of
+        // a multi-task PR's lines to a single github author. The view-based
+        // primitive avoids both pitfalls.
+        let mut pr_lines: HashMap<String, f64> = HashMap::new();
         let mut stmt = conn.prepare(
-            "SELECT pr.author_id, COALESCE(SUM(pr.additions + pr.deletions), 0)
-             FROM pull_requests pr
-             JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
-             JOIN tasks t ON t.id = tpr.task_id
-             WHERE t.sprint_id = ? AND t.type != 'USER_STORY'
-               AND pr.additions IS NOT NULL AND pr.author_id IS NOT NULL
-             GROUP BY pr.author_id",
+            "SELECT student_id, COALESCE(weighted_pr_lines, 0.0)
+             FROM student_sprint_metrics
+             WHERE sprint_id = ?",
         )?;
         for row in stmt.query_map([sprint_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
         })? {
             let (sid, v) = row?;
             if member_set.contains(sid.as_str()) {
@@ -133,8 +138,8 @@ fn gather_signals(
 
         for sid in member_ids {
             let surv = surviving.get(sid).copied().unwrap_or(0);
-            let lines = pr_lines.get(sid).copied().unwrap_or(0);
-            let value = if surv > 0 { surv } else { lines } as f64;
+            let lines = pr_lines.get(sid).copied().unwrap_or(0.0);
+            let value = if surv > 0 { surv as f64 } else { lines };
             code.insert(sid.clone(), value);
         }
     }
