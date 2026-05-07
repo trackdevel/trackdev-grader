@@ -56,14 +56,16 @@ type CliPrRow = (
     Option<i64>,
 );
 
-/// PR documentation rubric response shape. `total_doc_score` is optional
-/// because the model sometimes omits it; we fall back to the sum.
+/// PR documentation rubric response shape. Scores live on a 0.25-step
+/// grid (see `assets/prompts/rubric_pr.md`); deserialised as `f64` so
+/// the LLM's fractional outputs survive into the database. The model
+/// sometimes omits `total_doc_score`; we fall back to the sum.
 #[derive(Debug, Deserialize)]
 struct PrDocResponse {
-    title_score: i64,
-    description_score: i64,
+    title_score: f64,
+    description_score: f64,
     #[serde(default)]
-    total_doc_score: Option<i64>,
+    total_doc_score: Option<f64>,
     #[serde(default)]
     justification: String,
 }
@@ -115,37 +117,43 @@ static TASK_MD_LINK_ONLY: Lazy<Regex> = Lazy::new(|| {
         .expect("task md-link regex")
 });
 
-fn heuristic_title_score(title: Option<&str>) -> i64 {
+fn heuristic_title_score(title: Option<&str>) -> f64 {
     let title = match title {
         Some(t) => t.trim(),
-        None => return 0,
+        None => return 0.0,
     };
     if title.len() < 5 {
-        return 0;
+        return 0.0;
     }
     if GENERIC_TITLE.is_match(title) {
-        return 0;
+        // The regex's catch-all branch (`^.{0,9}$`) treats every title
+        // up to 9 chars as generic, so the heuristic's first reachable
+        // bucket starts at 10 chars. The LLM judge can still emit any
+        // 0.25-step value for short-but-meaningful titles.
+        return 0.0;
     }
+    // Length-based ladder, snapped to the 0.25 grid that the rubric uses.
     if title.len() < 20 {
-        1
+        1.0
+    } else if title.len() < 30 {
+        1.5
+    } else if title.len() < 50 {
+        1.75
     } else {
-        2
+        2.0
     }
 }
 
-fn heuristic_description_score(body: Option<&str>) -> i64 {
+fn heuristic_description_score(body: Option<&str>) -> f64 {
     let body = match body {
         Some(b) => b.trim(),
-        None => return 0,
+        None => return 0.0,
     };
     if body.len() < 20 {
-        return 0;
+        return 0.0;
     }
     if TASK_ID_ONLY.is_match(body).unwrap_or(false) || TASK_MD_LINK_ONLY.is_match(body) {
-        return 0;
-    }
-    if body.len() < 50 {
-        return 1;
+        return 0.0;
     }
     let lower = body.to_lowercase();
     let has_what = ["what", "change", "add", "implement", "fix"]
@@ -161,17 +169,33 @@ fn heuristic_description_score(body: Option<&str>) -> i64 {
         .iter()
         .any(|k| lower.contains(k));
 
-    let mut score = 1;
-    if has_what && has_ref {
-        score = 2;
+    // Length contributes a base score on the 0.25 grid; quality signals
+    // each add a quarter or half point. The ceiling is 4.0 to stay within
+    // the rubric range.
+    let mut score: f64 = if body.len() < 50 {
+        0.5
+    } else if body.len() < 100 {
+        1.0
+    } else if body.len() < 200 {
+        1.5
+    } else if body.len() < 400 {
+        2.0
+    } else {
+        2.5
+    };
+    if has_what {
+        score += 0.5;
     }
-    if has_what && has_why {
-        score = 3;
+    if has_why {
+        score += 0.5;
     }
-    if has_what && has_why && (has_test || has_ref) {
-        score = 4;
+    if has_ref {
+        score += 0.25;
     }
-    score
+    if has_test {
+        score += 0.25;
+    }
+    score.min(4.0)
 }
 
 // ---- Task-description quantization ----
@@ -1134,24 +1158,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn heuristic_title_matches_python() {
-        assert_eq!(heuristic_title_score(None), 0);
-        assert_eq!(heuristic_title_score(Some("fix")), 0);
-        assert_eq!(heuristic_title_score(Some("PROJ-42")), 0);
-        assert_eq!(heuristic_title_score(Some("login changes")), 1);
+    fn heuristic_title_grades_on_quarter_step_grid() {
+        assert_eq!(heuristic_title_score(None), 0.0);
+        // Generic / under-length titles still score zero.
+        assert_eq!(heuristic_title_score(Some("fix")), 0.0);
+        assert_eq!(heuristic_title_score(Some("PROJ-42")), 0.0);
+        // 5..9 chars are still treated as generic by the regex, so they
+        // score 0. The LLM judge — not the heuristic — covers nuanced
+        // sub-1.0 cases.
+        assert_eq!(heuristic_title_score(Some("log out")), 0.0);
+        // 10..19 chars → 1.0.
+        assert_eq!(heuristic_title_score(Some("login changes")), 1.0);
+        // 20..29 chars → 1.5.
+        assert_eq!(heuristic_title_score(Some("Add the login controller")), 1.5);
+        // 30..49 chars → 1.75.
         assert_eq!(
             heuristic_title_score(Some("Implement login controller with JWT")),
-            2
+            1.75
+        );
+        // 50+ chars → top mark.
+        assert_eq!(
+            heuristic_title_score(Some(
+                "Implement the login controller and wire it to the auth service"
+            )),
+            2.0
         );
     }
 
     #[test]
-    fn heuristic_description_matches_python() {
-        assert_eq!(heuristic_description_score(None), 0);
-        assert_eq!(heuristic_description_score(Some("short")), 0);
+    fn heuristic_description_grades_on_quarter_step_grid() {
+        assert_eq!(heuristic_description_score(None), 0.0);
+        assert_eq!(heuristic_description_score(Some("short")), 0.0);
         assert_eq!(
             heuristic_description_score(Some("PDS-123 pds-44")),
-            0,
+            0.0,
             "task-id only must score 0"
         );
         // Markdown-linked task-id only must also score 0 (T-P0.5).
@@ -1159,41 +1199,50 @@ mod tests {
             heuristic_description_score(Some(
                 "[p4d-194](https://trackdev.org/dashboard/tasks/5075)"
             )),
-            0,
+            0.0,
             "single md-link to task must score 0"
         );
         assert_eq!(
             heuristic_description_score(Some(
                 "[p4d-194](https://example.com), [p4d-195](https://example.com)"
             )),
-            0,
+            0.0,
             "comma-separated md-links must score 0"
         );
         assert!(
             heuristic_description_score(Some(
                 "[p4d-194](https://example.com) Adds the user endpoint."
-            )) > 0,
+            )) > 0.0,
             "md-link followed by real prose must score > 0"
         );
-        // 20..50 chars, no structure → 1
+        // 20..49 chars → base 0.5; "added" boosts +0.5 (what) → 1.0.
         assert_eq!(
             heuristic_description_score(Some("Added login form with basic auth")),
-            1
+            1.0
         );
-        // what + ref → 2
+        // 50..99 chars → base 1.0; what (+0.5) + ref (+0.25) → 1.75.
         assert_eq!(
             heuristic_description_score(Some(
                 "Implement login controller and wire it to the existing auth service task."
             )),
-            2
+            1.75
         );
-        // what + why + ref + test → 4
+        // 100..199 chars → base 1.5; what + why + ref + test → 3.0.
         assert_eq!(
             heuristic_description_score(Some(
                 "Implement the login controller because users could not sign in. \
                  Linked to task PDS-42; verify by running the auth test suite."
             )),
-            4
+            3.0
+        );
+        // The cap at 4.0 holds even when every signal fires on a long body.
+        let stuffed = "Implement the login controller because users could not sign in.\
+            "
+        .repeat(8)
+            + " Linked to task PDS-42; verify by running the auth test suite.";
+        assert!(
+            heuristic_description_score(Some(&stuffed)) <= 4.0,
+            "score must not exceed the rubric ceiling"
         );
     }
 
@@ -1298,8 +1347,8 @@ model_id = "claude-haiku-4-5-20251001"
              CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT,
                 PRIMARY KEY (task_id, pr_id));
              CREATE TABLE pr_doc_evaluation (pr_id TEXT, sprint_id INTEGER,
-                title_score INTEGER, description_score INTEGER,
-                total_doc_score INTEGER, justification TEXT,
+                title_score REAL, description_score REAL,
+                total_doc_score REAL, justification TEXT,
                 PRIMARY KEY (pr_id, sprint_id));
              CREATE TABLE student_sprint_metrics (student_id TEXT, sprint_id INTEGER,
                 avg_doc_score REAL, PRIMARY KEY (student_id, sprint_id));
@@ -1328,7 +1377,7 @@ model_id = "claude-haiku-4-5-20251001"
 
         assert_eq!(count, 1);
 
-        let (pr_id, total, justification): (String, i64, String) = conn
+        let (pr_id, total, justification): (String, f64, String) = conn
             .query_row(
                 "SELECT pr_id, total_doc_score, justification FROM pr_doc_evaluation
                  WHERE sprint_id = 10",
@@ -1338,7 +1387,7 @@ model_id = "claude-haiku-4-5-20251001"
             .unwrap();
         assert_eq!(pr_id, "pr-1");
         assert!(
-            total > 0,
+            total > 0.0,
             "heuristic should award positive score for rich PR"
         );
         assert!(
@@ -1355,7 +1404,7 @@ model_id = "claude-haiku-4-5-20251001"
             )
             .unwrap();
         assert!(avg.is_some(), "avg_doc_score must be populated");
-        assert!((avg.unwrap() - total as f64).abs() < 1e-9);
+        assert!((avg.unwrap() - total).abs() < 1e-9);
     }
 
     #[test]
@@ -1374,8 +1423,8 @@ model_id = "claude-haiku-4-5-20251001"
              CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT,
                 PRIMARY KEY (task_id, pr_id));
              CREATE TABLE pr_doc_evaluation (pr_id TEXT, sprint_id INTEGER,
-                title_score INTEGER, description_score INTEGER,
-                total_doc_score INTEGER, justification TEXT,
+                title_score REAL, description_score REAL,
+                total_doc_score REAL, justification TEXT,
                 PRIMARY KEY (pr_id, sprint_id));
              CREATE TABLE student_sprint_metrics (student_id TEXT, sprint_id INTEGER,
                 avg_doc_score REAL, PRIMARY KEY (student_id, sprint_id));
@@ -1433,8 +1482,8 @@ model_id = "claude-haiku-4-5-20251001"
              CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT,
                 PRIMARY KEY (task_id, pr_id));
              CREATE TABLE pr_doc_evaluation (pr_id TEXT, sprint_id INTEGER,
-                title_score INTEGER, description_score INTEGER,
-                total_doc_score INTEGER, justification TEXT,
+                title_score REAL, description_score REAL,
+                total_doc_score REAL, justification TEXT,
                 PRIMARY KEY (pr_id, sprint_id));
              CREATE TABLE student_sprint_metrics (student_id TEXT, sprint_id INTEGER,
                 avg_doc_score REAL, PRIMARY KEY (student_id, sprint_id));
