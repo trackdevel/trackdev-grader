@@ -58,8 +58,13 @@ pub struct LlmJudge {
 }
 
 impl LlmJudge {
-    pub fn new(api_key: &str, model: String, max_tokens: u32) -> Result<Self, JudgeError> {
-        let client = AnthropicClient::new(api_key, model.clone())?;
+    pub fn new(
+        api_key: &str,
+        model: String,
+        max_tokens: u32,
+        timeout_seconds: u64,
+    ) -> Result<Self, JudgeError> {
+        let client = AnthropicClient::new(api_key, model.clone(), timeout_seconds)?;
         Ok(Self {
             client,
             model,

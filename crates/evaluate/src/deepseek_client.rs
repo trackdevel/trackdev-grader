@@ -29,6 +29,7 @@ const API_URL: &str = "https://api.deepseek.com/chat/completions";
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 const MAX_RETRIES: u32 = 3;
 const BACKOFF_BASE_SECS: u64 = 2;
+const BODY_PREVIEW_BYTES: usize = 200;
 
 #[derive(Debug, Clone)]
 pub struct DeepseekClient {
@@ -43,7 +44,7 @@ pub struct DeepseekClient {
 }
 
 impl DeepseekClient {
-    pub fn new(api_key: &str, model: String) -> Result<Self, LlmError> {
+    pub fn new(api_key: &str, model: String, timeout_seconds: u64) -> Result<Self, LlmError> {
         if api_key.is_empty() {
             return Err(LlmError::EmptyKey);
         }
@@ -55,9 +56,10 @@ impl DeepseekClient {
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
+        let timeout = Duration::from_secs(timeout_seconds.max(1));
         let client = Client::builder()
             .default_headers(headers)
-            .timeout(Duration::from_secs(120))
+            .timeout(timeout)
             .build()
             .expect("reqwest client build");
         Ok(Self {
@@ -100,21 +102,68 @@ impl DeepseekClient {
     ) -> Result<String, LlmError> {
         let body = self.build_body(system, messages, max_tokens);
 
-        let mut last_err: Option<reqwest::Error> = None;
+        let mut last_transport: Option<reqwest::Error> = None;
+        let mut last_parse: Option<(u16, String, String, String)> = None;
         for attempt in 0..MAX_RETRIES {
             let resp = self.client.post(API_URL).json(&body).send();
             match resp {
                 Ok(r) => {
                     let status = r.status();
+                    let content_type = r
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
                     if status.is_success() {
-                        let json: Value = match r.json() {
-                            Ok(v) => v,
+                        // Read the body ourselves so a parse failure can
+                        // surface a body preview + content-type rather than
+                        // reqwest's opaque "error decoding response body".
+                        let bytes = match r.bytes() {
+                            Ok(b) => b,
                             Err(e) => {
-                                last_err = Some(e);
+                                let wait = BACKOFF_BASE_SECS.pow(attempt + 1);
+                                warn!(
+                                    attempt = attempt + 1,
+                                    %status,
+                                    content_type = %content_type,
+                                    wait_s = wait,
+                                    error = %e,
+                                    "DeepSeek body read failed; retrying"
+                                );
+                                last_transport = Some(e);
+                                if attempt + 1 < MAX_RETRIES {
+                                    std::thread::sleep(Duration::from_secs(wait));
+                                }
                                 continue;
                             }
                         };
-                        return extract_text(&json);
+                        match serde_json::from_slice::<Value>(&bytes) {
+                            Ok(v) => return extract_text(&v),
+                            Err(parse_err) => {
+                                let preview = body_preview(&bytes, BODY_PREVIEW_BYTES);
+                                let wait = BACKOFF_BASE_SECS.pow(attempt + 1);
+                                warn!(
+                                    attempt = attempt + 1,
+                                    %status,
+                                    content_type = %content_type,
+                                    wait_s = wait,
+                                    preview = %preview,
+                                    error = %parse_err,
+                                    "DeepSeek body parse failed; retrying"
+                                );
+                                last_parse = Some((
+                                    status.as_u16(),
+                                    content_type,
+                                    preview,
+                                    parse_err.to_string(),
+                                ));
+                                if attempt + 1 < MAX_RETRIES {
+                                    std::thread::sleep(Duration::from_secs(wait));
+                                }
+                                continue;
+                            }
+                        }
                     }
                     if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                         let text = r.text().unwrap_or_default();
@@ -130,7 +179,7 @@ impl DeepseekClient {
                     });
                 }
                 Err(e) => {
-                    last_err = Some(e);
+                    last_transport = Some(e);
                     if attempt + 1 < MAX_RETRIES {
                         let wait = BACKOFF_BASE_SECS.pow(attempt + 1);
                         warn!(wait_s = wait, "DeepSeek request error — retrying");
@@ -139,9 +188,21 @@ impl DeepseekClient {
                 }
             }
         }
+        // Prefer the parse error when the last attempt actually got a body
+        // back (more actionable: status + preview); fall back to the
+        // transport error otherwise.
+        if let Some((status, content_type, preview, error)) = last_parse {
+            return Err(LlmError::BodyParseFailed {
+                retries: MAX_RETRIES,
+                status,
+                content_type,
+                preview,
+                error,
+            });
+        }
         Err(LlmError::RequestFailed {
             retries: MAX_RETRIES,
-            source: last_err.expect("loop always populates last_err"),
+            source: last_transport.expect("loop always populates last_transport or last_parse"),
         })
     }
 
@@ -158,6 +219,23 @@ impl LlmClient for DeepseekClient {
         max_tokens: u32,
     ) -> Result<String, LlmError> {
         DeepseekClient::complete(self, system, messages, max_tokens)
+    }
+}
+
+/// Render up to `cap` bytes of `bytes` as UTF-8 (lossy), trimming whitespace
+/// and collapsing newlines so the preview fits on one log line.
+fn body_preview(bytes: &[u8], cap: usize) -> String {
+    let take = bytes.len().min(cap);
+    let s = String::from_utf8_lossy(&bytes[..take]);
+    let trimmed: String = s
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = trimmed.trim().to_string();
+    if bytes.len() > cap {
+        format!("{trimmed}…")
+    } else {
+        trimmed
     }
 }
 
@@ -202,14 +280,33 @@ mod tests {
 
     fn fixture_client() -> DeepseekClient {
         // We build with a non-empty key so the constructor succeeds; no
-        // network calls are issued in these tests.
-        DeepseekClient::new("sk-test", "deepseek-chat".to_string()).unwrap()
+        // network calls are issued in these tests. The 120s timeout is
+        // arbitrary — never elapses because the client is never used.
+        DeepseekClient::new("sk-test", "deepseek-chat".to_string(), 120).unwrap()
     }
 
     #[test]
     fn empty_key_rejected() {
-        let err = DeepseekClient::new("", "deepseek-chat".to_string()).unwrap_err();
+        let err = DeepseekClient::new("", "deepseek-chat".to_string(), 120).unwrap_err();
         assert!(matches!(err, LlmError::EmptyKey));
+    }
+
+    #[test]
+    fn body_preview_caps_length_and_collapses_newlines() {
+        let s = body_preview(b"abc\ndef\nghi", 100);
+        assert_eq!(s, "abc def ghi");
+
+        let bigger = vec![b'x'; BODY_PREVIEW_BYTES + 50];
+        let p = body_preview(&bigger, BODY_PREVIEW_BYTES);
+        assert!(p.ends_with('…'), "preview should mark truncation: {p}");
+        assert!(p.chars().count() <= BODY_PREVIEW_BYTES + 1);
+    }
+
+    #[test]
+    fn body_preview_handles_invalid_utf8() {
+        // Ensures lossy decode does not panic on garbage bytes.
+        let s = body_preview(&[0xFF, 0xFE, b'a', b'b'], 10);
+        assert!(s.contains('a'), "preview should still render ascii: {s}");
     }
 
     #[test]

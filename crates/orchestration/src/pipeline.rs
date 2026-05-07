@@ -1252,6 +1252,7 @@ pub fn run_pipeline(
                             &api_key,
                             config.architecture.model_id.clone(),
                             config.architecture.max_tokens,
+                            config.architecture.judge_timeout_seconds,
                         ) {
                             Ok(j) => Some(Box::new(j)
                                 as Box<dyn sprint_grader_architecture_llm::Judge + Send + Sync>),
@@ -1274,6 +1275,7 @@ pub fn run_pipeline(
                             &api_key,
                             config.architecture.model_id.clone(),
                             config.architecture.max_tokens,
+                            config.architecture.judge_timeout_seconds,
                         ) {
                             Ok(j) => {
                                 let j = j.with_thinking(config.architecture.thinking.clone());

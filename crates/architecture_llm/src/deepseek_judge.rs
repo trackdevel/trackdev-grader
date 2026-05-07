@@ -17,8 +17,13 @@ pub struct DeepseekJudge {
 }
 
 impl DeepseekJudge {
-    pub fn new(api_key: &str, model: String, max_tokens: u32) -> Result<Self, JudgeError> {
-        let client = DeepseekClient::new(api_key, model.clone())
+    pub fn new(
+        api_key: &str,
+        model: String,
+        max_tokens: u32,
+        timeout_seconds: u64,
+    ) -> Result<Self, JudgeError> {
+        let client = DeepseekClient::new(api_key, model.clone(), timeout_seconds)
             .map_err(|e| JudgeError::Cli(format!("deepseek client init: {e}")))?;
         Ok(Self {
             client,

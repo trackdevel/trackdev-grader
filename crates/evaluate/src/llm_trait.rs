@@ -25,6 +25,16 @@ pub enum LlmError {
         #[source]
         source: reqwest::Error,
     },
+    #[error(
+        "body parse failed after {retries} retries: status={status} content_type={content_type} preview={preview}: {error}"
+    )]
+    BodyParseFailed {
+        retries: u32,
+        status: u16,
+        content_type: String,
+        preview: String,
+        error: String,
+    },
     #[error("response missing text content: {raw}")]
     NoContent { raw: String },
     #[error(
