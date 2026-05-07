@@ -231,16 +231,16 @@ fn t_t1_5_link_only_pr_body_yields_zero_doc_score_via_heuristics() {
         false,
     )
     .unwrap();
-    let max_score: i64 = conn
+    let max_score: f64 = conn
         .query_row(
             "SELECT MAX(total_doc_score) FROM pr_doc_evaluation
              WHERE pr_id IN (SELECT id FROM pull_requests WHERE id LIKE 'pr-default-%')",
             [],
-            |r| r.get::<_, Option<i64>>(0).map(|v| v.unwrap_or(0)),
+            |r| r.get::<_, Option<f64>>(0).map(|v| v.unwrap_or(0.0)),
         )
         .unwrap();
     assert_eq!(
-        max_score, 0,
+        max_score, 0.0,
         "link-only PR bodies must score 0, got {max_score}"
     );
 }
