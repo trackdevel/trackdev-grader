@@ -344,7 +344,11 @@ pub fn run_pr_doc_evaluation_for_sprint_id(
                 } else {
                     let model = std::env::var("ANTHROPIC_MODEL")
                         .unwrap_or_else(|_| config.evaluate.model_id.clone());
-                    match AnthropicClient::new(&api_key, model) {
+                    match AnthropicClient::new(
+                        &api_key,
+                        model,
+                        config.evaluate.judge_timeout_seconds,
+                    ) {
                         Ok(client) => count += evaluate_prs_llm(conn, sprint_id, &client)?,
                         Err(e) => {
                             warn!(error = %e, "Anthropic client init failed — heuristic fallback");
@@ -361,7 +365,11 @@ pub fn run_pr_doc_evaluation_for_sprint_id(
                     );
                     count += evaluate_prs_heuristic(conn, sprint_id)?;
                 } else {
-                    match DeepseekClient::new(&api_key, config.evaluate.model_id.clone()) {
+                    match DeepseekClient::new(
+                        &api_key,
+                        config.evaluate.model_id.clone(),
+                        config.evaluate.judge_timeout_seconds,
+                    ) {
                         Ok(client) => {
                             let client = client.with_thinking(config.evaluate.thinking.clone());
                             count += evaluate_prs_llm(conn, sprint_id, &client)?;
@@ -823,7 +831,7 @@ pub fn score_task_descriptions_for_sprint_id(
             }
             let model = std::env::var("ANTHROPIC_MODEL")
                 .unwrap_or_else(|_| config.evaluate.model_id.clone());
-            match AnthropicClient::new(&api_key, model) {
+            match AnthropicClient::new(&api_key, model, config.evaluate.judge_timeout_seconds) {
                 Ok(client) => evaluate_tasks_llm(conn, sprint_id, &client),
                 Err(e) => {
                     warn!(error = %e, "client init failed — heuristic task scoring");
@@ -836,7 +844,11 @@ pub fn score_task_descriptions_for_sprint_id(
             if api_key.is_empty() {
                 return evaluate_tasks_heuristic(conn, sprint_id);
             }
-            match DeepseekClient::new(&api_key, config.evaluate.model_id.clone()) {
+            match DeepseekClient::new(
+                &api_key,
+                config.evaluate.model_id.clone(),
+                config.evaluate.judge_timeout_seconds,
+            ) {
                 Ok(client) => {
                     let client = client.with_thinking(config.evaluate.thinking.clone());
                     evaluate_tasks_llm(conn, sprint_id, &client)

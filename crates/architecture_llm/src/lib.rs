@@ -46,7 +46,12 @@ pub mod cli_judge;
 pub mod deepseek_judge;
 pub mod judge;
 
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
@@ -54,6 +59,13 @@ use sha2::{Digest, Sha256};
 use sprint_grader_architecture::Rubric;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
+
+/// How often the heartbeat thread emits "still waiting" progress while a
+/// per-repo batch of LLM judge calls is in flight.
+const HEARTBEAT_TICK_SECS: u64 = 30;
+/// Cap on how many in-flight file paths the heartbeat names per tick;
+/// the rest are summarised as "(+N more)" so the line stays readable.
+const HEARTBEAT_FILE_PREVIEW: usize = 8;
 
 pub use cli_judge::ClaudeCliJudge;
 pub use deepseek_judge::DeepseekJudge;
@@ -184,18 +196,36 @@ pub fn run_llm_review_for_repo(
     // serial); higher values fan out across a Rayon pool. The pool is
     // local to this call so it doesn't contend with the workspace's
     // global `rayon::par_iter` pool elsewhere in the pipeline.
+    //
+    // Heartbeat: a separate std thread (NOT a rayon worker, so it doesn't
+    // steal a slot from the API calls) watches a shared `pending` set and
+    // logs "still waiting" every HEARTBEAT_TICK_SECS while the batch is
+    // in flight. Each worker removes its file from the set on completion
+    // (success OR failure), so by the time `pool.install` returns the
+    // set is empty.
     let workers = workers.max(1);
+    // Build the pool first so its construction failure path doesn't need
+    // to tear down the heartbeat thread.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e.to_string())))
+        })?;
+
+    let pending: Arc<Mutex<BTreeSet<String>>> =
+        Arc::new(Mutex::new(to_judge.iter().map(|j| j.rel.clone()).collect()));
+    let stop_heartbeat = Arc::new(AtomicBool::new(false));
+    let heartbeat_handle = spawn_heartbeat(
+        repo_full_name.to_string(),
+        to_judge_count,
+        pending.clone(),
+        stop_heartbeat.clone(),
+    );
+
     // Per-call telemetry: (file_sha, rel, total_lines, result, elapsed_ms).
     type JudgeOutcome = (String, String, u32, Result<String, JudgeError>, i64);
     let judge_outcomes: Vec<JudgeOutcome> = {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(workers)
-            .build()
-            .map_err(|e| {
-                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
-                    e.to_string(),
-                )))
-            })?;
         pool.install(|| {
             to_judge
                 .par_iter()
@@ -207,6 +237,10 @@ pub fn run_llm_review_for_repo(
                             serde_json::to_string(&r).map_err(|e| JudgeError::Parse(e.to_string()))
                         });
                     let elapsed_ms = started.elapsed().as_millis() as i64;
+                    // Mark this file as no longer pending BEFORE the
+                    // info! log, so a heartbeat tick that fires
+                    // concurrently doesn't list a file we just finished.
+                    pending.lock().unwrap().remove(&job.rel);
                     match &raw {
                         Ok(_) => info!(
                             repo = repo_full_name,
@@ -233,6 +267,8 @@ pub fn run_llm_review_for_repo(
                 .collect()
         })
     };
+    stop_heartbeat.store(true, Ordering::Relaxed);
+    let _ = heartbeat_handle.join();
 
     // Phase 3: cache writes + roll cache hits and successful misses into
     // a single `resolved` queue. Failed judge calls drop the file. We
@@ -340,6 +376,53 @@ fn insert_llm_violation(
         ],
     )?;
     Ok(())
+}
+
+/// Spawn the heartbeat thread that logs "still waiting on N/M files"
+/// every `HEARTBEAT_TICK_SECS` while the per-repo batch is in flight.
+/// Cancellation is via the shared `stop` flag (set by the main thread
+/// after `pool.install` returns). Polls every 200ms so cancel is prompt.
+fn spawn_heartbeat(
+    repo_full_name: String,
+    total: usize,
+    pending: Arc<Mutex<BTreeSet<String>>>,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        const POLL_INTERVAL_MS: u64 = 200;
+        let started = Instant::now();
+        let mut ticks_logged: u64 = 0;
+        while !stop.load(Ordering::Relaxed) {
+            let elapsed = started.elapsed().as_secs();
+            let due = elapsed / HEARTBEAT_TICK_SECS;
+            if due > ticks_logged {
+                ticks_logged = due;
+                let snapshot: Vec<String> = {
+                    let g = pending.lock().expect("heartbeat pending poisoned");
+                    g.iter().cloned().collect()
+                };
+                if !snapshot.is_empty() {
+                    let take = snapshot.len().min(HEARTBEAT_FILE_PREVIEW);
+                    let head: Vec<String> = snapshot.iter().take(take).cloned().collect();
+                    let extra = snapshot.len() - take;
+                    let preview = if extra == 0 {
+                        head.join(", ")
+                    } else {
+                        format!("{} (+{} more)", head.join(", "), extra)
+                    };
+                    info!(
+                        repo = %repo_full_name,
+                        pending = snapshot.len(),
+                        total,
+                        elapsed_s = elapsed,
+                        files = %preview,
+                        "llm review heartbeat — still waiting"
+                    );
+                }
+            }
+            thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+        }
+    })
 }
 
 /// Approximate p_a / p_b percentiles of a slice of i64 samples. Mutates
@@ -472,5 +555,28 @@ mod tests {
             "**/R.java",
             "app/src/main/java/com/x/RR.java"
         ));
+    }
+
+    #[test]
+    fn heartbeat_thread_exits_promptly_when_stopped() {
+        // The heartbeat polls every 200ms, so a clean shutdown should
+        // join in well under 1s. This guards against the cancellation
+        // path being broken by a longer sleep or a missing exit check.
+        let pending = Arc::new(Mutex::new(BTreeSet::from([
+            "a.java".to_string(),
+            "b.java".to_string(),
+        ])));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_heartbeat("repo".into(), 2, pending, stop.clone());
+        let joined_within = {
+            let started = Instant::now();
+            stop.store(true, Ordering::Relaxed);
+            handle.join().expect("heartbeat thread panicked");
+            started.elapsed()
+        };
+        assert!(
+            joined_within < Duration::from_millis(800),
+            "heartbeat took too long to exit: {joined_within:?}"
+        );
     }
 }

@@ -27,6 +27,7 @@ const API_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 const MAX_RETRIES: u32 = 3;
 const BACKOFF_BASE_SECS: u64 = 2;
+const BODY_PREVIEW_BYTES: usize = 200;
 
 /// Whichever Claude model id the caller wants. The pipeline default is
 /// `claude-haiku-4-5-20251001` (set in `EvaluateConfig::default()`); any
@@ -49,6 +50,17 @@ pub enum AnthropicError {
         source: reqwest::Error,
     },
 
+    #[error(
+        "Anthropic body parse failed after {retries} retries: status={status} content_type={content_type} preview={preview}: {error}"
+    )]
+    BodyParseFailed {
+        retries: u32,
+        status: u16,
+        content_type: String,
+        preview: String,
+        error: String,
+    },
+
     #[error("Anthropic response missing text content: {raw}")]
     NoContent { raw: String },
 
@@ -63,7 +75,11 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    pub fn new(api_key: &str, model: ModelId) -> Result<Self, AnthropicError> {
+    pub fn new(
+        api_key: &str,
+        model: ModelId,
+        timeout_seconds: u64,
+    ) -> Result<Self, AnthropicError> {
         if api_key.is_empty() {
             return Err(AnthropicError::EmptyKey);
         }
@@ -81,9 +97,10 @@ impl AnthropicClient {
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
+        let timeout = Duration::from_secs(timeout_seconds.max(1));
         let client = Client::builder()
             .default_headers(headers)
-            .timeout(Duration::from_secs(120))
+            .timeout(timeout)
             .build()
             .expect("reqwest client build");
         Ok(Self { client, model })
@@ -112,21 +129,68 @@ impl AnthropicClient {
             "messages": messages,
         });
 
-        let mut last_err: Option<reqwest::Error> = None;
+        let mut last_transport: Option<reqwest::Error> = None;
+        let mut last_parse: Option<(u16, String, String, String)> = None;
         for attempt in 0..MAX_RETRIES {
             let resp = self.client.post(API_URL).json(&body).send();
             match resp {
                 Ok(r) => {
                     let status = r.status();
+                    let content_type = r
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
                     if status.is_success() {
-                        let json: Value = match r.json() {
-                            Ok(v) => v,
+                        // Read the body ourselves so a parse failure can
+                        // log a body preview + content-type rather than
+                        // reqwest's opaque "error decoding response body".
+                        let bytes = match r.bytes() {
+                            Ok(b) => b,
                             Err(e) => {
-                                last_err = Some(e);
+                                let wait = BACKOFF_BASE_SECS.pow(attempt + 1);
+                                warn!(
+                                    attempt = attempt + 1,
+                                    %status,
+                                    content_type = %content_type,
+                                    wait_s = wait,
+                                    error = %e,
+                                    "Anthropic body read failed; retrying"
+                                );
+                                last_transport = Some(e);
+                                if attempt + 1 < MAX_RETRIES {
+                                    std::thread::sleep(Duration::from_secs(wait));
+                                }
                                 continue;
                             }
                         };
-                        return extract_text(&json);
+                        match serde_json::from_slice::<Value>(&bytes) {
+                            Ok(v) => return extract_text(&v),
+                            Err(parse_err) => {
+                                let preview = body_preview(&bytes, BODY_PREVIEW_BYTES);
+                                let wait = BACKOFF_BASE_SECS.pow(attempt + 1);
+                                warn!(
+                                    attempt = attempt + 1,
+                                    %status,
+                                    content_type = %content_type,
+                                    wait_s = wait,
+                                    preview = %preview,
+                                    error = %parse_err,
+                                    "Anthropic body parse failed; retrying"
+                                );
+                                last_parse = Some((
+                                    status.as_u16(),
+                                    content_type,
+                                    preview,
+                                    parse_err.to_string(),
+                                ));
+                                if attempt + 1 < MAX_RETRIES {
+                                    std::thread::sleep(Duration::from_secs(wait));
+                                }
+                                continue;
+                            }
+                        }
                     }
                     if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                         let text = r.text().unwrap_or_default();
@@ -142,7 +206,7 @@ impl AnthropicClient {
                     });
                 }
                 Err(e) => {
-                    last_err = Some(e);
+                    last_transport = Some(e);
                     if attempt + 1 < MAX_RETRIES {
                         let wait = BACKOFF_BASE_SECS.pow(attempt + 1);
                         warn!(wait_s = wait, "Anthropic request error — retrying");
@@ -151,9 +215,18 @@ impl AnthropicClient {
                 }
             }
         }
+        if let Some((status, content_type, preview, error)) = last_parse {
+            return Err(AnthropicError::BodyParseFailed {
+                retries: MAX_RETRIES,
+                status,
+                content_type,
+                preview,
+                error,
+            });
+        }
         Err(AnthropicError::RequestFailed {
             retries: MAX_RETRIES,
-            source: last_err.expect("loop always populates last_err"),
+            source: last_transport.expect("loop always populates last_transport or last_parse"),
         })
     }
 
@@ -163,6 +236,23 @@ impl AnthropicClient {
         messages: &[Value],
     ) -> Result<String, AnthropicError> {
         self.complete(system, messages, DEFAULT_MAX_TOKENS)
+    }
+}
+
+/// Render up to `cap` bytes of `bytes` as UTF-8 (lossy), collapsing newlines
+/// so the preview fits on one log line. Mirrors `deepseek_client::body_preview`.
+fn body_preview(bytes: &[u8], cap: usize) -> String {
+    let take = bytes.len().min(cap);
+    let s = String::from_utf8_lossy(&bytes[..take]);
+    let trimmed: String = s
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = trimmed.trim().to_string();
+    if bytes.len() > cap {
+        format!("{trimmed}…")
+    } else {
+        trimmed
     }
 }
 
@@ -204,6 +294,19 @@ impl From<AnthropicError> for LlmError {
             AnthropicError::RequestFailed { retries, source } => {
                 LlmError::RequestFailed { retries, source }
             }
+            AnthropicError::BodyParseFailed {
+                retries,
+                status,
+                content_type,
+                preview,
+                error,
+            } => LlmError::BodyParseFailed {
+                retries,
+                status,
+                content_type,
+                preview,
+                error,
+            },
             AnthropicError::NoContent { raw } => LlmError::NoContent { raw },
             AnthropicError::Json(e) => LlmError::Json(e),
         }
