@@ -565,7 +565,6 @@ fn collect_github_details_for_project(
     let total = prs.len();
     let mut fetched = 0usize;
     let mut skipped = 0usize;
-    let mut skipped_unchanged = 0usize;
     info!(total, force_refresh, "Fetching GitHub details for PRs");
 
     for (i, pr) in prs.iter().enumerate() {
@@ -576,12 +575,16 @@ fn collect_github_details_for_project(
             continue;
         }
 
-        if !force_refresh && pr_unchanged_since_last_fetch(pr) {
-            skipped_unchanged += 1;
-            continue;
-        }
-
-        if !force_refresh && pr_fully_collected(db, pr)? {
+        // Skip only when *both* conditions hold: TrackDev says nothing
+        // changed since our last fetch AND we already have the GitHub
+        // data we expect for this PR's state. The watermark alone is
+        // unsafe because `last_github_fetch_updated_at` is recorded
+        // unconditionally at the end of each iteration — including
+        // iterations where the PR fetch errored or returned a partial
+        // payload — which used to permanently lock those rows out of
+        // re-fetch despite obvious incompleteness (e.g. merged=1 with
+        // merged_at empty).
+        if !force_refresh && pr_unchanged_since_last_fetch(pr) && pr_fully_collected(db, pr)? {
             skipped += 1;
             continue;
         }
@@ -781,7 +784,6 @@ fn collect_github_details_for_project(
     info!(
         fetched,
         skipped_cached = skipped,
-        skipped_unchanged,
         api_calls = gh.call_count(),
         "GitHub collection done"
     );
@@ -1470,6 +1472,110 @@ mod resolve_pr_authors_tests {
             "task-assignee (Alice) is canonical even when github identity \
              would resolve to Bob — that mismatch is the AUTHOR_MISMATCH \
              flag's job, not the resolver's"
+        );
+    }
+}
+
+#[cfg(test)]
+mod skip_logic_tests {
+    //! Regression tests for the github-details fetch skip predicate.
+    //! The pre-fix code skipped PRs whenever the watermark matched
+    //! TrackDev's `updated_at`, even if the recorded data was clearly
+    //! incomplete (e.g. merged=true but merged_at empty). 99% of merged
+    //! PRs in production ended up locked into that state. The fix is
+    //! to require both `pr_unchanged_since_last_fetch` AND
+    //! `pr_fully_collected` before skipping.
+    use super::*;
+    use rusqlite::Connection;
+    use sprint_grader_core::db::{apply_schema, PullRequestRow};
+    use std::path::PathBuf;
+
+    fn mk_db() -> Database {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        Database {
+            db_path: PathBuf::new(),
+            conn,
+        }
+    }
+
+    fn pr_row(merged_at: Option<&str>) -> PullRequestRow {
+        PullRequestRow {
+            id: "pr-1".to_string(),
+            pr_number: 1,
+            repo_full_name: Some("org/repo".to_string()),
+            state: Some("closed".to_string()),
+            merged: true,
+            merged_at: merged_at.map(str::to_string),
+            author_id: None,
+            github_author_login: None,
+            updated_at: Some("2026-03-24T09:58:38Z".to_string()),
+            last_github_fetch_updated_at: Some("2026-03-24T09:58:38Z".to_string()),
+        }
+    }
+
+    fn seed_pr(db: &Database, pr: &PullRequestRow) {
+        db.conn
+            .execute(
+                "INSERT INTO pull_requests (id, pr_number, repo_full_name, state, merged, merged_at,
+                                            updated_at, last_github_fetch_updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    pr.id,
+                    pr.pr_number,
+                    pr.repo_full_name,
+                    pr.state,
+                    pr.merged,
+                    pr.merged_at,
+                    pr.updated_at,
+                    pr.last_github_fetch_updated_at,
+                ],
+            )
+            .unwrap();
+    }
+
+    fn seed_commit(db: &Database, pr_id: &str) {
+        db.conn
+            .execute(
+                "INSERT INTO pr_commits (pr_id, sha, author_login, author_email, message, timestamp)
+                 VALUES (?, 'sha1', 'someone', 'a@b.c', 'commit', '2026-03-24T09:58:00Z')",
+                params![pr_id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn merged_pr_with_empty_merged_at_is_not_fully_collected_even_when_watermark_matches() {
+        // The bug case: merged=true, merged_at empty, watermark matches
+        // updated_at. Pre-fix the code skipped because of the watermark
+        // alone; post-fix the AND with pr_fully_collected forces a
+        // re-fetch since pr_fully_collected returns false here.
+        let db = mk_db();
+        let pr = pr_row(Some(""));
+        seed_pr(&db, &pr);
+        seed_commit(&db, &pr.id);
+
+        assert!(
+            pr_unchanged_since_last_fetch(&pr),
+            "watermark matches updated_at — unchanged check would skip"
+        );
+        assert!(
+            !pr_fully_collected(&db, &pr).unwrap(),
+            "merged_at empty must mark the row as not-fully-collected"
+        );
+    }
+
+    #[test]
+    fn merged_pr_with_complete_data_skips_when_watermark_matches() {
+        let db = mk_db();
+        let pr = pr_row(Some("2026-03-24T09:58:35Z"));
+        seed_pr(&db, &pr);
+        seed_commit(&db, &pr.id);
+
+        assert!(pr_unchanged_since_last_fetch(&pr));
+        assert!(
+            pr_fully_collected(&db, &pr).unwrap(),
+            "merged_at present + commits present + watermark matches → skip"
         );
     }
 }

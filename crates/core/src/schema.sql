@@ -208,9 +208,9 @@ CREATE TABLE IF NOT EXISTS student_artifact_flags (
 CREATE TABLE IF NOT EXISTS pr_doc_evaluation (
     pr_id TEXT,
     sprint_id INTEGER,
-    title_score INTEGER,
-    description_score INTEGER,
-    total_doc_score INTEGER,
+    title_score REAL,
+    description_score REAL,
+    total_doc_score REAL,
     justification TEXT
 );
 
