@@ -1517,21 +1517,33 @@ fn write_section_b(
     // here.
 
     // Per-PR documentation score (heuristic title+description rubric or
-    // LLM judge). Populates a single column in the per-PR table below.
-    // Silently returns an empty map when the table is absent so minimal
-    // test fixtures keep working.
-    let pr_doc_scores: HashMap<String, i64> = match conn.prepare(
-        "SELECT pr_id, total_doc_score FROM pr_doc_evaluation
-         WHERE sprint_id = ? AND total_doc_score IS NOT NULL",
-    ) {
+    // LLM judge). The cell renders the breakdown as `title + description`
+    // so the reader can tell which half of the rubric pulled the score
+    // up or down. Falls back to the total alone when the breakdown is
+    // missing (legacy rows). Silently returns an empty map when the
+    // table is absent so minimal test fixtures keep working.
+    let pr_doc_scores: HashMap<String, (Option<f64>, Option<f64>, Option<f64>)> = match conn
+        .prepare(
+            "SELECT pr_id, title_score, description_score, total_doc_score
+              FROM pr_doc_evaluation
+             WHERE sprint_id = ?
+               AND (title_score IS NOT NULL
+                    OR description_score IS NOT NULL
+                    OR total_doc_score IS NOT NULL)",
+        ) {
         Ok(mut stmt) => {
             let rows = stmt.query_map([sprint_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<f64>>(1)?,
+                    r.get::<_, Option<f64>>(2)?,
+                    r.get::<_, Option<f64>>(3)?,
+                ))
             })?;
             let mut out = HashMap::new();
             for row in rows {
-                let (pid, score) = row?;
-                out.insert(pid, score);
+                let (pid, title, desc, total) = row?;
+                out.insert(pid, (title, desc, total));
             }
             out
         }
@@ -1842,7 +1854,10 @@ fn write_section_b(
                     fmt_density_dev(density_mad_z(pr_density, pr_density_median, pr_density_mad));
                 let doc_cell = pr_doc_scores
                     .get(&pr_id)
-                    .map(|s| s.to_string())
+                    .map(|(title, desc, total)| match (title, desc) {
+                        (Some(t), Some(d)) => format!("{:.1} + {:.1}", t, d),
+                        _ => total.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                    })
                     .unwrap_or_default();
                 // push_table_row escapes pipes, but we want the link to stay
                 // intact — emit by hand for this row.
@@ -3120,10 +3135,14 @@ hiccup). It is observability metadata, never a grading penalty.\n\
 \n\
 ### Doc-score signals\n\
 \n\
-- **Avg Doc Score** — quality of PR descriptions and titles, scored on \
-0–6 (title 0–2 + description 0–4). Computed by an LLM rubric when an \
-Anthropic key is configured, otherwise by deterministic heuristics \
-(empty body / generic title).\n\
+- **Doc score** (per-PR cell) — rendered as `title + description` on a \
+0.25-step grid: title is 0–2, description is 0–4, so the displayed sum \
+is in the range 0–6. Reading the two halves separately tells you whether \
+a low score came from a vague title, a missing description, or both.\n\
+- **Avg Doc Score** (cumulative summary) — mean of those per-PR totals \
+across the student's DONE TASKs/BUGs in the sprint, on the same 0–6 \
+scale. Computed by an LLM rubric when one is configured, otherwise by \
+deterministic heuristics (empty body / generic title).\n\
 \n\
 ### Peer-group analysis (section C)\n\
 \n\
