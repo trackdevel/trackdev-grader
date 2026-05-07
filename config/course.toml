@@ -207,6 +207,10 @@ thinking = "enabled"
 # thinking = "enabled"
 max_tokens = 16000
 rubric_path = "architecture.md"
+# Concurrent per-file LLM calls. Default is backend-aware: 10 for
+# `deepseek-api` / `anthropic-api`, 1 for `claude-cli` (subprocess +
+# subscription rate limits). Override here to tune for your API plan.
+# judge_workers = 10
 llm_skip_globs = [
     "**/build/**",
     "**/generated/**",

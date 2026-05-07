@@ -120,9 +120,14 @@ pub struct ArchitectureConfig {
     /// Files matching any of these globs are skipped before the LLM
     /// call (generated code, build outputs, R.java, etc).
     pub llm_skip_globs: Vec<String>,
-    /// Number of concurrent judge invocations. For `claude-cli` each
-    /// worker spawns a process, so be conservative on the user's
-    /// subscription rate limits. Default 1.
+    /// Number of concurrent judge invocations. The `Config::load` default
+    /// is backend-aware: `claude-cli` defaults to **1** (each worker
+    /// spawns a subprocess and competes for the user's Claude
+    /// subscription quota), while the HTTP-API backends `deepseek-api`
+    /// and `anthropic-api` default to **10** (cheap to fan out). Override
+    /// in `course.toml` to tune for your API plan's rate limit. Direct
+    /// construction via [`ArchitectureConfig::default`] still produces
+    /// `1` — only the toml-loaded path lifts the default.
     pub judge_workers: usize,
     /// Per-file judge timeout (seconds). Caps both API calls and CLI
     /// invocations. Default 180.
@@ -667,6 +672,20 @@ fn default_mutation_report_path() -> String {
 /// `"disabled"`; anything else would be silently ignored by the server,
 /// so we reject loudly at config-load instead of at request time. Empty
 /// or missing → `None` (let server pick default).
+/// Backend-aware default for `[architecture] judge_workers` when the
+/// user leaves it unset. HTTP-API backends (`deepseek-api`,
+/// `anthropic-api`) parallelise cheaply, so we default to 10. The
+/// `claude-cli` path spawns a subprocess per worker against a
+/// subscription-rate-limited account, so we keep it at 1. Unknown
+/// backends fall through to 1 — safest until the maintainer wires the
+/// new backend in deliberately.
+fn default_judge_workers_for(judge: &str) -> usize {
+    match judge {
+        "deepseek-api" | "anthropic-api" => 10,
+        _ => 1,
+    }
+}
+
 fn parse_thinking_mode(raw: Option<String>, section: &str) -> Result<Option<String>> {
     let Some(v) = raw else {
         return Ok(None);
@@ -1154,9 +1173,10 @@ impl Config {
                     ));
                 }
                 let arch_thinking = parse_thinking_mode(raw.architecture.thinking, "architecture")?;
+                let arch_judge = raw.architecture.judge.unwrap_or(arch_defaults.judge);
                 ArchitectureConfig {
                     llm_review: raw.architecture.llm_review,
-                    judge: raw.architecture.judge.unwrap_or(arch_defaults.judge),
+                    judge: arch_judge.clone(),
                     model_id: arch_model_id,
                     max_tokens: raw
                         .architecture
@@ -1173,7 +1193,7 @@ impl Config {
                     judge_workers: raw
                         .architecture
                         .judge_workers
-                        .unwrap_or(arch_defaults.judge_workers)
+                        .unwrap_or_else(|| default_judge_workers_for(&arch_judge))
                         .max(1),
                     judge_timeout_seconds: raw
                         .architecture
@@ -1432,6 +1452,37 @@ contribution_imbalance_stddev = 1.5
         assert_eq!(cfg.evaluate.model_id, "deepseek-chat");
         assert!(cfg.architecture.thinking.is_none());
         assert!(cfg.evaluate.thinking.is_none());
+    }
+
+    #[test]
+    fn architecture_judge_workers_default_is_backend_aware() {
+        let tmp = tempfile::tempdir().unwrap();
+        // deepseek-api with no judge_workers override → defaults to 10.
+        let body = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nllm_review = true\njudge = \"deepseek-api\"\nmodel_id = \"deepseek-v4-pro\"\n[evaluate]\njudge = \"deepseek-api\"\nmodel_id = \"deepseek-v4-flash\"\n"
+        );
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("load deepseek config");
+        assert_eq!(cfg.architecture.judge_workers, 10);
+
+        // claude-cli (the implicit default judge) → still 1.
+        let tmp2 = tempfile::tempdir().unwrap();
+        let body2 = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nmodel_id = \"claude-haiku-4-5-20251001\"\n[evaluate]\nmodel_id = \"claude-haiku-4-5-20251001\"\n"
+        );
+        write_config(tmp2.path(), &body2);
+        let cfg2 = Config::load(tmp2.path()).expect("load claude-cli config");
+        assert_eq!(cfg2.architecture.judge, "claude-cli");
+        assert_eq!(cfg2.architecture.judge_workers, 1);
+
+        // Explicit override always wins, regardless of backend.
+        let tmp3 = tempfile::tempdir().unwrap();
+        let body3 = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\njudge = \"deepseek-api\"\nmodel_id = \"deepseek-chat\"\njudge_workers = 3\n[evaluate]\nmodel_id = \"claude-haiku-4-5-20251001\"\n"
+        );
+        write_config(tmp3.path(), &body3);
+        let cfg3 = Config::load(tmp3.path()).expect("load explicit override");
+        assert_eq!(cfg3.architecture.judge_workers, 3);
     }
 
     #[test]
