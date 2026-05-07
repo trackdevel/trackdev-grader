@@ -252,6 +252,16 @@ pub fn publish_report_updates(repo_root: &Path, report_paths: &[PathBuf]) -> Res
     ];
     commit_args.extend(rels.iter().cloned());
     run_cmd_owned(repo_root, "git", &commit_args)?;
+
+    // Re-fetch and rebase: students may have pushed to origin/main since
+    // sync_repo_to_origin_main ran for this repo. Without this, the push
+    // gets rejected as a non-fast-forward.
+    run_cmd(repo_root, "git", &["fetch", "--quiet", "origin"])?;
+    if let Err(err) = run_cmd(repo_root, "git", &["rebase", "origin/main"]) {
+        let _ = run_cmd(repo_root, "git", &["rebase", "--abort"]);
+        return Err(err.context("git rebase origin/main failed during publish"));
+    }
+
     run_cmd(repo_root, "git", &["push", "origin", "main"])?;
     Ok(())
 }
@@ -313,7 +323,7 @@ fn run_cmd_owned(cwd: &Path, bin: &str, args: &[String]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_android_repo_name, project_has_pending_compilation};
+    use super::{is_android_repo_name, project_has_pending_compilation, publish_report_updates};
     use sprint_grader_core::Database;
     use std::path::Path;
 
@@ -387,5 +397,77 @@ mod tests {
             .unwrap();
 
         assert!(project_has_pending_compilation(&db, 10).unwrap());
+    }
+
+    #[test]
+    fn publish_rebases_onto_origin_main_when_remote_diverged() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        fn run_git(cwd: &Path, args: &[&str]) {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .expect("git invocation");
+            assert!(status.success(), "git {:?} failed in {:?}", args, cwd);
+        }
+
+        fn configure_identity(repo: &Path) {
+            run_git(repo, &["config", "user.email", "grader@example.com"]);
+            run_git(repo, &["config", "user.name", "Grader"]);
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let remote = tmp.path().join("remote.git");
+        let grader = tmp.path().join("grader");
+        let other = tmp.path().join("other");
+
+        std::fs::create_dir_all(&remote).unwrap();
+        run_git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+
+        std::fs::create_dir_all(&grader).unwrap();
+        run_git(&grader, &["init", "-q", "-b", "main"]);
+        configure_identity(&grader);
+        std::fs::write(grader.join("seed.txt"), "seed").unwrap();
+        run_git(&grader, &["add", "seed.txt"]);
+        run_git(&grader, &["commit", "-q", "-m", "seed"]);
+        run_git(
+            &grader,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run_git(&grader, &["push", "-q", "-u", "origin", "main"]);
+
+        run_git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        configure_identity(&other);
+        std::fs::write(other.join("student.txt"), "student").unwrap();
+        run_git(&other, &["add", "student.txt"]);
+        run_git(&other, &["commit", "-q", "-m", "student work"]);
+        run_git(&other, &["push", "-q", "origin", "main"]);
+
+        // Grader's local main is now stale relative to origin/main.
+        let report_path = grader.join("REPORT.md");
+        std::fs::write(&report_path, "report content").unwrap();
+
+        publish_report_updates(&grader, &[report_path]).expect("publish should succeed");
+
+        let log = Command::new("git")
+            .args(["log", "--oneline", "-5"])
+            .current_dir(&grader)
+            .output()
+            .expect("git log");
+        assert!(log.status.success());
+        let log_text = String::from_utf8_lossy(&log.stdout);
+        assert!(log_text.contains("Updated reports"), "log: {log_text}");
+        assert!(log_text.contains("student work"), "log: {log_text}");
+        assert!(log_text.contains("seed"), "log: {log_text}");
     }
 }
