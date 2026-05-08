@@ -271,22 +271,15 @@ fn upsert_student_from_value(
         .get("email")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let gh_login = member
-        .get("githubInfo")
-        .and_then(|g| g.get("login"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if gh_login.is_none() {
-        warn!(
-            username = %username,
-            full_name = %full_name,
-            "Student has no GitHub login",
-        );
-    }
+    // TrackDev's `githubInfo.login` is unreliable (often unfilled or wrong),
+    // so we no longer trust it. The authoritative student ↔ github identity
+    // mapping is computed from task-PR evidence by `identity_resolver` into
+    // `student_github_identity`. `students.github_login` is kept for schema
+    // parity with the Python reference but is never written by this crate.
     db.upsert_student(
         &id,
         &username,
-        gh_login.as_deref(),
+        None,
         &full_name,
         email.as_deref(),
         team_project_id,
@@ -854,16 +847,11 @@ fn collect_github_users(gh: &GitHubClient, db: &Database) -> Result<(), CollectE
         }
     }
 
-    // Auto-link github_users → students where logins match (case-insensitive).
-    db.conn.execute(
-        "UPDATE github_users
-         SET student_id = (
-             SELECT s.id FROM students s
-             WHERE LOWER(s.github_login) = LOWER(github_users.login)
-         )
-         WHERE student_id IS NULL",
-        [],
-    )?;
+    // No auto-link: `students.github_login` is no longer trusted as a
+    // source of truth (many students leave it blank or wrong on TrackDev).
+    // `github_users.student_id` is reserved for future hand-curated overrides
+    // and otherwise stays NULL — `student_github_identity` is the canonical
+    // mapping computed from task-PR evidence.
 
     info!("GitHub user profile collection done");
     Ok(())
@@ -880,13 +868,13 @@ fn collect_github_users(gh: &GitHubClient, db: &Database) -> Result<(), CollectE
 ///      attribution_errors entry so professors can spot the ambiguity.
 ///      Mirrors the `pr_authors` view ordering used in the report layer.
 /// 2. **GitHub identity** (consulted only if no task assignees exist —
-///    typically orphan PRs). Look up:
-///      - `pr.github_author_login` against `student_github_identity`
-///        (login kind), then `github_users.student_id`, then
-///        `students.github_login`.
-///      - Each row in `pr_commits` for this PR: `author_login` against
-///        the same login chain, `author_email` against
-///        `student_github_identity` (email kind).
+///    typically orphan PRs). Look up `pr.github_author_login` and each
+///    `pr_commits.author_login`/`author_email` against
+///    `student_github_identity` (the resolver's accumulated evidence).
+///    `students.github_login` and `github_users.student_id` are no
+///    longer consulted here: TrackDev's stored github username is
+///    unreliable (often blank or wrong), so we treat the resolver as
+///    the sole source of truth.
 ///
 ///    If all candidate students agree, attribute to that student.
 ///    If they disagree, leave NULL with an attribution_errors entry.
@@ -992,10 +980,10 @@ fn resolve_pr_authors(db: &Database, project_ids: Option<&[i64]>) -> Result<(), 
             }
             _ => {
                 // Strategy 2 — github identity. Only reachable for orphan
-                // PRs (no linked task assignees). Single source of truth:
-                // student_github_identity. github_users and
-                // students.github_login are kept as cold-start backstops
-                // until the resolver has run.
+                // PRs (no linked task assignees). Sole source of truth:
+                // `student_github_identity` (the resolver's accumulated
+                // evidence from task-PR linkage). TrackDev's
+                // `students.github_login` is no longer consulted.
                 let mut candidates: HashSet<String> = HashSet::new();
 
                 if let Some(login) = gh_login.as_deref() {
@@ -1077,38 +1065,19 @@ fn resolve_pr_authors(db: &Database, project_ids: Option<&[i64]>) -> Result<(), 
     Ok(())
 }
 
-/// Resolve a github login to a TrackDev `student_id`, consulting (in
-/// order) `student_github_identity` (the resolver's accumulated evidence),
-/// `github_users.student_id` (cold-start mapping populated when fetching
-/// profiles), and `students.github_login` (manual seed).
-///
-/// The identity table stores values lowercased; the helper lowercases the
-/// input in the same way to keep matches consistent.
+/// Resolve a github login to a TrackDev `student_id`. Sole source:
+/// `student_github_identity` (the resolver's accumulated evidence from
+/// task-PR linkage). The identity table stores values lowercased; the
+/// helper lowercases the input in the same way to keep matches consistent.
 fn lookup_student_by_login(db: &Database, login: &str) -> rusqlite::Result<Option<String>> {
     let needle = login.to_lowercase();
-    if let Ok(sid) = db.conn.query_row(
-        "SELECT student_id FROM student_github_identity
-         WHERE identity_kind = 'login' AND identity_value = ?
-         ORDER BY weight DESC, confidence DESC, student_id
-         LIMIT 1",
-        [&needle],
-        |r| r.get::<_, String>(0),
-    ) {
-        return Ok(Some(sid));
-    }
-    if let Ok(sid) = db.conn.query_row(
-        "SELECT student_id FROM github_users
-         WHERE LOWER(login) = ? AND student_id IS NOT NULL
-         LIMIT 1",
-        [&needle],
-        |r| r.get::<_, String>(0),
-    ) {
-        return Ok(Some(sid));
-    }
     Ok(db
         .conn
         .query_row(
-            "SELECT id FROM students WHERE LOWER(github_login) = ? LIMIT 1",
+            "SELECT student_id FROM student_github_identity
+             WHERE identity_kind = 'login' AND identity_value = ?
+             ORDER BY weight DESC, confidence DESC, student_id
+             LIMIT 1",
             [&needle],
             |r| r.get::<_, String>(0),
         )
@@ -1140,9 +1109,9 @@ mod resolve_pr_authors_tests {
     //!   - NULL pr.author_id with a single task assignee resolves via Strategy 1
     //!     (the headline bug; ~25% of PRs in production were stuck NULL).
     //!   - Multi-assignee PR picks the most-points assignee deterministically.
-    //!   - Orphan PR resolves through the github lookup chain
-    //!     (student_github_identity → github_users → students.github_login)
-    //!     and via pr_commits when github_author_login is NULL.
+    //!   - Orphan PR resolves through `student_github_identity`
+    //!     (the sole source of truth) and via pr_commits when
+    //!     github_author_login is NULL.
     //!   - --projects scoping no longer drops NULL-author PRs from the work-set.
 
     use super::*;
