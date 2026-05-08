@@ -48,9 +48,7 @@ fn fixture_rubric() -> Rubric {
     sprint_grader_architecture::rubric::parse(
         "---\nversion: 1\n---\n\
          # Spring Boot rubric\n\
-         - thin controllers\n\
-         # Android rubric\n\
-         - mvvm\n",
+         - thin controllers\n",
     )
     .unwrap()
 }
@@ -83,7 +81,6 @@ fn llm_review_writes_violations_then_caches() {
         tmp.path(),
         "udg/spring-x",
         &rubric,
-        "spring",
         &judge,
         &[],
         1,
@@ -102,7 +99,6 @@ fn llm_review_writes_violations_then_caches() {
         tmp.path(),
         "udg/spring-x",
         &rubric,
-        "spring",
         &judge,
         &[],
         1,
@@ -140,8 +136,8 @@ fn rerun_idempotent_does_not_duplicate() {
         calls: std::sync::atomic::AtomicU32::new(0),
     };
 
-    run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, "spring", &judge, &[], 1).unwrap();
-    run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, "spring", &judge, &[], 1).unwrap();
+    run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, &judge, &[], 1).unwrap();
+    run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, &judge, &[], 1).unwrap();
 
     let count: i64 = conn
         .query_row(
@@ -170,7 +166,6 @@ fn skip_globs_filter_files_before_llm_call() {
         tmp.path(),
         "x",
         &rubric,
-        "spring",
         &judge,
         &["**/build/**".to_string()],
         1,
@@ -222,7 +217,7 @@ fn out_of_range_line_numbers_are_dropped() {
         model: "stub".into(),
     };
     let n =
-        run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, "spring", &judge, &[], 1).unwrap();
+        run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, &judge, &[], 1).unwrap();
     assert_eq!(n, 1, "OK row inserted, BAD row dropped");
     let kept_rule: String = conn
         .query_row(
