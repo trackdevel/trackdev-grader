@@ -181,10 +181,12 @@ jitter_pct = 0.05
 
 # Architecture LLM review (T-P3.3). When `llm_review = true` AND
 # `ANTHROPIC_API_KEY` is set, the pipeline asks an LLM to grade each
-# Java file against the markdown rubric in `architecture.md`. Each
-# `(file_sha, rubric_version+body_hash, model_id)` triple is cached in
-# `architecture_llm_cache`, so re-runs only re-pay for files whose
-# content changed. Default off.
+# Java file against the per-stack markdown rubric. Spring repos are
+# graded against `architecture-spring.md`; repos whose folder name
+# starts with `android-` are graded against `architecture-android.md`.
+# Each `(file_sha, rubric_version+body_hash, model_id)` triple is
+# cached in `architecture_llm_cache`, so re-runs only re-pay for files
+# whose content changed. Default off.
 [architecture]
 llm_review = true
 judge = "deepseek-api"
@@ -206,7 +208,8 @@ thinking = "enabled"
 # Ignored by claude-cli / anthropic-api backends.
 # thinking = "enabled"
 max_tokens = 16000
-rubric_path = "architecture.md"
+spring_rubric_path = "architecture-spring.md"
+android_rubric_path = "architecture-android.md"
 # Concurrent per-file LLM calls. Default is backend-aware: 10 for
 # `deepseek-api` / `anthropic-api`, 1 for `claude-cli` (subprocess +
 # subscription rate limits). Override here to tune for your API plan.

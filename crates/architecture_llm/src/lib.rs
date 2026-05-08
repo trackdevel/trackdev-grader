@@ -1,10 +1,13 @@
 //! LLM-judged architecture review with per-file caching (T-P3.3).
 //!
-//! Reads `config/architecture.md` (loaded by `crates/architecture/src/rubric.rs`)
-//! and asks an LLM to grade each Java file in a cloned repo against the
-//! stack-appropriate rubric section. Each violation the model returns
-//! becomes one row in `architecture_violations` with `rule_kind = "llm"`,
-//! a structured `explanation`, and a `(start_line, end_line)` range so
+//! Reads the per-stack rubric files (`config/architecture-spring.md`,
+//! `config/architecture-android.md`; loaded by
+//! `crates/architecture/src/rubric.rs`) and asks an LLM to grade each
+//! Java file in a cloned repo against the rubric for that repo's stack.
+//! The orchestrator picks the rubric file per repo before calling
+//! `run_llm_review_for_repo`. Each violation the model returns becomes
+//! one row in `architecture_violations` with `rule_kind = "llm"`, a
+//! structured `explanation`, and a `(start_line, end_line)` range so
 //! T-P3.1's blame attribution applies uniformly.
 //!
 //! ### Cache
@@ -93,21 +96,11 @@ pub fn run_llm_review_for_repo(
     repo_path: &Path,
     repo_full_name: &str,
     rubric: &Rubric,
-    stack: &str,
     judge: &(dyn Judge + Send + Sync),
     skip_globs: &[String],
     workers: usize,
 ) -> rusqlite::Result<usize> {
-    let rubric_section = match rubric.for_stack(stack) {
-        Some(s) => s,
-        None => {
-            warn!(
-                stack,
-                "no rubric section for stack — skipping LLM architecture review"
-            );
-            return Ok(0);
-        }
-    };
+    let rubric_section = rubric.body.as_str();
     let rubric_key = rubric.cache_key_prefix();
 
     // Idempotency: clear prior LLM rows for this repo and any attribution

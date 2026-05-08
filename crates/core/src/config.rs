@@ -114,9 +114,16 @@ pub struct ArchitectureConfig {
     pub judge: String,
     pub model_id: String,
     pub max_tokens: u32,
-    /// Path to the markdown rubric, relative to `config/`. Default
-    /// `architecture.md` (T-P3.2).
-    pub rubric_path: String,
+    /// Path to the Spring Boot markdown rubric, relative to `config/`.
+    /// Default `architecture-spring.md`. The orchestrator picks this
+    /// rubric for any cloned repo whose folder name does not start with
+    /// `android-` (T-P3.2).
+    pub spring_rubric_path: String,
+    /// Path to the Android markdown rubric, relative to `config/`.
+    /// Default `architecture-android.md`. The orchestrator picks this
+    /// rubric for any cloned repo whose folder name starts with
+    /// `android-` (T-P3.2).
+    pub android_rubric_path: String,
     /// Files matching any of these globs are skipped before the LLM
     /// call (generated code, build outputs, R.java, etc).
     pub llm_skip_globs: Vec<String>,
@@ -152,7 +159,8 @@ impl Default for ArchitectureConfig {
             judge: "claude-cli".to_string(),
             model_id: String::new(),
             max_tokens: 1024,
-            rubric_path: "architecture.md".to_string(),
+            spring_rubric_path: "architecture-spring.md".to_string(),
+            android_rubric_path: "architecture-android.md".to_string(),
             llm_skip_globs: vec![
                 "**/build/**".to_string(),
                 "**/generated/**".to_string(),
@@ -506,7 +514,9 @@ struct RawArchitecture {
     #[serde(default)]
     max_tokens: Option<u32>,
     #[serde(default)]
-    rubric_path: Option<String>,
+    spring_rubric_path: Option<String>,
+    #[serde(default)]
+    android_rubric_path: Option<String>,
     #[serde(default)]
     llm_skip_globs: Option<Vec<String>>,
     #[serde(default)]
@@ -1182,10 +1192,14 @@ impl Config {
                         .architecture
                         .max_tokens
                         .unwrap_or(arch_defaults.max_tokens),
-                    rubric_path: raw
+                    spring_rubric_path: raw
                         .architecture
-                        .rubric_path
-                        .unwrap_or(arch_defaults.rubric_path),
+                        .spring_rubric_path
+                        .unwrap_or(arch_defaults.spring_rubric_path),
+                    android_rubric_path: raw
+                        .architecture
+                        .android_rubric_path
+                        .unwrap_or(arch_defaults.android_rubric_path),
                     llm_skip_globs: raw
                         .architecture
                         .llm_skip_globs

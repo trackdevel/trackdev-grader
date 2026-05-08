@@ -55,34 +55,37 @@ fn parse_interval(s: &str) -> Result<chrono::Duration> {
 /// without touching the DB. Exits the parent command after printing.
 /// (T-P1.6 — `--dry-run` for go/go-quick previews the purge only.)
 fn preview_go_purge(db: &Database, project_filter: Option<&[String]>) -> Result<()> {
-    let names = match project_filter {
-        Some(n) if !n.is_empty() => n,
+    let project_ids: Vec<i64> = match project_filter {
+        Some(names) if !names.is_empty() => names
+            .iter()
+            .filter_map(|name| {
+                db.conn
+                    .query_row("SELECT id FROM projects WHERE name = ?", [name], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .ok()
+            })
+            .collect(),
         _ => {
-            println!(
-                "[dry-run] go/go-quick only purges when --projects is set; \
-                 nothing would be deleted."
-            );
-            return Ok(());
+            let mut stmt = db.conn.prepare("SELECT id FROM projects ORDER BY id")?;
+            let ids: Vec<i64> = stmt
+                .query_map([], |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            ids
         }
     };
-    let mut project_ids: Vec<i64> = Vec::new();
-    for name in names {
-        if let Ok(pid) = db
-            .conn
-            .query_row("SELECT id FROM projects WHERE name = ?", [name], |r| {
-                r.get::<_, i64>(0)
-            })
-        {
-            project_ids.push(pid);
-        }
-    }
     if project_ids.is_empty() {
-        println!("[dry-run] no projects matched filter; nothing would be deleted.");
+        println!("[dry-run] no projects in DB; nothing would be deleted.");
         return Ok(());
     }
     let report = sprint_grader_orchestration::purge_projects(&db.conn, &project_ids, true)
         .context("purge_projects dry-run failed")?;
-    println!("[dry-run] go/go-quick purge would affect:");
+    let scope = if project_filter.is_some() {
+        format!("{} filtered project(s)", project_ids.len())
+    } else {
+        format!("ALL {} project(s) in DB", project_ids.len())
+    };
+    println!("[dry-run] go/go-quick purge would affect {scope}:");
     for (table, count) in &report {
         println!("  {table}: {count}");
     }
@@ -100,7 +103,36 @@ fn default_project_root() -> PathBuf {
     name = "sprint-grader",
     version,
     about = "Sprint Grading Pipeline — automated anomaly detection for student projects",
-    long_about = None,
+    long_about = "Sprint Grading Pipeline — automated anomaly detection for student projects.\n\
+                  \n\
+                  Four orchestrated pipelines, picked by use case:\n\
+                  \n  \
+                  run-all    Cumulative additive run. Incremental collection (per-PR watermark\n             \
+                             + GitHub ETag); per project, skips survival/compile/architecture\n             \
+                             when no new PRs/tasks were collected. No AI detection. Survival\n             \
+                             errors are FATAL.\n  \
+                  iterate    Same as run-all, but skips the per-file LLM architecture rubric.\n             \
+                             Use mid-sprint when you want fresh metrics and reports without\n             \
+                             paying for the slow LLM judge.\n  \
+                  go-quick   ALWAYS PURGES then re-collects from scratch. PR doc eval forced to\n             \
+                             heuristic (no Claude calls); static analysis off by default. AI\n             \
+                             detection on. Tolerates survival errors.\n  \
+                  go         End-of-sprint full run. ALWAYS PURGES then re-collects from scratch.\n             \
+                             LLM PR doc eval (when ANTHROPIC_API_KEY set), AI detection, and\n             \
+                             LLM architecture rubric (when configured). Tolerates survival errors.\n\
+                  \n\
+                  --projects is a scope reducer\n\
+                  ─────────────────────────────\n\
+                  --projects <slug,…> only narrows the blast radius — it never changes what a\n\
+                  command does. For go/go-quick, the purge always runs: with --projects it wipes\n\
+                  only the listed projects; without it, it wipes every project in the DB. The\n\
+                  cascade clears pull_requests, tasks, sprints, fingerprints, pr_github_etags,\n\
+                  the per-PR last_github_fetch_updated_at watermark, and every derived table —\n\
+                  which is why go/go-quick always re-fetch every PR (the watermark + ETag cache\n\
+                  is gone). That is the end-of-sprint contract: rebuild from scratch.\n\
+                  \n\
+                  Use --dry-run on go/go-quick to preview the cascade per table before any\n\
+                  pipeline stage runs. See `<subcommand> --help` for the full per-variant contract.",
 )]
 struct Cli {
     /// Enable debug logging
@@ -283,7 +315,15 @@ enum Command {
     },
 
     // Full-pipeline variants
-    /// Full pipeline: collect + analyze + report for every sprint up to today (no AI detection).
+    /// Cumulative additive pipeline (no purge, no AI detection).
+    ///
+    /// Every stage runs against sprints with `start_date <= --today`, but the run is incremental on every axis. Collection skips PRs whose `updated_at` matches the per-PR watermark `last_github_fetch_updated_at`, and GitHub conditional GETs (If-None-Match etag) avoid downloading unchanged payloads on the rest. Repos are cloned or fetched only for projects that actually received new PRs/tasks during this run. Survival, compile, and architecture stages are skipped per project when the post-collect snapshot shows no new PRs/tasks for that project. Even when compile runs, PRs whose merge_sha already has a `pr_compilation` row are not rebuilt (config.build.skip_already_tested).
+    ///
+    /// Survival errors are FATAL — the run aborts. Use `go` if you'd rather get a partial report.
+    ///
+    /// PR doc eval: heuristic always; LLM if ANTHROPIC_API_KEY is set. LLM architecture rubric: yes when [architecture] llm_review = true and the configured judge backend is reachable. AI detection: NO. Static analysis runs by default; pass --skip-static-analysis to bypass.
+    ///
+    /// Use this for the regular cumulative grading run.
     RunAll {
         #[command(flatten)]
         projects: ProjectsArg,
@@ -298,7 +338,17 @@ enum Command {
         #[arg(long)]
         force_pr_refresh: bool,
     },
-    /// End-of-sprint evaluation: purge, re-collect, full analysis + AI detection.
+    /// End-of-sprint full run: purge → re-collect → full analysis + AI detection.
+    ///
+    /// ALWAYS PURGES before collecting. --projects only narrows the blast radius: with --projects, the cascade is scoped to the listed projects; without it, every project in the DB is wiped. Either way the purge clears pull_requests, tasks, sprints, fingerprints, pr_github_etags, the per-PR `last_github_fetch_updated_at` watermark, and every derived table — which is why re-collection re-fetches every PR (the cache is gone). That is the end-of-sprint contract: rebuild from scratch.
+    ///
+    /// Unlike run-all, every stage runs for every in-scope project regardless of whether new PRs/tasks were collected — there's no "skip if nothing changed" gate.
+    ///
+    /// Survival errors are TOLERATED so a partial REPORT.md still lands.
+    ///
+    /// PR doc eval: heuristic always; LLM if ANTHROPIC_API_KEY is set. AI detection: yes. LLM architecture rubric: yes when configured. Static analysis runs by default; pass --skip-static-analysis to bypass.
+    ///
+    /// Pass --dry-run to preview the cascade per table and exit before the pipeline runs. --require-clean-tree refuses to start when `git status --porcelain` is non-empty.
     Go {
         #[command(flatten)]
         projects: ProjectsArg,
@@ -325,10 +375,24 @@ enum Command {
         #[arg(long)]
         require_clean_tree: bool,
     },
-    /// Iterative re-run: collect new PRs, compile only the new ones, recompute
-    /// every other metric, and skip the architecture LLM rubric. Same compile
-    /// cache as `run-all` (PRs whose merge_sha already has a row in
-    /// `pr_compilation` are not rebuilt). No AI detection. No LLM PR review.
+    /// Like `run-all` but skips the per-file LLM architecture rubric.
+    ///
+    /// Identical incremental semantics to run-all: no purge, watermark +
+    /// etag caching for collection, per-project skip when no new PRs/tasks,
+    /// per-PR `pr_compilation` cache by merge_sha. The only behavioural
+    /// difference is that the architecture LLM judge (the slow per-file
+    /// pass) is bypassed even when [architecture] llm_review = true. The
+    /// AST-based architecture scan still runs and writes
+    /// architecture_violations.
+    ///
+    /// Survival errors are FATAL (same as run-all).
+    ///
+    /// PR doc eval: heuristic always; LLM if ANTHROPIC_API_KEY is set.
+    /// AI detection: NO. Static analysis runs by default; pass
+    /// --skip-static-analysis to bypass.
+    ///
+    /// Use this when iterating mid-sprint and you want fresh metrics +
+    /// reports without paying for the per-file LLM rubric.
     Iterate {
         #[command(flatten)]
         projects: ProjectsArg,
@@ -343,7 +407,15 @@ enum Command {
         #[arg(long)]
         force_pr_refresh: bool,
     },
-    /// Like `go` but skips the Section-3 LLM code review.
+    /// Like `go`, but heuristic-only PR doc eval and no static analysis by default.
+    ///
+    /// ALWAYS PURGES before collecting (same cascade as `go`). --projects only narrows the blast radius: with --projects, the cascade is scoped to the listed projects; without it, every project in the DB is wiped. The cascade clears pr_github_etags and the per-PR `last_github_fetch_updated_at` watermark, so re-collection re-fetches every PR.
+    ///
+    /// Differs from `go` in two ways. First, PR doc eval ALWAYS uses the heuristic scorer, even with ANTHROPIC_API_KEY set (avoids per-PR Claude calls). Second, static analysis is SKIPPED by default (PMD/Checkstyle/SpotBugs adds 10-20 min); pass --run-static-analysis to opt in.
+    ///
+    /// Survival errors are TOLERATED. AI detection: yes. LLM architecture rubric: yes when configured.
+    ///
+    /// Designed for mid-sprint iteration. Pass --dry-run to preview the cascade per table; --require-clean-tree to refuse a dirty tree.
     GoQuick {
         #[command(flatten)]
         projects: ProjectsArg,
@@ -402,7 +474,9 @@ enum Command {
     },
     /// Print the resolved architecture rubric for one stack
     /// (`spring` or `android`) so it can be inspected without running
-    /// any LLM. Reads `config/architecture.md`. T-P3.2.
+    /// any LLM. Reads `config/architecture-spring.md` or
+    /// `config/architecture-android.md` (paths configurable via
+    /// `[architecture]` in `course.toml`). T-P3.2.
     ArchitectureRubric {
         /// Stack alias: `spring` / `backend`, or `android` / `mobile`.
         #[arg(long)]
@@ -1245,7 +1319,26 @@ fn main() -> Result<()> {
             }
         }
         Command::ArchitectureRubric { stack } => {
-            let path = config_dir.join("architecture.md");
+            let normalized = stack.trim().to_lowercase();
+            let rel = if matches!(
+                normalized.as_str(),
+                "spring" | "java-spring" | "backend"
+            ) || normalized.contains("spring")
+            {
+                &config.architecture.spring_rubric_path
+            } else if matches!(
+                normalized.as_str(),
+                "android" | "java-android" | "mobile"
+            ) || normalized.contains("android")
+            {
+                &config.architecture.android_rubric_path
+            } else {
+                anyhow::bail!(
+                    "unknown stack '{}' — expected 'spring' / 'android' (or an alias like 'backend' / 'mobile')",
+                    stack
+                );
+            };
+            let path = config_dir.join(rel);
             if !path.is_file() {
                 anyhow::bail!(
                     "architecture rubric not found at {} — write the rubric first or pass a different --project-root",
@@ -1254,13 +1347,7 @@ fn main() -> Result<()> {
             }
             let rubric = sprint_grader_architecture::rubric::load(&path)
                 .with_context(|| format!("failed to parse {}", path.display()))?;
-            let body = rubric.for_stack(&stack).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "architecture.md has no section for stack '{}' (expected 'spring' / 'android' or an alias like 'backend' / 'mobile')",
-                    stack
-                )
-            })?;
-            println!("{body}");
+            println!("{}", rubric.body);
             println!();
             println!("version={} body_hash={}", rubric.version, rubric.body_hash);
         }

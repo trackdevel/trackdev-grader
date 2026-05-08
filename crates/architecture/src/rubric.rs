@@ -1,9 +1,9 @@
 //! Markdown rubric loader (T-P3.2).
 //!
 //! Groundwork for T-P3.3 (LLM-judged architecture review). The rubric is
-//! prose, written by the instructor, split into per-stack sections by H1
-//! heading. T-P3.3 will pick a section per file based on the cloned repo's
-//! stack and feed it to the model alongside the file body.
+//! prose, written by the instructor, one file per stack. The orchestrator
+//! detects the stack of each cloned repo and feeds the matching rubric to
+//! the model alongside the file body.
 //!
 //! ### Format
 //!
@@ -12,12 +12,16 @@
 //! version: 1
 //! ---
 //!
-//! # Spring Boot rubric
+//! # <stack> rubric
 //! ...prose...
 //!
-//! # Android rubric
+//! # Severity guidance
 //! ...prose...
 //! ```
+//!
+//! The body is sent to the judge verbatim — the loader does not split by
+//! H1 heading, so `# Severity guidance` (or any other section the
+//! instructor cares to include) reaches the model.
 //!
 //! ### Versioning
 //!
@@ -40,38 +44,16 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rubric {
     pub version: String,
-    pub spring: String,
-    pub android: String,
+    pub body: String,
     pub body_hash: String,
 }
 
 impl Rubric {
-    /// Resolve a stack alias to the matching section. Returns `None` if
-    /// the rubric has no entry for the requested stack.
-    pub fn for_stack(&self, stack: &str) -> Option<&str> {
-        match normalize_stack(stack) {
-            "spring" => (!self.spring.is_empty()).then_some(self.spring.as_str()),
-            "android" => (!self.android.is_empty()).then_some(self.android.as_str()),
-            _ => None,
-        }
-    }
-
     /// Cache key for T-P3.3. Combine with `model_id` and `file_sha` at
     /// the call site.
     pub fn cache_key_prefix(&self) -> String {
         format!("{}:{}", self.version, self.body_hash)
     }
-}
-
-fn normalize_stack(stack: &str) -> &str {
-    let s = stack.trim().to_lowercase();
-    if s.contains("spring") || s == "java-spring" || s == "backend" {
-        return "spring";
-    }
-    if s.contains("android") || s == "java-android" || s == "mobile" {
-        return "android";
-    }
-    "unknown"
 }
 
 pub fn load(path: &Path) -> anyhow::Result<Rubric> {
@@ -86,12 +68,9 @@ pub fn parse(text: &str) -> anyhow::Result<Rubric> {
     let normalized_body = normalize_for_hash(body);
     let body_hash = sha256_hex(&normalized_body);
 
-    let (spring, android) = split_sections(body);
-
     Ok(Rubric {
         version,
-        spring,
-        android,
+        body: body.trim().to_string(),
         body_hash,
     })
 }
@@ -128,45 +107,6 @@ fn read_version(frontmatter: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Split the body into `(spring, android)` sections by H1 heading.
-/// Heading text is matched case-insensitively against `spring` and
-/// `android`. Anything before the first H1 is dropped (rubric-level
-/// preamble has no stack to attach to). Anything between subsequent H1s
-/// after the first two stacks is dropped — the format is fixed.
-fn split_sections(body: &str) -> (String, String) {
-    let mut spring = String::new();
-    let mut android = String::new();
-    let mut current: Option<&'static str> = None;
-
-    for line in body.lines() {
-        if let Some(rest) = line.strip_prefix("# ") {
-            let h = rest.trim().to_lowercase();
-            if h.contains("spring") {
-                current = Some("spring");
-                continue;
-            } else if h.contains("android") {
-                current = Some("android");
-                continue;
-            } else {
-                current = None;
-                continue;
-            }
-        }
-        match current {
-            Some("spring") => {
-                spring.push_str(line);
-                spring.push('\n');
-            }
-            Some("android") => {
-                android.push_str(line);
-                android.push('\n');
-            }
-            _ => {}
-        }
-    }
-    (spring.trim().to_string(), android.trim().to_string())
 }
 
 /// Strip per-line trailing whitespace and collapse runs of blank lines.
@@ -206,7 +146,7 @@ fn sha256_hex(s: &str) -> String {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = "\
+    const SAMPLE_SPRING: &str = "\
 ---
 version: 2
 ---
@@ -218,27 +158,27 @@ version: 2
 - Controllers must not call repositories.
 - Services return DTOs.
 
-# Android rubric
+# Severity guidance
 
-## Layering
-
-- Activities use repositories only.
+- CRITICAL — security impact.
 ";
 
     #[test]
-    fn parses_frontmatter_and_extracts_sections() {
-        let r = parse(SAMPLE).unwrap();
+    fn parses_frontmatter_and_extracts_body() {
+        let r = parse(SAMPLE_SPRING).unwrap();
         assert_eq!(r.version, "2");
-        assert!(r.spring.contains("Controllers must not call repositories"));
-        assert!(r.android.contains("Activities use repositories only"));
-        assert!(!r.spring.is_empty(), "spring section non-empty");
+        assert!(r.body.contains("Controllers must not call repositories"));
+        assert!(
+            r.body.contains("Severity guidance"),
+            "body keeps every H1 section, not just the first"
+        );
         assert_eq!(r.body_hash.len(), 64, "sha256 hex");
     }
 
     #[test]
     fn body_hash_changes_when_content_edits_but_version_unchanged() {
-        let edited = SAMPLE.replace("Services return DTOs.", "Services return DTOs only.");
-        let a = parse(SAMPLE).unwrap();
+        let edited = SAMPLE_SPRING.replace("Services return DTOs.", "Services return DTOs only.");
+        let a = parse(SAMPLE_SPRING).unwrap();
         let b = parse(&edited).unwrap();
         assert_eq!(a.version, b.version, "version stayed constant");
         assert_ne!(a.body_hash, b.body_hash, "but body hash changed");
@@ -246,8 +186,9 @@ version: 2
 
     #[test]
     fn body_hash_stable_across_whitespace_only_edits() {
-        let extra_blanks = SAMPLE.replace("# Spring Boot rubric", "# Spring Boot rubric   \n\n\n");
-        let a = parse(SAMPLE).unwrap();
+        let extra_blanks =
+            SAMPLE_SPRING.replace("# Spring Boot rubric", "# Spring Boot rubric   \n\n\n");
+        let a = parse(SAMPLE_SPRING).unwrap();
         let b = parse(&extra_blanks).unwrap();
         assert_eq!(
             a.body_hash, b.body_hash,
@@ -256,29 +197,16 @@ version: 2
     }
 
     #[test]
-    fn for_stack_is_case_insensitive_and_normalises_aliases() {
-        let r = parse(SAMPLE).unwrap();
-        assert!(r.for_stack("spring").is_some());
-        assert!(r.for_stack("SPRING").is_some());
-        assert!(r.for_stack("java-spring").is_some());
-        assert!(r.for_stack("backend").is_some());
-        assert!(r.for_stack("android").is_some());
-        assert!(r.for_stack("Android").is_some());
-        assert!(r.for_stack("mobile").is_some());
-        assert!(r.for_stack("kotlin-only").is_none());
-    }
-
-    #[test]
     fn no_frontmatter_yields_default_version() {
-        let body = "# Spring Boot rubric\n- a rule.\n# Android rubric\n- another.\n";
+        let body = "# Spring Boot rubric\n- a rule.\n";
         let r = parse(body).unwrap();
         assert_eq!(r.version, "0");
-        assert!(r.spring.contains("a rule"));
+        assert!(r.body.contains("a rule"));
     }
 
     #[test]
     fn cache_key_prefix_concatenates_version_and_hash() {
-        let r = parse(SAMPLE).unwrap();
+        let r = parse(SAMPLE_SPRING).unwrap();
         let key = r.cache_key_prefix();
         assert!(key.starts_with("2:"), "version comes first");
         assert_eq!(key.len(), 2 + 64, "version + ':' + 64-char hash");
