@@ -20,10 +20,12 @@ per-file.
 - **Controllers must not reach the repository layer directly.** Even
   through a parameter, a field, or a chained call — repository access
   always goes through a service.
-- **Services (`@Service`) must not return JPA entities to the
-  presentation layer.** They return DTOs (or use a mapper). An entity
-  exposed via `@RestController` causes lazy-loading bugs and serialises
-  internal state to clients.
+- **Services (`@Service`) must not return JPA entities (`@Entity`) to the
+  `@RestController` controller layer.**
+  They return DTOs (or use a mapper) to the Controller.
+  An entity exposed to a `@RestController` causes lazy-loading bugs and serialises 
+  internal state to clients. But Services can return entities if the target
+  is another Service
 - **The persistence layer (`@Repository`, `JpaRepository<>`) must not
   call services or controllers.** Inversion-of-control runs the other
   way; circular references between layers indicate a missing
@@ -61,10 +63,6 @@ per-file.
 
 ## Anti-patterns
 
-- **No `@Autowired` field injection.** Use constructor injection (with
-  `final` fields) so the class is testable without Spring and so
-  required dependencies are explicit. Setter injection is acceptable
-  only for genuine optional collaborators.
 - **No business logic inside `@Entity` classes.** Methods on entities
   should be limited to invariant guards (e.g. validation in setters)
   and trivial derived getters. Compute-heavy logic, transactional
