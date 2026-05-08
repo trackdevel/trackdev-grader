@@ -20,21 +20,16 @@ use tracing::{info, warn};
 const OWNERSHIP_COVERAGE: f64 = 0.95;
 
 /// Resolve a `fingerprints.blame_author_login` to a `students.id` if the
-/// login matches a known team member (lowercased). Falls back to the raw
-/// login string so unknown contributors still surface (they'll show under
-/// their login rather than vanish into "owner unknown" — UNKNOWN_CONTRIBUTOR
-/// flags handle the alerting).
+/// login matches a known team member (lowercased). Sole source of truth:
+/// `student_github_identity` (populated by `collect::identity_resolver`
+/// from task-PR evidence). Unmatched logins surface as the raw login so
+/// unknown contributors still appear in ownership rather than vanishing
+/// into "owner unknown" — UNKNOWN_CONTRIBUTOR flags handle the alerting.
 fn login_to_student_map(conn: &Connection) -> rusqlite::Result<BTreeMap<String, String>> {
     let mut map: BTreeMap<String, String> = BTreeMap::new();
-    let mut stmt = conn
-        .prepare("SELECT LOWER(github_login), id FROM students WHERE github_login IS NOT NULL")?;
-    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-        let (login, sid) = row?;
-        map.insert(login, sid);
-    }
-    drop(stmt);
     let mut stmt = conn.prepare(
-        "SELECT LOWER(login), student_id FROM github_users WHERE student_id IS NOT NULL",
+        "SELECT identity_value, student_id FROM student_github_identity
+         WHERE identity_kind = 'login'",
     )?;
     for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (login, sid) = row?;
@@ -222,6 +217,13 @@ mod tests {
     fn seed_student(conn: &Connection, id: &str, login: &str) {
         conn.execute(
             "INSERT INTO students (id, github_login, team_project_id) VALUES (?, ?, 1)",
+            params![id, login],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+             VALUES (?, 'login', LOWER(?), 1.0, 1.0)",
             params![id, login],
         )
         .unwrap();
