@@ -90,29 +90,43 @@ runnable and testable.
 
 ### Pipeline variants
 
-The orchestration crate exposes three top-level pipelines:
+The orchestration crate exposes four top-level pipelines:
 
-- **`run-all`** — fresh full run; survival failure is fatal; *does not* purge
-  existing rows. Use for an additive build of the DB after `collect`.
-- **`go`** — end-of-sprint evaluation. Purges existing rows for the targeted
-  projects, re-collects, runs the full pipeline including AI detection, and
-  is tolerant to survival errors so you can still get a partial report.
-- **`go-quick`** — like `go`, but the LLM PR-doc evaluation always falls back
-  to the heuristic scorer (no Claude calls) regardless of `ANTHROPIC_API_KEY`.
-  Designed for iterative work mid-sprint.
+- **`run-all`** — additive cumulative run. Incremental collection (per-PR
+  watermark + GitHub ETag); per project, skips survival/compile/architecture
+  when no new PRs/tasks were collected. No AI detection. Survival failure is
+  fatal. *Does not* purge.
+- **`iterate`** — same as `run-all`, but skips the per-file LLM architecture
+  rubric. Use mid-sprint when you want fresh metrics and reports without
+  paying for the slow LLM judge.
+- **`go-quick`** — *always* purges before collecting, then re-collects from
+  scratch. PR doc eval forced to heuristic (no Claude calls); static analysis
+  skipped by default. AI detection on. Tolerates survival errors. Designed
+  for mid-sprint iteration.
+- **`go`** — end-of-sprint full run. *Always* purges before collecting; LLM
+  PR doc eval (when `ANTHROPIC_API_KEY` is set), AI detection, and the LLM
+  architecture rubric (when configured). Tolerates survival errors.
+
+`--projects <slug,…>` is a **scope reducer** on every command: it never
+changes what the command does, only how much of the DB it touches. For
+`go`/`go-quick`, the purge always runs — with `--projects` it's scoped to
+the listed projects; without it, every project in the DB is wiped. The
+cascade clears `pr_github_etags` and the per-PR watermark, which is why
+re-collection re-fetches every PR.
 
 PR documentation evaluation by variant:
 
 | Pipeline    | Heuristic doc eval | LLM doc eval                       |
 |-------------|--------------------|------------------------------------|
 | `run-all`   | ✓                  | ✓ if `ANTHROPIC_API_KEY` is set    |
+| `iterate`   | ✓                  | ✓ if `ANTHROPIC_API_KEY` is set    |
 | `go`        | ✓                  | ✓ if `ANTHROPIC_API_KEY` is set    |
 | `go-quick`  | ✓                  | ✗ — heuristic only, even with key  |
 
 `go-quick` previously skipped PR doc eval entirely; as of T-P0.2 it now
 populates `student_sprint_metrics.avg_doc_score` from the heuristic scorer.
 
-All three use a `rayon` thread pool to fan sprints out across worker
+All variants use a `rayon` thread pool to fan sprints out across worker
 connections (SQLite WAL mode allows concurrent readers + serialised writers).
 Stages 5–7 (quality / process / repo_analysis / ai_detect) are each pure
 functions of the DB, so re-running them is cheap.
@@ -346,14 +360,20 @@ types changed behaviour during the P0/P1 wave and warrant calling out:
   method gets ~3 % weight rather than 50 %. The team-level
   `ARCHITECTURE_DRIFT` keeps the regression headline; this flag points
   at the people who actually wrote the offending code.
-- **Architecture rubric (`config/architecture.md`)** — prose
-  description of the architectural intent the LLM judge will check
-  per-file (T-P3.2). YAML frontmatter (`version: <N>`) plus per-stack
-  H1 sections (`# Spring Boot rubric`, `# Android rubric`). Inspect
-  the resolved rubric for a stack with
+- **Architecture rubric (`config/architecture-spring.md`,
+  `config/architecture-android.md`)** — one prose file per stack
+  describing the architectural intent the LLM judge will check
+  per-file (T-P3.2). The orchestrator picks `architecture-android.md`
+  for cloned repos whose folder name starts with `android-`, and
+  `architecture-spring.md` for everything else, so each LLM call
+  sees only the rubric relevant to that file's stack. YAML
+  frontmatter (`version: <N>`) lives in each file independently.
+  Inspect the resolved rubric for a stack with
   `sprint-grader architecture-rubric --stack spring`. Editing the
   prose changes the body hash; bumping `version` invalidates the
-  T-P3.3 LLM cache deliberately.
+  T-P3.3 LLM cache deliberately. Override the file paths in
+  `course.toml` via `[architecture] spring_rubric_path` /
+  `android_rubric_path`.
 - **LLM architecture judge (`[architecture] llm_review = true`)** —
   T-P3.3. When enabled and `ANTHROPIC_API_KEY` is set, the pipeline
   asks the configured model (default `claude-haiku-4-5-20251001`) to
@@ -405,9 +425,10 @@ Orchestration / utility:
 
 | Command | Purpose |
 |---|---|
-| `run-all [--skip-static-analysis]` | Additive full pipeline; no AI detection. Static-analysis stage runs when `config/static_analysis.toml` exists; pass the flag to bypass. |
-| `go [--dry-run] [--require-clean-tree] [--skip-static-analysis]` | End-of-sprint: purge → re-collect → full pipeline + AI detection. `--dry-run` previews the cascade purge step (per-table row counts) and exits before any pipeline stage runs. `--require-clean-tree` refuses to start if `git status --porcelain` reports a dirty working tree. |
-| `go-quick [--dry-run] [--require-clean-tree] [--run-static-analysis]` | Same as `go`, but PR doc evaluation always runs heuristic-only (no Claude calls) and the static-analysis stage is skipped by default — pass `--run-static-analysis` to opt in. Same `--dry-run` / `--require-clean-tree` semantics as `go`. |
+| `run-all [--skip-static-analysis]` | Additive full pipeline; no AI detection. Incremental collection (watermark + ETag); skips survival/compile/architecture per project when no new PRs/tasks. Static-analysis stage runs when `config/static_analysis.toml` exists; pass the flag to bypass. |
+| `iterate [--skip-static-analysis]` | Same as `run-all`, but skips the per-file LLM architecture rubric. AST-based architecture scan still runs. |
+| `go [--dry-run] [--require-clean-tree] [--skip-static-analysis]` | End-of-sprint: **always** purges then re-collects → full pipeline + AI detection. `--projects` only narrows the purge scope (without it, every project in the DB is wiped). `--dry-run` previews the cascade per-table row counts and exits before any pipeline stage runs. `--require-clean-tree` refuses to start if `git status --porcelain` reports a dirty working tree. |
+| `go-quick [--dry-run] [--require-clean-tree] [--run-static-analysis]` | Same purge/re-collect contract as `go`, but PR doc evaluation always runs heuristic-only (no Claude calls) and the static-analysis stage is skipped by default — pass `--run-static-analysis` to opt in. Same `--dry-run` / `--require-clean-tree` semantics as `go`. |
 | `sync-reports [--push]` | Regenerate `REPORT.md` for every sprint up to today; optionally commit + push to each team's `main`. |
 | `purge-cache --line-metrics --survival --compilation --doc-eval [--dry-run] [--require-clean-tree]` | Selectively drop derived rows so the next run recomputes them. `--dry-run` rewrites each `DELETE` as a `SELECT COUNT(*)` over the same predicate and prints projected row counts table-by-table without modifying the DB. `--require-clean-tree` is the same guard as on `go`. |
 | `debug-pr-lines` | Dump LAT/LAR/LS computation for individual PRs (diagnostics). |
