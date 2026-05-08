@@ -217,11 +217,35 @@ mod tests {
         )
         .unwrap();
         conn.execute(
+            "INSERT OR IGNORE INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+             VALUES ('alice', 'login', 'alice', 1.0, 1.0),
+                    ('alice', 'email', 'alice@example.com', 1.0, 1.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT OR REPLACE INTO students (id, username, github_login, full_name, email, team_project_id)
              VALUES ('bob', 'bob', 'bob', 'Bob', 'bob@example.com', 1)",
             [],
         )
         .unwrap();
+        // Register (login, email) identities in student_github_identity —
+        // production code reads this table only; `students.github_login`
+        // and `students.email` are no longer trusted as identity sources.
+        for (sid, login, email) in [
+            ("alice", "alice", "alice@example.com"),
+            ("bob", "bob", "bob@example.com"),
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO student_github_identity
+                    (student_id, identity_kind, identity_value, weight, confidence)
+                 VALUES (?, 'login', ?, 1.0, 1.0),
+                        (?, 'email', ?, 1.0, 1.0)",
+                params![sid, login, sid, email],
+            )
+            .unwrap();
+        }
     }
 
     fn insert_violation(
@@ -395,6 +419,14 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+             VALUES ('alice', 'login', 'alice', 1.0, 1.0),
+                    ('alice', 'email', 'alice@example.com', 1.0, 1.0)",
+            [],
+        )
+        .unwrap();
 
         let (_g, repo) = init_repo();
         let body = (1..=4).map(|i| format!("// l{i}\n")).collect::<String>();
@@ -435,6 +467,14 @@ mod tests {
         conn.execute(
             "INSERT OR REPLACE INTO students (id, username, github_login, full_name, email, team_project_id)
              VALUES ('alice', 'alice', 'alice', 'Alice', 'alice@example.com', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+             VALUES ('alice', 'login', 'alice', 1.0, 1.0),
+                    ('alice', 'email', 'alice@example.com', 1.0, 1.0)",
             [],
         )
         .unwrap();
