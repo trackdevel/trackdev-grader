@@ -231,9 +231,17 @@ fn write_members_sheet(
 
     let ls_lat = student_ls_lat_totals(conn, sprint_id, project_id)?;
 
+    // Display login comes from the resolver-derived mapping
+    // (`student_github_identity`). TrackDev's `students.github_login` is
+    // no longer trusted for display.
     let mut stmt = conn.prepare(
-        "SELECT id, full_name, github_login FROM students
-         WHERE team_project_id = ? ORDER BY full_name",
+        "SELECT s.id, s.full_name,
+                (SELECT identity_value FROM student_github_identity
+                 WHERE student_id = s.id AND identity_kind = 'login'
+                 ORDER BY weight DESC, confidence DESC, identity_value
+                 LIMIT 1)
+         FROM students s
+         WHERE s.team_project_id = ? ORDER BY s.full_name",
     )?;
     let students: Vec<(String, String, Option<String>)> = stmt
         .query_map([project_id], |r| {
@@ -557,9 +565,18 @@ fn write_prs_sheet(
         // on this PR's tasks (ties → most tasks → full_name → student_id).
         // Co-assignees, if any, are rendered as an inline `(also: A, B)`
         // footnote. The git-side identity (pr.github_author_login) is not
-        // surfaced here; AUTHOR_MISMATCH speaks to that.
+        // surfaced here; AUTHOR_MISMATCH speaks to that. When `full_name` is
+        // empty we fall back to the resolver-derived github login (highest
+        // weight) — TrackDev's `students.github_login` is no longer used.
         let mut author_stmt = conn.prepare(
-            "SELECT COALESCE(s.full_name, s.github_login, '')
+            "SELECT COALESCE(
+                    s.full_name,
+                    (SELECT identity_value FROM student_github_identity
+                     WHERE student_id = s.id AND identity_kind = 'login'
+                     ORDER BY weight DESC, confidence DESC, identity_value
+                     LIMIT 1),
+                    ''
+                )
              FROM pr_authors pa
              JOIN students s ON s.id = pa.student_id
              WHERE pa.pr_id = ?
@@ -1474,6 +1491,11 @@ mod tests {
              CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT);
              CREATE TABLE students (id TEXT PRIMARY KEY, full_name TEXT, github_login TEXT,
                 team_project_id INTEGER, email TEXT);
+             CREATE TABLE student_github_identity (student_id TEXT NOT NULL,
+                identity_kind TEXT NOT NULL, identity_value TEXT NOT NULL,
+                weight REAL NOT NULL, confidence REAL NOT NULL,
+                first_seen_pr TEXT, last_seen_pr TEXT,
+                PRIMARY KEY (student_id, identity_kind, identity_value));
              CREATE TABLE tasks (id INTEGER PRIMARY KEY, task_key TEXT, name TEXT, type TEXT,
                 status TEXT, estimation_points INTEGER, assignee_id TEXT, sprint_id INTEGER,
                 parent_task_id INTEGER);
@@ -1541,6 +1563,9 @@ mod tests {
              INSERT INTO projects VALUES (1, 'pds26-1a');
              INSERT INTO sprints VALUES (10, 1, 'Sprint 1', '2026-02-16', '2026-03-08');
              INSERT INTO students VALUES ('u1', 'Alice', 'alice-gh', 1, 'alice@example.com');
+             INSERT INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+                VALUES ('u1', 'login', 'alice-gh', 1.0, 1.0);
              INSERT INTO student_sprint_metrics
                (student_id, sprint_id, points_delivered, points_share, weighted_pr_lines,
                 commit_count, files_touched, reviews_given, avg_doc_score, temporal_spread)
