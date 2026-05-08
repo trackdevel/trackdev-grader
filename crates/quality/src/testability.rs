@@ -2114,6 +2114,16 @@ mod tests {
                 params![sid, login, login, full, email],
             )
             .unwrap();
+            // Production code reads identities from student_github_identity
+            // only; TrackDev's stored github_login is no longer trusted.
+            conn.execute(
+                "INSERT OR IGNORE INTO student_github_identity
+                    (student_id, identity_kind, identity_value, weight, confidence)
+                 VALUES (?, 'login', ?, 1.0, 1.0),
+                        (?, 'email', ?, 1.0, 1.0)",
+                params![sid, login, sid, email],
+            )
+            .unwrap();
         }
     }
 
