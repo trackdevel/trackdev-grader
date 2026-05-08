@@ -421,19 +421,20 @@ fn git_blame_line(
 
 fn resolve_author_id(conn: &Connection, author_email: Option<&str>) -> Option<String> {
     let email = author_email?;
-    if let Ok(Some(id)) = conn.query_row(
-        "SELECT student_id FROM github_users WHERE email = ?",
-        [email],
-        |r| r.get::<_, Option<String>>(0),
-    ) {
-        return Some(id);
-    }
-    if let Ok(id) = conn.query_row("SELECT id FROM students WHERE email = ?", [email], |r| {
-        r.get::<_, String>(0)
-    }) {
-        return Some(id);
-    }
-    None
+    // Sole source of truth: student_github_identity (resolver-derived
+    // from task-PR evidence). TrackDev's `students.email` is the school
+    // address and almost never matches a git commit email; `github_users`
+    // pre-resolved mappings are no longer trusted here either.
+    let needle = email.to_lowercase();
+    conn.query_row(
+        "SELECT student_id FROM student_github_identity
+         WHERE identity_kind = 'email' AND identity_value = ?
+         ORDER BY weight DESC, confidence DESC, student_id
+         LIMIT 1",
+        [&needle],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
 }
 
 const SKIP_DIRS: &[&str] = &[
