@@ -821,28 +821,25 @@ pub fn run_pipeline(
     }
     let config = &config;
 
-    // Stage 0: purge existing (go / go-quick only)
+    // Stage 0: purge existing (go / go-quick).
+    // `--projects` is a scope reducer, not a behaviour switch: when absent
+    // we purge every project in the DB; when set we purge only the listed
+    // projects. Either way go/go-quick rebuild from scratch — that's the
+    // end-of-sprint contract.
     if variant.purge_existing() {
-        if let Some(names) = &opts.project_filter {
-            let mut project_ids: Vec<i64> = Vec::new();
-            for name in names {
-                if let Ok(pid) =
-                    db.conn
-                        .query_row("SELECT id FROM projects WHERE name = ?", [name], |r| {
-                            r.get::<_, i64>(0)
-                        })
-                {
-                    project_ids.push(pid);
-                }
-            }
-            if !project_ids.is_empty() {
-                info!(
-                    projects = ?names,
-                    "purging existing project data before collection"
-                );
-                crate::purge::purge_projects(&db.conn, &project_ids, false)
-                    .context("purge_projects failed")?;
-            }
+        let project_ids = resolve_project_ids_from_names(&db.conn, opts.project_filter.as_deref());
+        if !project_ids.is_empty() {
+            let scope = if opts.project_filter.is_some() {
+                "filtered"
+            } else {
+                "all"
+            };
+            info!(
+                projects = project_ids.len(),
+                scope, "purging existing project data before collection"
+            );
+            crate::purge::purge_projects(&db.conn, &project_ids, false)
+                .context("purge_projects failed")?;
         }
     }
 
@@ -1301,83 +1298,103 @@ pub fn run_pipeline(
             };
 
         if let Some(judge_box) = judge_box {
-            let rubric_path = opts.config_dir.join(&config.architecture.rubric_path);
+            let spring_path = opts
+                .config_dir
+                .join(&config.architecture.spring_rubric_path);
+            let android_path = opts
+                .config_dir
+                .join(&config.architecture.android_rubric_path);
             let workers = config.architecture.judge_workers.max(1);
-            match sprint_grader_architecture::rubric::load(&rubric_path) {
-                Ok(rubric) => {
-                    info!(
-                        judge = %judge_kind,
-                        workers,
-                        "[architecture] running LLM review"
-                    );
-                    let judge = judge_box;
-                    // T-P3.4: artifact-shape — one LLM pass per repo,
-                    // sprint-free. Worker-pool concurrency for the per-file
-                    // calls happens inside `run_llm_review_for_repo`. The
-                    // per-file cache (architecture_llm_cache) absorbs
-                    // unchanged files; the head_sha gate is governed by
-                    // the AST scan stage above (the LLM stage uses the
-                    // file_sha cache instead — finer-grained).
-                    for g in &groups {
-                        let project_root = opts.entregues_dir.join(&g.name);
-                        let entries = match std::fs::read_dir(&project_root) {
-                            Ok(e) => e,
-                            Err(_) => continue,
-                        };
-                        for entry in entries.flatten() {
-                            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-                                continue;
-                            }
-                            let repo_path = entry.path();
-                            let repo_full_name = entry.file_name().to_string_lossy().into_owned();
-                            let stack = if repo_full_name.starts_with("android-") {
-                                "android"
-                            } else {
-                                "spring"
-                            };
-                            if let Err(e) = sprint_grader_architecture_llm::run_llm_review_for_repo(
-                                &db.conn,
-                                &repo_path,
-                                &repo_full_name,
-                                &rubric,
-                                stack,
-                                judge.as_ref(),
-                                &config.architecture.llm_skip_globs,
-                                workers,
-                            ) {
-                                warn!(repo = %repo_full_name, error = %e, "LLM architecture review failed");
-                            }
+            let spring_rubric = match sprint_grader_architecture::rubric::load(&spring_path) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    warn!(error = %e, path = %spring_path.display(), "spring rubric load failed; skipping spring repos");
+                    None
+                }
+            };
+            let android_rubric = match sprint_grader_architecture::rubric::load(&android_path) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    warn!(error = %e, path = %android_path.display(), "android rubric load failed; skipping android repos");
+                    None
+                }
+            };
+            if spring_rubric.is_none() && android_rubric.is_none() {
+                warn!("no architecture rubric loaded; skipping LLM review entirely");
+            } else {
+                info!(
+                    judge = %judge_kind,
+                    workers,
+                    "[architecture] running LLM review"
+                );
+                let judge = judge_box;
+                // T-P3.4: artifact-shape — one LLM pass per repo,
+                // sprint-free. Worker-pool concurrency for the per-file
+                // calls happens inside `run_llm_review_for_repo`. The
+                // per-file cache (architecture_llm_cache) absorbs
+                // unchanged files; the head_sha gate is governed by
+                // the AST scan stage above (the LLM stage uses the
+                // file_sha cache instead — finer-grained).
+                for g in &groups {
+                    let project_root = opts.entregues_dir.join(&g.name);
+                    let entries = match std::fs::read_dir(&project_root) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    for entry in entries.flatten() {
+                        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                            continue;
                         }
-                    }
-                    // The LLM stage writes new violation rows; re-run
-                    // blame attribution per repo so the LLM rows pick up
-                    // both per-student weights and `introduced_sprint_id`.
-                    for g in &groups {
-                        let project_root = opts.entregues_dir.join(&g.name);
-                        let entries = match std::fs::read_dir(&project_root) {
-                            Ok(e) => e,
-                            Err(_) => continue,
+                        let repo_path = entry.path();
+                        let repo_full_name = entry.file_name().to_string_lossy().into_owned();
+                        let rubric_for_repo = if repo_full_name.starts_with("android-") {
+                            android_rubric.as_ref()
+                        } else {
+                            spring_rubric.as_ref()
                         };
-                        for entry in entries.flatten() {
-                            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-                                continue;
-                            }
-                            let repo_path = entry.path();
-                            let repo_full_name = entry.file_name().to_string_lossy().into_owned();
-                            if let Err(e) =
-                                sprint_grader_architecture::attribute_violations_for_repo(
-                                    &db.conn,
-                                    &repo_path,
-                                    &repo_full_name,
-                                )
-                            {
-                                warn!(repo = %repo_full_name, error = %e, "post-LLM attribution failed");
-                            }
+                        let Some(rubric) = rubric_for_repo else {
+                            warn!(
+                                repo = %repo_full_name,
+                                "no rubric available for this repo's stack; skipping LLM review for it"
+                            );
+                            continue;
+                        };
+                        if let Err(e) = sprint_grader_architecture_llm::run_llm_review_for_repo(
+                            &db.conn,
+                            &repo_path,
+                            &repo_full_name,
+                            rubric,
+                            judge.as_ref(),
+                            &config.architecture.llm_skip_globs,
+                            workers,
+                        ) {
+                            warn!(repo = %repo_full_name, error = %e, "LLM architecture review failed");
                         }
                     }
                 }
-                Err(e) => {
-                    warn!(error = %e, path = %rubric_path.display(), "rubric load failed; skipping LLM review");
+                // The LLM stage writes new violation rows; re-run
+                // blame attribution per repo so the LLM rows pick up
+                // both per-student weights and `introduced_sprint_id`.
+                for g in &groups {
+                    let project_root = opts.entregues_dir.join(&g.name);
+                    let entries = match std::fs::read_dir(&project_root) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    for entry in entries.flatten() {
+                        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                            continue;
+                        }
+                        let repo_path = entry.path();
+                        let repo_full_name = entry.file_name().to_string_lossy().into_owned();
+                        if let Err(e) = sprint_grader_architecture::attribute_violations_for_repo(
+                            &db.conn,
+                            &repo_path,
+                            &repo_full_name,
+                        ) {
+                            warn!(repo = %repo_full_name, error = %e, "post-LLM attribution failed");
+                        }
+                    }
                 }
             }
         }
