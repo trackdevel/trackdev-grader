@@ -74,7 +74,10 @@ pub fn seed_sprint(
 }
 
 /// A team member rooted to the default project. `id` is also used as the
-/// github_login for convenience.
+/// github login (lowercased) for convenience. The login is registered
+/// in `student_github_identity` (the resolver-derived mapping consulted
+/// by production code); `students.github_login` is also seeded for
+/// schema parity but is no longer read.
 pub fn seed_student(conn: &Connection, id: &str) {
     seed_student_in(conn, id, PROJECT_ID);
 }
@@ -84,6 +87,13 @@ pub fn seed_student_in(conn: &Connection, id: &str, team_project_id: i64) {
         "INSERT INTO students (id, username, github_login, full_name, team_project_id)
          VALUES (?, ?, ?, ?, ?)",
         params![id, id, id, id, team_project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO student_github_identity
+            (student_id, identity_kind, identity_value, weight, confidence)
+         VALUES (?, 'login', LOWER(?), 1.0, 1.0)",
+        params![id, id],
     )
     .unwrap();
 }
