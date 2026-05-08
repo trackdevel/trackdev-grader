@@ -971,10 +971,15 @@ fn get_merge_sha(conn: &Connection, pr_id: &str) -> Option<String> {
 }
 
 fn get_reviewer_ids(conn: &Connection, pr_id: &str) -> Vec<String> {
+    // Map reviewer_login → student via student_github_identity
+    // (resolver-derived from task-PR evidence). TrackDev's
+    // `students.github_login` is no longer trusted.
     let mut stmt = match conn.prepare(
-        "SELECT DISTINCT s.id
+        "SELECT DISTINCT sgi.student_id
          FROM pr_reviews rv
-         JOIN students s ON LOWER(s.github_login) = LOWER(rv.reviewer_login)
+         JOIN student_github_identity sgi
+              ON sgi.identity_kind = 'login'
+             AND sgi.identity_value = LOWER(rv.reviewer_login)
          WHERE rv.pr_id = ?",
     ) {
         Ok(s) => s,
