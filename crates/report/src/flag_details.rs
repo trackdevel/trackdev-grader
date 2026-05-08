@@ -252,7 +252,9 @@ fn team_inequality_member_value(
             .query_row(
                 "SELECT COUNT(DISTINCT rv.pr_id || rv.submitted_at)
                  FROM students s
-                 JOIN pr_reviews rv ON LOWER(rv.reviewer_login) = LOWER(s.github_login)
+                 JOIN student_github_identity sgi
+                      ON sgi.student_id = s.id AND sgi.identity_kind = 'login'
+                 JOIN pr_reviews rv ON LOWER(rv.reviewer_login) = sgi.identity_value
                  JOIN pull_requests pr ON pr.id = rv.pr_id
                  JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
                  JOIN tasks t ON t.id = tpr.task_id

@@ -674,7 +674,7 @@ fn current_student_summary(
     let ls_per_student = student_ls_totals(conn, sprint_id, project_id)?;
 
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.full_name, s.github_login,
+        "SELECT s.id, s.full_name,
                 COALESCE(sm.points_delivered, 0) AS pts,
                 COALESCE(sm.points_share, 0) AS share,
                 COALESCE(sm.weighted_pr_lines, 0) AS lines,
@@ -699,13 +699,13 @@ fn current_student_summary(
                 Ok(StudentSummaryRow {
                     id,
                     full_name: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    github_login: r.get::<_, Option<String>>(2)?,
-                    pts: r.get::<_, f64>(3)?,
-                    share: r.get::<_, f64>(4)?,
-                    lines: r.get::<_, f64>(5)?,
-                    surv_norm: r.get::<_, f64>(6)?,
-                    density: r.get::<_, f64>(7)?,
-                    flag_count: r.get::<_, i64>(8)?,
+                    github_login: None,
+                    pts: r.get::<_, f64>(2)?,
+                    share: r.get::<_, f64>(3)?,
+                    lines: r.get::<_, f64>(4)?,
+                    surv_norm: r.get::<_, f64>(5)?,
+                    density: r.get::<_, f64>(6)?,
+                    flag_count: r.get::<_, i64>(7)?,
                     ls: stats.ls,
                     ld: stats.ld,
                     ls_per_pt: stats.ls_per_pt,
@@ -715,7 +715,7 @@ fn current_student_summary(
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
     for s in &mut students {
-        s.github_login = effective_github_login(conn, &s.id, s.github_login.as_deref());
+        s.github_login = effective_github_login(conn, &s.id);
     }
     Ok(students)
 }
@@ -748,25 +748,24 @@ fn cumulative_student_summary(
         .unwrap_or(0.0);
 
     let mut stmt = conn.prepare(
-        "SELECT id, full_name, github_login
+        "SELECT id, full_name
          FROM students
          WHERE team_project_id = ?
          ORDER BY full_name",
     )?;
-    let students: Vec<(String, String, Option<String>)> = stmt
+    let students: Vec<(String, String)> = stmt
         .query_map([project_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(2)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
     let mut rows = Vec::with_capacity(students.len());
-    for (id, full_name, github_login) in students {
-        let github_login = effective_github_login(conn, &id, github_login.as_deref());
+    for (id, full_name) in students {
+        let github_login = effective_github_login(conn, &id);
         let metrics: (f64, f64) = conn
             .query_row(
                 &format!(
@@ -893,15 +892,25 @@ fn normalize_github_login(raw: &str) -> Option<String> {
     (!login.is_empty()).then(|| login.to_string())
 }
 
-fn effective_github_login(
-    conn: &Connection,
-    student_id: &str,
-    stored: Option<&str>,
-) -> Option<String> {
-    if let Some(login) = stored.and_then(normalize_github_login) {
-        return Some(login);
+fn effective_github_login(conn: &Connection, student_id: &str) -> Option<String> {
+    // Sole source: student_github_identity (resolver-derived from task-PR
+    // evidence). TrackDev's `students.github_login` is no longer trusted.
+    // Pick the highest-weight, then highest-confidence login for the
+    // student; ties break alphabetically for determinism.
+    if let Ok(login) = conn.query_row(
+        "SELECT identity_value FROM student_github_identity
+         WHERE student_id = ? AND identity_kind = 'login'
+         ORDER BY weight DESC, confidence DESC, identity_value
+         LIMIT 1",
+        [student_id],
+        |r| r.get::<_, String>(0),
+    ) {
+        return normalize_github_login(&login);
     }
 
+    // Cold-start tie-over for fresh DBs where PRs are collected but the
+    // resolver has not yet run: most-common github_author_login from PRs
+    // whose author_id matches this student.
     conn.query_row(
         "SELECT github_author_login
          FROM pull_requests
@@ -945,18 +954,13 @@ fn humanize_owner_csv(conn: &Connection, owners_csv: &str) -> String {
 }
 
 fn humanize_owner(conn: &Connection, owner: &str) -> String {
-    if let Ok((full_name, github_login)) = conn.query_row(
-        "SELECT full_name, github_login FROM students WHERE id = ?",
+    if let Ok(full_name) = conn.query_row(
+        "SELECT full_name FROM students WHERE id = ?",
         [owner],
-        |r| {
-            Ok((
-                r.get::<_, Option<String>>(0)?,
-                r.get::<_, Option<String>>(1)?,
-            ))
-        },
+        |r| r.get::<_, Option<String>>(0),
     ) {
         let name = full_name.unwrap_or_default();
-        let login = github_login.and_then(|l| normalize_github_login(&l));
+        let login = effective_github_login(conn, owner);
         return match (name.is_empty(), login) {
             (false, Some(l)) => format!("{} ({})", name, l),
             (false, None) => name,
@@ -1592,7 +1596,7 @@ fn write_section_b(
     let pr_density_mad = sprint_grader_core::stats::mad(&pr_densities);
 
     let mut stmt = conn.prepare(
-        "SELECT id, full_name, github_login FROM students
+        "SELECT id, full_name FROM students
          WHERE team_project_id = ? ORDER BY full_name",
     )?;
     let students: Vec<(String, String, Option<String>)> = stmt
@@ -1600,15 +1604,15 @@ fn write_section_b(
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(2)?,
+                None::<String>,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
     let students: Vec<(String, String, Option<String>)> = students
         .into_iter()
-        .map(|(sid, name, github)| {
-            let github = effective_github_login(conn, &sid, github.as_deref());
+        .map(|(sid, name, _)| {
+            let github = effective_github_login(conn, &sid);
             (sid, name, github)
         })
         .collect();
@@ -3204,33 +3208,25 @@ fn write_team_identity_map_into(
     project_id: i64,
     depth: usize,
 ) -> rusqlite::Result<()> {
-    // Source of truth for resolved identities is `student_github_identity`
-    // (populated by collect::identity_resolver). `github_users` and
-    // `students.github_login` are cold-start fallbacks only — kept here
-    // for the boot path where the resolver hasn't run yet, mirroring
-    // the precedence in survival::blame::build_email_to_student_map.
+    // Sole source of truth for resolved identities is
+    // `student_github_identity` (populated by collect::identity_resolver
+    // from task-PR evidence). TrackDev's `students.github_login` and
+    // `github_users.student_id` are no longer consulted — both were
+    // bootstrapped from unreliable TrackDev profile data.
     //
     // Per kind we pick the heaviest-weight, then highest-confidence row
     // (correlated subquery; six-row teams make cost trivial).
     let mut stmt = conn.prepare(
         "SELECT s.username, s.full_name, s.email,
-                COALESCE(
-                    (SELECT identity_value FROM student_github_identity
-                     WHERE student_id = s.id AND identity_kind = 'login'
-                     ORDER BY weight DESC, confidence DESC, identity_value
-                     LIMIT 1),
-                    gu.login,
-                    s.github_login
-                ),
-                COALESCE(
-                    (SELECT identity_value FROM student_github_identity
-                     WHERE student_id = s.id AND identity_kind = 'email'
-                     ORDER BY weight DESC, confidence DESC, identity_value
-                     LIMIT 1),
-                    gu.email
-                )
+                (SELECT identity_value FROM student_github_identity
+                 WHERE student_id = s.id AND identity_kind = 'login'
+                 ORDER BY weight DESC, confidence DESC, identity_value
+                 LIMIT 1),
+                (SELECT identity_value FROM student_github_identity
+                 WHERE student_id = s.id AND identity_kind = 'email'
+                 ORDER BY weight DESC, confidence DESC, identity_value
+                 LIMIT 1)
          FROM students s
-         LEFT JOIN github_users gu ON gu.student_id = s.id
          WHERE s.team_project_id = ?
          ORDER BY COALESCE(s.full_name, s.username, s.id)",
     )?;
@@ -3784,11 +3780,22 @@ fn write_cumulative_summary(
         })
         .collect();
 
-    // Each student on the project gets one subsection.
+    // Each student on the project gets one subsection. Display name
+    // falls back to the resolver-derived github login (highest weight),
+    // then student id; TrackDev's `students.github_login` is no longer
+    // used as a display fallback.
     let mut stmt = conn.prepare(
-        "SELECT id, COALESCE(full_name, github_login, id)
-         FROM students WHERE team_project_id = ?
-         ORDER BY COALESCE(full_name, github_login, id)",
+        "SELECT s.id,
+                COALESCE(
+                    s.full_name,
+                    (SELECT identity_value FROM student_github_identity
+                     WHERE student_id = s.id AND identity_kind = 'login'
+                     ORDER BY weight DESC, confidence DESC, identity_value
+                     LIMIT 1),
+                    s.id
+                ) AS display_name
+         FROM students s WHERE s.team_project_id = ?
+         ORDER BY display_name",
     )?;
     let students: Vec<(String, String)> = stmt
         .query_map([project_id], |r| {
@@ -4110,6 +4117,11 @@ mod tests {
              INSERT INTO sprints VALUES (11, 1, 'Sprint 2', '2026-03-09', '2026-03-29');
              INSERT INTO students (id, full_name, github_login, team_project_id, email)
                 VALUES ('u1', 'Alice Bob', 'alice-gh', 1, 'a@ex.com');
+             -- Resolver-derived identity (production code reads only this).
+             INSERT INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+                VALUES
+                    ('u1', 'login', 'alice-gh', 1.0, 1.0);
              INSERT INTO student_sprint_metrics
                 (student_id, sprint_id, points_delivered, points_share,
                  weighted_pr_lines, commit_count, files_touched, reviews_given,
@@ -4177,14 +4189,16 @@ mod tests {
     #[test]
     fn team_identity_map_renders_after_h1_before_glossary() {
         // The team identity map must surface the GitHub login + GitHub-side
-        // email resolved by `github_users` for each enrolled student, and
-        // must land directly after the H1 banner — before the glossary so
-        // it's the first section the reader sees.
+        // email from `student_github_identity` (resolver-derived, the sole
+        // source of truth) for each enrolled student, and must land directly
+        // after the H1 banner — before the glossary so it's the first
+        // section the reader sees.
         let conn = mk_conn();
         conn.execute_batch(
             "UPDATE students SET username = 'alice-td' WHERE id = 'u1';
-             INSERT INTO github_users (login, name, email, student_id)
-                VALUES ('alice-gh', 'Alice on GitHub', 'alice@gh.example', 'u1');",
+             INSERT INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+                VALUES ('u1', 'email', 'alice@gh.example', 5.0, 1.0);",
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
@@ -4230,14 +4244,18 @@ mod tests {
         // Regression: pds26-5a had 5/6 teammates resolved in
         // student_github_identity but absent from github_users +
         // students.github_login. The renderer was silently rendering
-        // them as "—". Source-of-truth precedence must be:
-        //   1. student_github_identity (resolver-fed)
-        //   2. github_users           (cold-start backstop)
-        //   3. students.github_login  (cold-start backstop)
+        // them as "—". The team identity map is now sourced solely from
+        // `student_github_identity` (resolver-fed); `github_users` and
+        // `students.github_login` are no longer consulted.
         let conn = mk_conn();
-        // Wipe the cold-start tables so this test exercises *only* the
-        // resolver-fed path. Then seed a high-weight login + email row
-        // for u1 in student_github_identity.
+        // Wipe the now-irrelevant cold-start tables to make it explicit
+        // that the resolver-fed path is the only one read. Then seed a
+        // high-weight login + email row for u1 in student_github_identity,
+        // overriding the default identity row from `mk_conn`.
+        conn.execute_batch(
+            "DELETE FROM student_github_identity WHERE student_id = 'u1';",
+        )
+        .unwrap();
         conn.execute_batch(
             "UPDATE students SET github_login = NULL WHERE id = 'u1';
              DELETE FROM github_users;
@@ -4516,6 +4534,9 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO students (id, full_name, github_login, team_project_id, email)
                 VALUES ('uuid-bob', 'Bob C', 'bob-gh', 1, 'b@ex.com');
+             INSERT INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+                VALUES ('uuid-bob', 'login', 'bob-gh', 1.0, 1.0);
              INSERT INTO team_sprint_ownership (project_id, sprint_id, truck_factor, owners_csv)
                 VALUES (1, 10, 2, 'u1,uuid-bob');",
         )
@@ -4544,9 +4565,11 @@ mod tests {
         // The per-file treemap was removed because realistic file counts make
         // it unreadable; only the truck-factor headline survives.
         conn.execute_batch(
-            "INSERT INTO github_users (login, student_id) VALUES ('alice-gh', 'u1');
-             INSERT INTO students (id, full_name, github_login, team_project_id, email)
+            "INSERT INTO students (id, full_name, github_login, team_project_id, email)
                 VALUES ('u2', 'Bob C', 'bob-gh', 1, 'b@ex.com');
+             INSERT INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+                VALUES ('u2', 'login', 'bob-gh', 1.0, 1.0);
              INSERT INTO team_sprint_ownership (project_id, sprint_id, truck_factor, owners_csv)
                 VALUES (1, 10, 2, 'u1,u2');",
         )

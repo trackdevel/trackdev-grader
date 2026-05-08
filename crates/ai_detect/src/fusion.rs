@@ -681,9 +681,15 @@ pub fn attribute_to_students(
                 continue;
             }
             let Some(login) = login_opt else { continue };
+            // Resolve login → student via student_github_identity
+            // (resolver-derived). TrackDev's `students.github_login` is
+            // no longer trusted as a source for this mapping.
             let resolved: Option<String> = conn
                 .query_row(
-                    "SELECT id FROM students WHERE LOWER(github_login) = LOWER(?)",
+                    "SELECT student_id FROM student_github_identity
+                     WHERE identity_kind = 'login' AND identity_value = LOWER(?)
+                     ORDER BY weight DESC, confidence DESC, student_id
+                     LIMIT 1",
                     [&login],
                     |r| r.get::<_, String>(0),
                 )

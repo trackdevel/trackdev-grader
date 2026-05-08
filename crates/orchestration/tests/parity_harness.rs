@@ -40,6 +40,16 @@ const SEED_SQL: &str =
                     ('u2', 'Bob Ng',     'bob-gh',   1, 'bob@example.com'),
                     ('u3', 'Cara Park',  'cara-gh',  1, 'cara@example.com'),
                     ('u4', 'Dani Sole',  'dani-gh',  1, 'dani@example.com');
+             -- Resolver-derived identities (the only mapping production code
+             -- now reads). `students.github_login` is kept for Python-ref
+             -- schema parity but no longer trusted at runtime.
+             INSERT INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+                VALUES
+                    ('u1', 'login', 'alice-gh', 1.0, 1.0),
+                    ('u2', 'login', 'bob-gh',   1.0, 1.0),
+                    ('u3', 'login', 'cara-gh',  1.0, 1.0),
+                    ('u4', 'login', 'dani-gh',  1.0, 1.0);
              INSERT INTO tasks
                 (id, task_key, name, type, status, estimation_points,
                  assignee_id, sprint_id, parent_task_id)

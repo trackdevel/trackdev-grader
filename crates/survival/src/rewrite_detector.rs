@@ -144,12 +144,15 @@ pub fn detect_rewrites(
 }
 
 fn login_to_student_id(conn: &Connection, github_login: &str) -> rusqlite::Result<Option<String>> {
-    let row = conn
+    let needle = github_login.to_lowercase();
+    Ok(conn
         .query_row(
-            "SELECT id FROM students WHERE github_login = ?",
-            [github_login],
+            "SELECT student_id FROM student_github_identity
+             WHERE identity_kind = 'login' AND identity_value = ?
+             ORDER BY weight DESC, confidence DESC, student_id
+             LIMIT 1",
+            [&needle],
             |r| r.get::<_, String>(0),
         )
-        .ok();
-    Ok(row)
+        .ok())
 }

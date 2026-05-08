@@ -650,8 +650,10 @@ pub fn build_student_baselines(
     project_id: i64,
     baseline_sprint_id: i64,
 ) -> rusqlite::Result<()> {
-    // Join fingerprints (author attribution) + file_style_features + students.
-    // The schema columns here must match Python's stylometry.build_student_baselines.
+    // Join fingerprints (author attribution) + file_style_features.
+    // The blame_author_login → student mapping comes from
+    // student_github_identity (resolver-derived from task-PR evidence) —
+    // TrackDev's `students.github_login` is no longer trusted.
     let mut stmt = conn.prepare(
         "SELECT DISTINCT f.blame_author_login,
              fsf.file_path, fsf.repo_name,
@@ -669,7 +671,10 @@ pub fn build_student_baselines(
            ON fsf.file_path = f.file_path
           AND fsf.repo_name = f.repo_full_name
           AND fsf.sprint_id = ?
-         JOIN students s ON s.github_login = f.blame_author_login
+         JOIN student_github_identity sgi
+              ON sgi.identity_kind = 'login'
+             AND sgi.identity_value = LOWER(f.blame_author_login)
+         JOIN students s ON s.id = sgi.student_id
          WHERE f.sprint_id = ? AND s.team_project_id = ?",
     )?;
 
@@ -725,13 +730,21 @@ pub fn build_student_baselines(
         student_files.entry(login).or_default().push((vals, alpha));
     }
 
-    // Resolve login → student_id (filter to this project).
+    // Resolve login → student_id via student_github_identity (filter to
+    // this project). The identity table stores values lowercased.
     let mut login_to_student: HashMap<String, String> = HashMap::new();
     for login in student_files.keys() {
+        let needle = login.to_lowercase();
         let id: Option<String> = conn
             .query_row(
-                "SELECT id FROM students WHERE github_login = ? AND team_project_id = ?",
-                params![login, project_id],
+                "SELECT sgi.student_id
+                 FROM student_github_identity sgi
+                 JOIN students s ON s.id = sgi.student_id
+                 WHERE sgi.identity_kind = 'login' AND sgi.identity_value = ?
+                   AND s.team_project_id = ?
+                 ORDER BY sgi.weight DESC, sgi.confidence DESC, sgi.student_id
+                 LIMIT 1",
+                params![needle, project_id],
                 |r| r.get::<_, String>(0),
             )
             .ok();

@@ -23,28 +23,37 @@ fn build_review_graph(
     project_id: i64,
     sprint_id: i64,
 ) -> rusqlite::Result<ReviewGraph> {
-    // Team members (with github_login).
-    let mut stmt =
-        conn.prepare("SELECT id, github_login FROM students WHERE team_project_id = ?")?;
-    let members: Vec<(String, Option<String>)> = stmt
-        .query_map([project_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })?
+    // Team members. Login mapping comes from `student_github_identity`
+    // (resolver-derived from task-PR evidence) — TrackDev's stored
+    // `students.github_login` is no longer trusted.
+    let mut stmt = conn.prepare("SELECT id FROM students WHERE team_project_id = ?")?;
+    let members: Vec<String> = stmt
+        .query_map([project_id], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
     let mut graph: DiGraph<String, i64> = DiGraph::new();
     let mut node_idx: HashMap<String, NodeIndex> = HashMap::new();
     let mut nodes_vec: Vec<String> = Vec::new();
-    for (id, _) in &members {
+    for id in &members {
         let idx = graph.add_node(id.clone());
         node_idx.insert(id.clone(), idx);
         nodes_vec.push(id.clone());
     }
-    let login_to_id: HashMap<String, String> = members
-        .iter()
-        .filter_map(|(id, login)| login.as_ref().map(|l| (l.to_lowercase(), id.clone())))
-        .collect();
+    let member_set: HashSet<&String> = members.iter().collect();
+    let mut login_to_id: HashMap<String, String> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT identity_value, student_id FROM student_github_identity
+             WHERE identity_kind = 'login'",
+        )?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (login, sid) = row?;
+            if member_set.contains(&sid) {
+                login_to_id.insert(login, sid);
+            }
+        }
+    }
 
     let mut stmt = conn.prepare(
         "SELECT rv.reviewer_login, pr.author_id

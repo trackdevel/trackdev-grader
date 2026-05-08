@@ -34,7 +34,14 @@ fn seed_two_team_fixture(conn: &Connection) {
             ('alice', 'Alice Adams',  'alice-gh',  1),
             ('bob',   'Bob Brown',    'bob-gh',    1),
             ('carol', 'Carol Carter', 'carol-gh',  1),
-            ('dave',  'Dave Davis',   'dave-gh',   2);",
+            ('dave',  'Dave Davis',   'dave-gh',   2);
+         -- Resolver-derived identities (production code reads only these).
+         INSERT INTO student_github_identity
+            (student_id, identity_kind, identity_value, weight, confidence) VALUES
+            ('alice', 'login', 'alice-gh', 1.0, 1.0),
+            ('bob',   'login', 'bob-gh',   1.0, 1.0),
+            ('carol', 'login', 'carol-gh', 1.0, 1.0),
+            ('dave',  'login', 'dave-gh',  1.0, 1.0);",
     )
     .unwrap();
 }

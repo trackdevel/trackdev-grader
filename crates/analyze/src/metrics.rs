@@ -217,8 +217,10 @@ pub fn compute_metrics_for_sprint_id(
         let reviews_given: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM pr_reviews r
-                 JOIN students s ON LOWER(s.github_login) = LOWER(r.reviewer_login)
-                 WHERE s.id = ? AND r.pr_id IN (
+                 JOIN student_github_identity sgi
+                      ON sgi.identity_kind = 'login'
+                     AND sgi.identity_value = LOWER(r.reviewer_login)
+                 WHERE sgi.student_id = ? AND r.pr_id IN (
                      SELECT DISTINCT pr.id FROM pull_requests pr
                      JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
                      JOIN tasks t ON t.id = tpr.task_id

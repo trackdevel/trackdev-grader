@@ -216,6 +216,15 @@ pub fn seed_student(conn: &Connection, id: &str) -> Result<()> {
          VALUES (?, ?, ?, ?, ?)",
         params![id, id, id, id, ids::PROJECT_ID],
     )?;
+    // Register the (login=id) identity in student_github_identity so blame
+    // / reviewer / contribution attribution finds it. TrackDev's stored
+    // github_login is no longer trusted by production code.
+    conn.execute(
+        "INSERT OR IGNORE INTO student_github_identity
+            (student_id, identity_kind, identity_value, weight, confidence)
+         VALUES (?, 'login', LOWER(?), 1.0, 1.0)",
+        params![id, id],
+    )?;
     Ok(())
 }
 
