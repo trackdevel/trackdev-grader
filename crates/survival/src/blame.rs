@@ -254,13 +254,14 @@ pub fn build_commit_to_pr_map(conn: &Connection) -> rusqlite::Result<CommitPrMap
 /// → (student_id, github_login).
 pub type EmailStudentMap = HashMap<String, (String, Option<String>)>;
 
+/// Build the blame-side identity map. **Sole source of truth:**
+/// `student_github_identity` — the table populated by
+/// `collect::identity_resolver` from task-PR evidence. TrackDev's
+/// `students.github_login` is no longer consulted here (it is unreliable
+/// — many students leave it blank or fill it incorrectly).
 pub fn build_email_to_student_map(conn: &Connection) -> rusqlite::Result<EmailStudentMap> {
     let mut out: EmailStudentMap = HashMap::new();
 
-    // Computed task-assignee-derived mapping is the authoritative source.
-    // It writes (login, email) → student_id pairs whose confidence cleared
-    // the resolver's threshold; ambiguous identities are intentionally
-    // absent here and live in identity_resolution_warnings instead.
     let mut stmt = conn.prepare(
         "SELECT student_id, identity_kind, identity_value
          FROM student_github_identity",
@@ -281,26 +282,6 @@ pub fn build_email_to_student_map(conn: &Connection) -> rusqlite::Result<EmailSt
         if kind == "login" {
             out.entry(format!("{key}@users.noreply.github.com"))
                 .or_insert_with(|| (student_id.clone(), login.clone()));
-        }
-    }
-    drop(stmt);
-
-    // Backstop: students.github_login is treated as a self-declared identity
-    // claim. Used only when the resolver hasn't already mapped the same
-    // value (or'_insert_with). Useful for cold-start runs where no PRs have
-    // been collected yet.
-    let mut stmt = conn.prepare("SELECT id, github_login FROM students")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-    })?;
-    for r in rows {
-        let (student_id, gh_login) = r?;
-        if let Some(login) = gh_login.as_ref() {
-            let lower = login.to_lowercase();
-            out.entry(lower.clone())
-                .or_insert_with(|| (student_id.clone(), Some(login.clone())));
-            out.entry(format!("{lower}@users.noreply.github.com"))
-                .or_insert_with(|| (student_id.clone(), Some(login.clone())));
         }
     }
 
