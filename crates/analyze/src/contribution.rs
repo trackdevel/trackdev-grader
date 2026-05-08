@@ -145,20 +145,25 @@ fn gather_signals(
     }
 
     // --- login → student_id map (shared by review + process) ---
+    // Built from student_github_identity (the resolver-derived mapping
+    // from task-PR evidence). TrackDev's `students.github_login` is no
+    // longer trusted as a source for this mapping.
     let mut login_to_sid: HashMap<String, String> = HashMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT id, github_login FROM students WHERE team_project_id IN
-                          (SELECT project_id FROM sprints WHERE id = ?)",
+            "SELECT sgi.identity_value, sgi.student_id
+             FROM student_github_identity sgi
+             JOIN students s ON s.id = sgi.student_id
+             WHERE sgi.identity_kind = 'login'
+               AND s.team_project_id IN
+                   (SELECT project_id FROM sprints WHERE id = ?)",
         )?;
         for row in stmt.query_map([sprint_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })? {
-            let (sid, login) = row?;
-            if let Some(login) = login {
-                if member_set.contains(sid.as_str()) {
-                    login_to_sid.insert(login.to_lowercase(), sid);
-                }
+            let (login, sid) = row?;
+            if member_set.contains(sid.as_str()) {
+                login_to_sid.insert(login.to_lowercase(), sid);
             }
         }
         drop(stmt);
