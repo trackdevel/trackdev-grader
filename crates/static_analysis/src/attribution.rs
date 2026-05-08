@@ -244,6 +244,19 @@ mod tests {
             [],
         )
         .unwrap();
+        // Production code reads identities from `student_github_identity`
+        // only; TrackDev's `students.github_login` / `students.email` are
+        // no longer trusted as attribution sources.
+        conn.execute(
+            "INSERT OR IGNORE INTO student_github_identity
+                (student_id, identity_kind, identity_value, weight, confidence)
+             VALUES ('alice', 'login', 'alice', 1.0, 1.0),
+                    ('alice', 'email', 'alice@example.com', 1.0, 1.0),
+                    ('bob',   'login', 'bob',   1.0, 1.0),
+                    ('bob',   'email', 'bob@example.com',   1.0, 1.0)",
+            [],
+        )
+        .unwrap();
     }
 
     fn insert_finding(
