@@ -68,29 +68,23 @@ pub fn compute_temporal_metrics(
     // Python's `(end - start).days` applies the same floor-divide semantics.
     let sprint_days = ((end - start).num_seconds().div_euclid(86_400).max(1)) as usize;
 
-    let gh_login: Option<String> = conn
-        .query_row(
-            "SELECT github_login FROM students WHERE id = ?",
-            [student_id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten();
-    let gh_login = match gh_login {
-        Some(l) if !l.is_empty() => l,
-        _ => return Ok(()),
-    };
-
+    // Match commits to the student via `student_github_identity` (resolved
+    // from task-PR evidence). TrackDev's `students.github_login` is no
+    // longer trusted, so a student with no resolved identity yet simply has
+    // no attributed commits — the function continues and writes a zero row.
     let mut stmt = conn.prepare(
         "SELECT pc.timestamp FROM pr_commits pc
          JOIN pull_requests pr ON pr.id = pc.pr_id
          JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
          JOIN tasks t ON t.id = tpr.task_id
+         JOIN student_github_identity sgi
+              ON sgi.identity_kind = 'login'
+             AND sgi.identity_value = LOWER(pc.author_login)
          WHERE t.sprint_id = ? AND t.type != 'USER_STORY'
-           AND LOWER(pc.author_login) = LOWER(?)",
+           AND sgi.student_id = ?",
     )?;
     let rows: Vec<String> = stmt
-        .query_map(params![sprint_id, gh_login], |r| {
+        .query_map(params![sprint_id, student_id], |r| {
             r.get::<_, Option<String>>(0).map(|o| o.unwrap_or_default())
         })?
         .collect::<rusqlite::Result<_>>()?;
