@@ -637,9 +637,15 @@ fn author_mismatch(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Fl
         let mut pr_author_login = gh_author;
         if pr_author_login.is_none() {
             if let Some(aid) = &author_id {
+                // Resolve via student_github_identity (the resolver-derived
+                // mapping from task-PR evidence). TrackDev's stored
+                // `students.github_login` is no longer trusted.
                 pr_author_login = conn
                     .query_row(
-                        "SELECT github_login FROM students WHERE id = ?",
+                        "SELECT identity_value FROM student_github_identity
+                         WHERE student_id = ? AND identity_kind = 'login'
+                         ORDER BY weight DESC, confidence DESC, identity_value
+                         LIMIT 1",
                         [aid],
                         |r| r.get::<_, Option<String>>(0),
                     )
@@ -803,15 +809,12 @@ fn foreign_merge(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag
 
 fn unknown_contributor(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
     use std::collections::{BTreeMap, BTreeSet};
-    // Known logins.
+    // Known logins come from the resolver-derived mapping (sole source of
+    // truth). TrackDev's `students.github_login` is no longer consulted.
     let mut known: BTreeSet<String> = BTreeSet::new();
-    let mut stmt =
-        conn.prepare("SELECT github_login FROM students WHERE github_login IS NOT NULL")?;
-    for s in stmt.query_map([], |r| r.get::<_, String>(0))?.flatten() {
-        known.insert(s.to_lowercase());
-    }
-    drop(stmt);
-    let mut stmt = conn.prepare("SELECT login FROM github_users WHERE student_id IS NOT NULL")?;
+    let mut stmt = conn.prepare(
+        "SELECT identity_value FROM student_github_identity WHERE identity_kind = 'login'",
+    )?;
     for s in stmt.query_map([], |r| r.get::<_, String>(0))?.flatten() {
         known.insert(s.to_lowercase());
     }
@@ -1475,13 +1478,14 @@ fn review_evidence_for_member(
         "SELECT DISTINCT rv.pr_id, rv.state, rv.submitted_at,
                 pr.pr_number, pr.repo_full_name, pr.title, pr.url,
                 pr.author_id, plm.lat, plm.lar, plm.ls, plm.ld
-         FROM students s
-         JOIN pr_reviews rv ON LOWER(rv.reviewer_login) = LOWER(s.github_login)
+         FROM student_github_identity sgi
+         JOIN pr_reviews rv ON LOWER(rv.reviewer_login) = sgi.identity_value
          JOIN pull_requests pr ON pr.id = rv.pr_id
          JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
          JOIN tasks t ON t.id = tpr.task_id
          LEFT JOIN pr_line_metrics plm ON plm.pr_id = pr.id AND plm.sprint_id = ?
-         WHERE s.id = ? AND t.sprint_id = ? AND t.type != 'USER_STORY'
+         WHERE sgi.identity_kind = 'login' AND sgi.student_id = ?
+           AND t.sprint_id = ? AND t.type != 'USER_STORY'
          ORDER BY rv.submitted_at, rv.pr_id",
     )?;
     let rows: Vec<FlagDetailRow> = stmt
@@ -1560,12 +1564,14 @@ fn team_inequality_member_value(
         "reviews_given" => conn
             .query_row(
                 "SELECT COUNT(DISTINCT rv.pr_id || rv.submitted_at)
-                 FROM students s
-                 JOIN pr_reviews rv ON LOWER(rv.reviewer_login) = LOWER(s.github_login)
+                 FROM student_github_identity sgi
+                 JOIN students s ON s.id = sgi.student_id
+                 JOIN pr_reviews rv ON LOWER(rv.reviewer_login) = sgi.identity_value
                  JOIN pull_requests pr ON pr.id = rv.pr_id
                  JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
                  JOIN tasks t ON t.id = tpr.task_id
-                 WHERE t.sprint_id = ? AND t.type != 'USER_STORY'
+                 WHERE sgi.identity_kind = 'login'
+                   AND t.sprint_id = ? AND t.type != 'USER_STORY'
                    AND s.id = ? AND s.team_project_id = ?",
                 params![sprint_id, student_id, project_id],
                 |r| r.get::<_, i64>(0),
@@ -1938,8 +1944,12 @@ fn approved_broken_pr(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec
         for rid in reviewers {
             let approved: Option<i64> = conn
                 .query_row(
-                    "SELECT 1 FROM pr_reviews WHERE pr_id = ? AND state = 'APPROVED'
-                     AND reviewer_login IN (SELECT github_login FROM students WHERE id = ?)",
+                    "SELECT 1 FROM pr_reviews
+                     WHERE pr_id = ? AND state = 'APPROVED'
+                       AND LOWER(reviewer_login) IN (
+                           SELECT identity_value FROM student_github_identity
+                           WHERE student_id = ? AND identity_kind = 'login'
+                       )",
                     params![&pr_id, &rid],
                     |r| r.get::<_, i64>(0),
                 )
