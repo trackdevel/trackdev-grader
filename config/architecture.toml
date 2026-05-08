@@ -22,7 +22,7 @@ severity = "WARNING"
 
 # --- Layered model for the Spring backend -----------------------------
 #
-# Mirrors the rubric in `config/architecture.md`:
+# Mirrors the Spring rubric in `config/architecture-spring.md`:
 #   presentation  →  application  →  infrastructure  →  domain
 #
 # Notably:
@@ -57,7 +57,7 @@ may_depend_on = ["application", "domain"]
 
 # --- Forbidden imports --------------------------------------------------
 #
-# Per `architecture.md`: domain/model classes must not depend on Spring
+# Per `architecture-spring.md`: domain/model classes must not depend on Spring
 # web, Spring data, or `javax.servlet.*`. JPA annotations on domain
 # entities ARE acceptable in this course (the rubric does not forbid
 # them), so there is no `domain-no-jpa` block.
