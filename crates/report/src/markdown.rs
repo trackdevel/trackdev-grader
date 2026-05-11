@@ -21,9 +21,14 @@ use rusqlite::{params_from_iter, types::Value, Connection};
 use sprint_grader_core::time::parse_iso;
 use tracing::info;
 
+use sprint_grader_core::finding::{
+    AuthorAttribution, LineSpan, RuleFinding, RuleKind, Severity as CoreSeverity,
+};
+
 use crate::charts::{html_escape, sparkline_svg, stacked_bars_svg, StackedRow};
 use crate::flag_details::{enrich_flag_details, render_flag_details, render_flag_severity};
-use crate::url::{github_blob_url, line_anchor, line_suffix, span_from_db};
+use crate::render_finding::render_attributed_finding;
+use crate::url::{github_blob_url, line_anchor, span_from_db};
 
 /// Render an ISO-8601 / minute-precision timestamp as a Catalan-academic
 /// human form anchored to UDG's local time (Europe/Madrid). Falls back to
@@ -438,7 +443,7 @@ fn pr_stmts_for_team(
 // are deferred to the next sprint's report. The predicate is inlined into
 // each SQL string below so every report query shares the same definition.
 
-fn md_escape(s: &str) -> String {
+pub(crate) fn md_escape(s: &str) -> String {
     // Minimal escaping for table cells: pipes break tables, newlines break rows.
     s.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
@@ -1281,7 +1286,7 @@ fn humanize_unknown_rule_key(rule: &str) -> String {
 ///    machine key appended in backticks for traceability.
 /// 3. Anything else → a best-effort humanized form of the key, also
 ///    with the key appended in backticks.
-fn humanize_rule_name(rule: &str) -> String {
+pub(crate) fn humanize_rule_name(rule: &str) -> String {
     if let Some((from, to)) = rule.split_once("->!") {
         return format!(
             "**{}** must not depend on **{}**",
@@ -1383,7 +1388,7 @@ fn architecture_violations_per_student(
 /// any bullet without conditional spacing. Returns an empty string when
 /// `weight ≤ 0` (which we already filter out at the SQL layer, but this
 /// keeps the helper safe to call unconditionally).
-fn format_blame_weight_suffix(weight: f64) -> String {
+pub(crate) fn format_blame_weight_suffix(weight: f64) -> String {
     if weight <= 0.0 {
         return String::new();
     }
@@ -2057,41 +2062,29 @@ fn write_student_architecture_block(buf: &mut String, violations: &[AttributedAr
     });
 
     for v in sorted {
+        // The bullet's `:basename` label keeps the legacy `md_escape`
+        // pass for parity with pre-W2.T5 output. We pre-escape here
+        // and feed the result as a label_override so the unified
+        // renderer doesn't re-escape it.
         let basename = v.file_path.rsplit('/').next().unwrap_or(&v.file_path);
-        let label = format!("`{}`", md_escape(basename));
-        let span = span_from_db(v.start_line, v.end_line);
-        let suffix = line_suffix(span);
-        let anchor = line_anchor(span);
-        let url = github_blob_url(&v.repo_full_qualified, "HEAD", &v.file_path, None);
-        let file_cell = if !url.is_empty() {
-            format!(
-                "[{}{}]({}{} \"{}\")",
-                label,
-                suffix,
-                url,
-                anchor,
-                md_escape(&v.file_path)
-            )
-        } else {
-            format!("{}{}", label, suffix)
+        let label_override = format!("`{}`", md_escape(basename));
+        let finding = RuleFinding {
+            rule_id: v.rule_name.clone(),
+            kind: RuleKind::Architecture,
+            severity: parse_severity_from_str(&v.severity),
+            repo_full_name: v.repo_full_qualified.clone(),
+            file_repo_relative: v.file_path.clone(),
+            span: build_line_span(v.start_line, v.end_line),
+            evidence: v.explanation.clone().unwrap_or_default(),
+            extra: Some(v.offending_import.clone()),
         };
-        let weight_suffix = format_blame_weight_suffix(v.weight);
-        let _ = writeln!(
-            buf,
-            "- {} — {} _({})_{}",
-            file_cell,
-            humanize_rule_name(&v.rule_name),
-            v.severity.to_lowercase(),
-            weight_suffix
-        );
-        if let Some(prose) = v
-            .explanation
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let _ = writeln!(buf, "  - {}", md_escape(prose));
-        }
+        let attr = AuthorAttribution::new("placeholder", v.weight);
+        buf.push_str(&render_attributed_finding(
+            &finding,
+            &v.repo_full_qualified,
+            Some(&label_override),
+            Some(&attr),
+        ));
     }
     buf.push('\n');
 }
@@ -2194,28 +2187,30 @@ fn write_student_static_analysis_block(buf: &mut String, findings: &[SaFinding],
     let _ = top_n;
     let _ = i18n::MORE_LABEL;
     for f in findings.iter() {
+        // Static-analysis bullets use the basename verbatim (no
+        // md_escape pass, matching the legacy renderer).
         let basename = f.file_path.rsplit('/').next().unwrap_or(&f.file_path);
-        let label = format!("`{}`", basename);
-        let span = span_from_db(f.start_line, f.end_line);
-        let suffix = line_suffix(span);
-        let anchor = line_anchor(span);
-        let url = github_blob_url(&f.repo_full_name, "HEAD", &f.file_path, None);
-        let file_cell = if !url.is_empty() {
-            format!("[{}{}]({}{})", label, suffix, url, anchor)
-        } else {
-            format!("{}{}", label, suffix)
+        let label_override = format!("`{}`", basename);
+        let finding = RuleFinding {
+            // Namespaced rule_id matches `Finding::into_rule_finding`
+            // upstream so the unified renderer's static-analysis path
+            // emits `pmd:UnusedPrivateMethod` verbatim.
+            rule_id: format!("{}:{}", f.analyzer, f.rule_id),
+            kind: RuleKind::StaticAnalysis,
+            severity: parse_severity_from_str(&f.severity),
+            repo_full_name: f.repo_full_name.clone(),
+            file_repo_relative: f.file_path.clone(),
+            span: build_line_span(f.start_line, f.end_line),
+            evidence: f.message.clone(),
+            extra: None,
         };
-        let weight_suffix = format_blame_weight_suffix(f.weight);
-        let _ = writeln!(
-            buf,
-            "- {} — `{}:{}` · _{}_ — {}{}",
-            file_cell,
-            f.analyzer,
-            f.rule_id,
-            f.severity.to_lowercase(),
-            md_escape(f.message.lines().next().unwrap_or("")),
-            weight_suffix,
-        );
+        let attr = AuthorAttribution::new("placeholder", f.weight);
+        buf.push_str(&render_attributed_finding(
+            &finding,
+            &f.repo_full_name,
+            Some(&label_override),
+            Some(&attr),
+        ));
     }
     buf.push('\n');
 }
@@ -2299,8 +2294,6 @@ fn write_student_complexity_block(
     findings: &[ComplexityFinding],
     qualified_by_basename: &HashMap<String, String>,
 ) {
-    use sprint_grader_quality::i18n as cxi18n;
-
     if findings.is_empty() {
         return;
     }
@@ -2332,42 +2325,28 @@ fn write_student_complexity_block(
             .filter(|s| !s.is_empty() && *s != "<unknown>")
             .map(|c| format!("{c}."))
             .unwrap_or_default();
-        let label = format!("`{}{}()`", class_prefix, f.method_name);
-        let span = span_from_db(Some(f.start_line), Some(f.end_line));
-        let suffix = line_suffix(span);
-        let anchor = line_anchor(span);
-        let url = github_blob_url(&repo, "HEAD", &f.file_path, None);
-        let file_cell = if !url.is_empty() {
-            format!(
-                "[{}{}]({}{} \"{}\")",
-                label,
-                suffix,
-                url,
-                anchor,
-                md_escape(&f.file_path)
-            )
-        } else {
-            format!("{}{}", label, suffix)
+        let label_override = format!("`{}{}()`", class_prefix, f.method_name);
+        let extra = match (f.measured_value, f.threshold) {
+            (Some(m), Some(t)) => Some(format!("{} > {}", m, t)),
+            _ => None,
         };
-        let prose = cxi18n::rule_prose(&f.rule_key);
-        let measured_tail = match (f.measured_value, f.threshold) {
-            (Some(m), Some(t)) => format!(
-                " ({} > {})",
-                round_to_int_if_integer(m),
-                round_to_int_if_integer(t)
-            ),
-            _ => String::new(),
+        let finding = RuleFinding {
+            rule_id: f.rule_key.clone(),
+            kind: RuleKind::Complexity,
+            severity: parse_severity_from_str(&f.severity),
+            repo_full_name: repo.clone(),
+            file_repo_relative: f.file_path.clone(),
+            span: build_line_span(Some(f.start_line), Some(f.end_line)),
+            evidence: String::new(),
+            extra,
         };
-        let weight_suffix = format_blame_weight_suffix(f.weight);
-        let _ = writeln!(
-            buf,
-            "- {} — {} _({})_{}{}",
-            file_cell,
-            prose,
-            f.severity.to_lowercase(),
-            measured_tail,
-            weight_suffix,
-        );
+        let attr = AuthorAttribution::new("placeholder", f.weight);
+        buf.push_str(&render_attributed_finding(
+            &finding,
+            &repo,
+            Some(&label_override),
+            Some(&attr),
+        ));
     }
     buf.push('\n');
 }
@@ -2587,7 +2566,31 @@ fn write_section_complexity_attribution(
 
 /// Render a metric value as an integer when it has no fractional part,
 /// otherwise `:.1`.
-fn round_to_int_if_integer(value: f64) -> String {
+/// Bridge between the DB-row severity strings ("CRITICAL", "WARNING",
+/// "INFO") and `sprint_grader_core::finding::Severity`. Used by the
+/// per-block writers when packaging DB rows into `RuleFinding`s for
+/// the unified renderer (W2.T5).
+fn parse_severity_from_str(s: &str) -> CoreSeverity {
+    match s.to_ascii_uppercase().as_str() {
+        "CRITICAL" | "ERROR" => CoreSeverity::Critical,
+        "INFO" | "INFORMATIONAL" | "NOTICE" => CoreSeverity::Info,
+        _ => CoreSeverity::Warning,
+    }
+}
+
+/// Bridge between the DB-row `(Option<i64>, Option<i64>)` line range
+/// and `sprint_grader_core::finding::LineSpan`. Returns
+/// `LineSpan::single(0)` when both are absent so the renderer's
+/// `bullet_span` guard collapses it to "no line info".
+fn build_line_span(start: Option<i64>, end: Option<i64>) -> LineSpan {
+    match (start, end) {
+        (Some(s), Some(e)) if e > s && s >= 1 && e >= 1 => LineSpan::range(s as u32, e as u32),
+        (Some(s), _) if s >= 1 => LineSpan::single(s as u32),
+        _ => LineSpan::single(0),
+    }
+}
+
+pub(crate) fn round_to_int_if_integer(value: f64) -> String {
     if (value - value.round()).abs() < 1e-9 {
         format!("{}", value as i64)
     } else {
