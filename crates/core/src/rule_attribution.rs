@@ -53,7 +53,7 @@ pub fn attribute(
             .then_with(|| a.student_id.cmp(&b.student_id))
     });
     if !attributions.is_empty() {
-        let total: f32 = attributions.iter().map(|a| a.blame_share).sum();
+        let total: f64 = attributions.iter().map(|a| a.blame_share).sum();
         debug_assert!(
             total <= 1.0 + 0.001,
             "attribution shares must not sum to more than 1.0 (got {total}) for finding {:?}; \
@@ -146,8 +146,7 @@ fn load_architecture(
             // upstream of the SELECT — keep parity here.
             if weight > 0.0 {
                 let last = acc.last_mut().expect("just pushed");
-                last.attributions
-                    .push(AuthorAttribution::new(s, weight as f32));
+                last.attributions.push(AuthorAttribution::new(s, weight));
             }
         }
     }
@@ -222,8 +221,7 @@ fn load_complexity(
         if let (Some(s), Some(weight)) = (sid, w) {
             if weight > 0.0 {
                 let last = acc.last_mut().expect("just pushed");
-                last.attributions
-                    .push(AuthorAttribution::new(s, weight as f32));
+                last.attributions.push(AuthorAttribution::new(s, weight));
             }
         }
     }
@@ -292,8 +290,7 @@ fn load_static_analysis(
         if let (Some(s), Some(weight)) = (sid, w) {
             if weight > 0.0 {
                 let last = acc.last_mut().expect("just pushed");
-                last.attributions
-                    .push(AuthorAttribution::new(s, weight as f32));
+                last.attributions.push(AuthorAttribution::new(s, weight));
             }
         }
     }
@@ -416,7 +413,7 @@ mod tests {
             ],
         );
         assert_eq!(af.attributions.len(), 2);
-        let sum: f32 = af.attributions.iter().map(|a| a.blame_share).sum();
+        let sum: f64 = af.attributions.iter().map(|a| a.blame_share).sum();
         assert!((sum - 0.5).abs() < 1e-6, "partial sum passes through");
     }
 
