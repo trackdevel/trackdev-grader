@@ -16,6 +16,12 @@ pub struct SyncReportsOptions {
     pub today: String,
     pub project_filter: Option<Vec<String>>,
     pub push: bool,
+    /// Skip the TrackDev/GitHub collection pass and the post-collect
+    /// analysis rerun (survival + per-sprint block + trajectory). Use
+    /// when a `run-all` (or `go`) just finished and the DB is already
+    /// fresh — sync-reports then becomes "render REPORT.md and
+    /// optionally push", with no network round-trips.
+    pub skip_collect: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -34,17 +40,24 @@ pub fn sync_reports_through_sprint(
     let db = Database::open(db_path).context("opening grading DB")?;
     db.create_tables().context("schema migration")?;
 
-    // One collection pass — the collector internally walks every sprint with
-    // `start_date <= today` per project. Layer-1/2 PR skips keep it cheap.
-    let collect_opts = CollectOpts {
-        today: opts.today.clone(),
-        project_filter: opts.project_filter.clone(),
-        skip_github: false,
-        skip_repos: false,
-        force_pr_refresh: false,
-        repos_dir: Some(entregues_dir.to_path_buf()),
-    };
-    run_collection(config, &db, &collect_opts).context("collect failed")?;
+    // Default path runs a fresh collection + post-collect analysis
+    // rerun. `skip_collect` short-circuits both — useful right after a
+    // `run-all` / `go` when the DB is already current and you just
+    // want to ship the rendered REPORT.md to teams without paying the
+    // GitHub round-trip again.
+    if !opts.skip_collect {
+        // One collection pass — the collector internally walks every sprint with
+        // `start_date <= today` per project. Layer-1/2 PR skips keep it cheap.
+        let collect_opts = CollectOpts {
+            today: opts.today.clone(),
+            project_filter: opts.project_filter.clone(),
+            skip_github: false,
+            skip_repos: false,
+            force_pr_refresh: false,
+            repos_dir: Some(entregues_dir.to_path_buf()),
+        };
+        run_collection(config, &db, &collect_opts).context("collect failed")?;
+    }
 
     let groups = resolve_all_sprint_tuples(&db, &opts.today, opts.project_filter.as_deref())?;
     if groups.is_empty() {
@@ -56,8 +69,16 @@ pub fn sync_reports_through_sprint(
         .collect();
     drop(db);
 
-    rerun_post_collection_for_sprint_ids(config, db_path, entregues_dir, &flat_sprint_ids, None)
+    if !opts.skip_collect {
+        rerun_post_collection_for_sprint_ids(
+            config,
+            db_path,
+            entregues_dir,
+            &flat_sprint_ids,
+            None,
+        )
         .context("post-collection rerun failed")?;
+    }
 
     let db = Database::open(db_path).context("reopening grading DB")?;
     db.create_tables().context("schema migration")?;
@@ -217,7 +238,7 @@ pub fn repo_has_report_changes(repo_root: &Path, report_paths: &[PathBuf]) -> Re
 /// uncommitted edits or unpushed commits in the clone are intentionally
 /// discarded; the clone is the grader's working area and REPORT.md is
 /// reproducible from the DB on every run.
-fn sync_repo_to_origin_main(repo_root: &Path) -> Result<()> {
+pub(crate) fn sync_repo_to_origin_main(repo_root: &Path) -> Result<()> {
     run_cmd(repo_root, "git", &["fetch", "--quiet", "origin"])
         .with_context(|| format!("git fetch origin failed in {}", repo_root.display()))?;
     run_cmd(repo_root, "git", &["switch", "main"])
