@@ -128,13 +128,14 @@ pub struct ArchitectureConfig {
     /// call (generated code, build outputs, R.java, etc).
     pub llm_skip_globs: Vec<String>,
     /// Number of concurrent judge invocations. The `Config::load` default
-    /// is backend-aware: `claude-cli` defaults to **1** (each worker
-    /// spawns a subprocess and competes for the user's Claude
-    /// subscription quota), while the HTTP-API backends `deepseek-api`
-    /// and `anthropic-api` default to **10** (cheap to fan out). Override
-    /// in `course.toml` to tune for your API plan's rate limit. Direct
-    /// construction via [`ArchitectureConfig::default`] still produces
-    /// `1` — only the toml-loaded path lifts the default.
+    /// is **10** for every backend: `run_llm_review_for_repo` fans out
+    /// the per-file calls through a Rayon pool in the same way for the
+    /// API and CLI judges, and `ClaudeCliJudge::judge` is a stateless
+    /// per-call subprocess that handles concurrent invocations cleanly.
+    /// Override in `course.toml` to throttle (subscription quota, API
+    /// rate limit) or to crank higher. Direct construction via
+    /// [`ArchitectureConfig::default`] still produces `1` — only the
+    /// toml-loaded path lifts the default.
     pub judge_workers: usize,
     /// Per-file judge timeout (seconds). Caps both API calls and CLI
     /// invocations. Default 180.
@@ -682,19 +683,16 @@ fn default_mutation_report_path() -> String {
 /// `"disabled"`; anything else would be silently ignored by the server,
 /// so we reject loudly at config-load instead of at request time. Empty
 /// or missing → `None` (let server pick default).
-/// Backend-aware default for `[architecture] judge_workers` when the
-/// user leaves it unset. HTTP-API backends (`deepseek-api`,
-/// `anthropic-api`) parallelise cheaply, so we default to 10. The
-/// `claude-cli` path spawns a subprocess per worker against a
-/// subscription-rate-limited account, so we keep it at 1. Unknown
-/// backends fall through to 1 — safest until the maintainer wires the
-/// new backend in deliberately.
-fn default_judge_workers_for(judge: &str) -> usize {
-    match judge {
-        "deepseek-api" | "anthropic-api" => 10,
-        _ => 1,
-    }
-}
+/// Default for `[architecture] judge_workers` when the user leaves it
+/// unset. The Rayon fan-out in `run_llm_review_for_repo` is the same
+/// regardless of judge backend, and `ClaudeCliJudge::judge` is a
+/// stateless per-call subprocess that parallelises just as cleanly as
+/// an API call. We therefore use a single uniform default of 10 for
+/// every backend, so switching `judge` between `claude-cli`,
+/// `anthropic-api`, and `deepseek-api` does not silently change the
+/// pipeline's throughput. Override in `course.toml` to throttle for
+/// rate limits (subscription quota, API plan) or to crank higher.
+const DEFAULT_JUDGE_WORKERS: usize = 10;
 
 fn parse_thinking_mode(raw: Option<String>, section: &str) -> Result<Option<String>> {
     let Some(v) = raw else {
@@ -1207,7 +1205,7 @@ impl Config {
                     judge_workers: raw
                         .architecture
                         .judge_workers
-                        .unwrap_or_else(|| default_judge_workers_for(&arch_judge))
+                        .unwrap_or(DEFAULT_JUDGE_WORKERS)
                         .max(1),
                     judge_timeout_seconds: raw
                         .architecture
@@ -1469,9 +1467,14 @@ contribution_imbalance_stddev = 1.5
     }
 
     #[test]
-    fn architecture_judge_workers_default_is_backend_aware() {
+    fn architecture_judge_workers_default_is_uniform_across_backends() {
+        // The per-file judge fan-out runs through the same Rayon pool
+        // regardless of backend, and `ClaudeCliJudge` is a stateless
+        // per-call subprocess that handles concurrency just as cleanly
+        // as an HTTP API call. The default is therefore the same value
+        // (10) for every backend, so swapping `judge` does not silently
+        // change pipeline throughput.
         let tmp = tempfile::tempdir().unwrap();
-        // deepseek-api with no judge_workers override → defaults to 10.
         let body = format!(
             "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nllm_review = true\njudge = \"deepseek-api\"\nmodel_id = \"deepseek-v4-pro\"\n[evaluate]\njudge = \"deepseek-api\"\nmodel_id = \"deepseek-v4-flash\"\n"
         );
@@ -1479,7 +1482,7 @@ contribution_imbalance_stddev = 1.5
         let cfg = Config::load(tmp.path()).expect("load deepseek config");
         assert_eq!(cfg.architecture.judge_workers, 10);
 
-        // claude-cli (the implicit default judge) → still 1.
+        // claude-cli (the implicit default judge) → also 10.
         let tmp2 = tempfile::tempdir().unwrap();
         let body2 = format!(
             "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nmodel_id = \"claude-haiku-4-5-20251001\"\n[evaluate]\nmodel_id = \"claude-haiku-4-5-20251001\"\n"
@@ -1487,7 +1490,7 @@ contribution_imbalance_stddev = 1.5
         write_config(tmp2.path(), &body2);
         let cfg2 = Config::load(tmp2.path()).expect("load claude-cli config");
         assert_eq!(cfg2.architecture.judge, "claude-cli");
-        assert_eq!(cfg2.architecture.judge_workers, 1);
+        assert_eq!(cfg2.architecture.judge_workers, 10);
 
         // Explicit override always wins, regardless of backend.
         let tmp3 = tempfile::tempdir().unwrap();
