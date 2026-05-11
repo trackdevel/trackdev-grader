@@ -88,15 +88,10 @@ type DonePrRow = (
     Option<String>,
 );
 
-type GroupMemberRow = (
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    i64,
-    Option<String>,
-    Option<f64>,
-);
+// (peer-group member row layout used to live here as `GroupMemberRow`;
+// it's now declared locally inside `write_section_c` because the
+// project-scoped flow added a `sprint_name` column that the legacy
+// per-sprint shape didn't carry.)
 
 /// Aggregated per-student LS and LD for the team. LS captures surviving new
 /// code; LD (cosmetic-filtered) captures legitimate cleanup/refactor value
@@ -2722,12 +2717,22 @@ Each row is a hint to either link a task or mark the PR as out-of-scope.\n"
     Ok(())
 }
 
-// ── Section C: peer-group analysis ───────────────────────────────────────────
+// ── Section C: peer-group analysis (project-scoped) ──────────────────────────
+//
+// Reads `task_similarity_groups` rows scoped to a project and renders one
+// H{depth+1} block per peer group. The peer-group analysis itself is now
+// project-global (one pass across every sprint up to today), so this
+// renders once per multi-sprint report at H2 — between the sprint loop
+// and the cumulative summary — instead of repeating per-sprint at H3.
+//
+// Outlier reason is the density discordance (stmts/pt MAD-z) and only
+// that. The historical multi-criterion reason string lit up too many
+// false positives on tasks that were just smaller or larger than
+// typical for their layer.
 
 fn write_section_c(
     buf: &mut String,
     conn: &Connection,
-    sprint_id: i64,
     project_id: i64,
     depth: usize,
 ) -> rusqlite::Result<()> {
@@ -2735,9 +2740,9 @@ fn write_section_c(
     let h3 = "#".repeat(depth + 1);
     let mut stmt = conn.prepare(
         "SELECT group_id, group_label, member_count, median_points,
-                median_ls, median_ls_per_point
+                median_ls, median_ls_per_point, median_stmts_per_point
          FROM task_similarity_groups
-         WHERE sprint_id = ? AND (project_id = ? OR project_id IS NULL)
+         WHERE project_id = ?
          ORDER BY stack, layer, action, group_id",
     )?;
     struct G {
@@ -2747,9 +2752,10 @@ fn write_section_c(
         median_points: Option<f64>,
         median_ls: Option<f64>,
         median_ls_per_point: Option<f64>,
+        median_stmts_per_point: Option<f64>,
     }
     let groups: Vec<G> = stmt
-        .query_map(rusqlite::params![sprint_id, project_id], |r| {
+        .query_map([project_id], |r| {
             Ok(G {
                 group_id: r.get::<_, i64>(0)?,
                 label: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -2757,6 +2763,7 @@ fn write_section_c(
                 median_points: r.get::<_, Option<f64>>(3)?,
                 median_ls: r.get::<_, Option<f64>>(4)?,
                 median_ls_per_point: r.get::<_, Option<f64>>(5)?,
+                median_stmts_per_point: r.get::<_, Option<f64>>(6)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -2765,13 +2772,22 @@ fn write_section_c(
     if groups.is_empty() {
         let _ = writeln!(
             buf,
-            "{} C. Peer-group analysis\n\n_No task similarity groups for this sprint._\n",
+            "{} C. Peer-group analysis\n\n_No peer groups for this project._\n",
             h2
         );
         return Ok(());
     }
 
     let _ = writeln!(buf, "{} C. Peer-group analysis\n", h2);
+    let _ = writeln!(
+        buf,
+        "Tasks across every sprint in the project so far, bucketed by \
+         **stack × layer × action** where the layer comes from the file \
+         paths the linked PRs touched. Outliers are tasks whose \
+         **density** (statements surviving normalised / estimation \
+         points) lies more than the configured MAD-z threshold from the \
+         group's median — informational, not a verdict.\n"
+    );
     for g in &groups {
         let _ = writeln!(
             buf,
@@ -2791,6 +2807,9 @@ fn write_section_c(
         if let Some(v) = g.median_ls_per_point {
             bullets.push(format!("median LS/pt: {}", fmt_f2(v)));
         }
+        if let Some(v) = g.median_stmts_per_point {
+            bullets.push(format!("median Stmts/pt: {}", fmt_f2(v)));
+        }
         if !bullets.is_empty() {
             let _ = writeln!(buf, "_{}_\n", bullets.join(" · "));
         } else {
@@ -2800,15 +2819,27 @@ fn write_section_c(
         let mut stmt = conn.prepare(
             "SELECT t.id, t.task_key, t.name, s.full_name,
                     tgm.is_outlier, tgm.outlier_reason,
-                    t.estimation_points
+                    t.estimation_points,
+                    sp.name AS sprint_name
              FROM task_group_members tgm
              JOIN tasks t ON t.id = tgm.task_id
              LEFT JOIN students s ON s.id = t.assignee_id
+             LEFT JOIN sprints sp ON sp.id = t.sprint_id
              WHERE tgm.group_id = ?
                AND t.type != 'USER_STORY' AND t.status = 'DONE'
-             ORDER BY tgm.is_outlier DESC, t.task_key",
+             ORDER BY tgm.is_outlier DESC, sp.start_date, t.task_key",
         )?;
-        let members: Vec<GroupMemberRow> = stmt
+        type MemberRow = (
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<String>,
+            Option<f64>,
+            Option<String>,
+        );
+        let members: Vec<MemberRow> = stmt
             .query_map([g.group_id], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -2818,13 +2849,20 @@ fn write_section_c(
                     r.get::<_, Option<i64>>(4)?.unwrap_or(0),
                     r.get::<_, Option<String>>(5)?,
                     r.get::<_, Option<f64>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
         drop(stmt);
 
-        push_table_header(buf, &["Task", "Assignee", "Points", "Outlier?", "Reason"]);
-        for (task_id, key, name, assignee, is_outlier, reason, pts) in members {
+        // Cross-sprint scope means the table has to surface which
+        // sprint each task belongs to — without it, peers from S1 and
+        // S3 are indistinguishable in the row order.
+        push_table_header(
+            buf,
+            &["Task", "Assignee", "Sprint", "Points", "Outlier?", "Reason"],
+        );
+        for (task_id, key, name, assignee, is_outlier, reason, pts, sprint) in members {
             let marker = if is_outlier == 1 { "**outlier**" } else { "" };
             let url = trackdev_task_url(task_id);
             let name_part = name.unwrap_or_default();
@@ -2840,9 +2878,10 @@ fn write_section_c(
             };
             let _ = writeln!(
                 buf,
-                "| {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} |",
                 task_cell,
                 md_escape(&assignee.unwrap_or_default()),
+                md_escape(&sprint.unwrap_or_default()),
                 pts.map(fmt_f1).unwrap_or_default(),
                 marker,
                 md_escape(&compact_reason_numbers(&reason.unwrap_or_default())),
@@ -3150,10 +3189,24 @@ deterministic heuristics (empty body / generic title).\n\
 \n\
 ### Peer-group analysis (section C)\n\
 \n\
-Tasks are bucketed into peer groups by **stack × layer × action** (e.g. \
-*spring · controller · create*). Within each group, tasks whose \
-points / LS / LS-per-point fall outside a MAD-based band are marked as \
-**outliers**. An outlier is a discussion seed, not a verdict.\n\
+Tasks across **every sprint in the project so far** are bucketed into \
+peer groups by **stack × layer × action**. The *layer* is inferred \
+from the file paths the linked PRs touched (controller, service, \
+fragment, …) — not from the task title — so a task labelled \
+\"Implementar pantalla detall\" lands in the same bucket as another \
+team's \"Add detail screen\". The *action* is read from the diff \
+itself: PRs whose `+` lines dominate are *create*; balanced diffs are \
+*modify*. Only DONE TASK / BUG rows whose linked PRs are *all* \
+merged participate — WIP work and tasks linked to open PRs would \
+distort the densities.\n\
+\n\
+Within each group, the **density** (statements surviving normalised \
+÷ estimation points) is compared against the group's median using a \
+robust scale estimate (MAD, falling back to mean absolute deviation \
+when the cluster is too tight for MAD to be informative). Tasks \
+whose density z-score crosses the configured threshold are marked as \
+**outliers** with the deviation surfaced in the *Reason* column. An \
+outlier is a discussion seed, not a verdict.\n\
 \n";
 
 /// Inject the static glossary at the top of `buf`, just after the H1
@@ -3472,7 +3525,10 @@ pub fn generate_markdown_report_to_path_ex2(
     // multi-sprint callers (`generate_markdown_report_multi_to_path_inner`).
     let _ = include_static_analysis;
     write_section_b(&mut buf, conn, sprint_id, project_id, 2, None)?;
-    write_section_c(&mut buf, conn, sprint_id, project_id, 2)?;
+    // Section C is project-scoped (one block, all sprints) and lands
+    // between the per-sprint sections and the cumulative summary so
+    // peer comparisons reflect the full delivery so far.
+    write_section_c(&mut buf, conn, project_id, 2)?;
     if let Some(sids) = cumulative_sprint_ids {
         if !sids.is_empty() {
             write_cumulative_summary(&mut buf, conn, project_id, sids, 2)?;
@@ -3698,8 +3754,15 @@ fn generate_markdown_report_multi_to_path_inner(
         if professor_view {
             write_section_complexity_attribution(&mut buf, conn, *sid, project_id, 3)?;
         }
-        write_section_c(&mut buf, conn, *sid, project_id, 3)?;
+        // Section C is project-scoped — see below the loop.
     }
+
+    // Project-scoped peer-group analysis: one block at H2 between the
+    // per-sprint sections and the cumulative summary. The pipeline
+    // populates `task_similarity_groups` per project across every
+    // sprint up to the report's reference date, so peer comparisons
+    // pool every DONE / merged-PR task the team has shipped so far.
+    write_section_c(&mut buf, conn, project_id, 2)?;
 
     if !sprint_ids_ordered.is_empty() {
         write_cumulative_summary(&mut buf, conn, project_id, sprint_ids_ordered, 2)?;
@@ -4081,14 +4144,15 @@ mod tests {
                 ran_at TEXT NOT NULL,
                 PRIMARY KEY (repo_full_name, analyzer));
              CREATE TABLE task_similarity_groups (group_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sprint_id INTEGER, project_id INTEGER, representative_task_id INTEGER,
+                project_id INTEGER NOT NULL, representative_task_id INTEGER,
                 group_label TEXT, stack TEXT, layer TEXT, action TEXT,
-                member_count INTEGER, median_points REAL, median_lar REAL,
-                median_ls REAL, median_ls_per_point REAL);
+                member_count INTEGER, median_points REAL,
+                median_ls REAL, median_ls_per_point REAL,
+                median_stmts_per_point REAL);
              CREATE TABLE task_group_members (group_id INTEGER, task_id INTEGER,
-                sprint_id INTEGER, is_outlier INTEGER, outlier_reason TEXT,
-                points_deviation REAL, lar_deviation REAL, ls_deviation REAL,
-                ls_per_point_deviation REAL, PRIMARY KEY (group_id, task_id));
+                is_outlier INTEGER, outlier_reason TEXT,
+                stmts_per_point_deviation REAL,
+                PRIMARY KEY (group_id, task_id));
              CREATE TABLE method_complexity_findings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
@@ -4252,10 +4316,8 @@ mod tests {
         // that the resolver-fed path is the only one read. Then seed a
         // high-weight login + email row for u1 in student_github_identity,
         // overriding the default identity row from `mk_conn`.
-        conn.execute_batch(
-            "DELETE FROM student_github_identity WHERE student_id = 'u1';",
-        )
-        .unwrap();
+        conn.execute_batch("DELETE FROM student_github_identity WHERE student_id = 'u1';")
+            .unwrap();
         conn.execute_batch(
             "UPDATE students SET github_login = NULL WHERE id = 'u1';
              DELETE FROM github_users;
@@ -4299,7 +4361,21 @@ mod tests {
         assert!(body.starts_with("# Project report"));
         assert!(body.contains("### A. Team snapshot"));
         assert!(body.contains("### B. Student dashboards"));
-        assert!(body.contains("### C. Peer-group analysis"));
+        // Section C is now project-scoped and lives at H2 between the
+        // sprint loop and the cumulative summary; the renderer's
+        // empty-data branch prints the heading even when there are no
+        // peer groups so callers can rely on it being present.
+        assert!(
+            body.contains("## C. Peer-group analysis"),
+            "section C must surface as an H2 block: {body}"
+        );
+        let c_idx = body
+            .find("## C. Peer-group analysis")
+            .expect("section C heading missing");
+        let cumulative_idx = body
+            .find("## D. Cumulative per-student summary")
+            .expect("cumulative summary heading missing");
+        assert!(c_idx < cumulative_idx, "section C must precede section D");
         // Student section renders
         assert!(body.contains("#### Alice Bob"));
         // PR link survives
@@ -4386,10 +4462,11 @@ mod tests {
 
     #[test]
     fn build_toc_surfaces_student_dashboards_children_in_multi_sprint_mode() {
-        // Multi-sprint structure: A/B/C live at H3 under '## Sprint K',
+        // Multi-sprint structure: A/B live at H3 under '## Sprint K',
         // students under section B sit at H4. They must still appear in
         // the TOC, indented one level deeper than section B itself, even
-        // though H4 is past the default depth-3 cutoff.
+        // though H4 is past the default depth-3 cutoff. Section C (now
+        // project-scoped at H2) is below the loop.
         let body = "# Project report\n\
                     \n\
                     ## Sprint 1\n\
@@ -4402,9 +4479,9 @@ mod tests {
                     \n\
                     #### Carol Dee\n\
                     \n\
-                    ### C. Peer-group analysis\n\
+                    ## C. Peer-group analysis\n\
                     \n\
-                    #### group-1\n";
+                    ### group-1\n";
         let toc = build_toc(body, 3);
         // Students under B are present, and indented two levels (4 spaces)
         // because they live at H4 under H3 section B.
@@ -4416,11 +4493,11 @@ mod tests {
             toc.contains("    - [Carol Dee](#carol-dee)"),
             "all section B students must appear: {toc}"
         );
-        // Section C children stay collapsed — only section B got the
-        // depth-overflow exception.
+        // Section C lives at H2 and its H3 group rows participate in the
+        // TOC like any other H3 subsection.
         assert!(
-            !toc.contains("[group-1]"),
-            "non-section-B H4 entries must remain hidden: {toc}"
+            toc.contains("  - [group-1](#group-1)"),
+            "section C peer-group rows must appear under their H2 parent: {toc}"
         );
     }
 
