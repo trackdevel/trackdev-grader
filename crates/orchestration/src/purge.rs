@@ -149,10 +149,25 @@ pub fn purge_projects(
         record(&mut deleted, "task_description_evaluation", count);
     }
 
-    for table in ["task_group_members", "task_similarity_groups"] {
-        let sql = format!("DELETE FROM {} WHERE sprint_id IN ({})", table, sp);
-        if let Ok(count) = run_or_count(conn, dry_run, &sql, params_from_iter(sprint_ids.iter())) {
-            record(&mut deleted, table, count);
+    // Peer-group analysis is project-scoped now (no sprint_id column);
+    // wipe by project_id so a `purge_projects` cascade removes them.
+    {
+        let pp = placeholders(project_ids.len());
+        let sql = format!(
+            "DELETE FROM task_group_members
+             WHERE group_id IN (SELECT group_id FROM task_similarity_groups
+                                WHERE project_id IN ({}))",
+            pp
+        );
+        if let Ok(count) = run_or_count(conn, dry_run, &sql, params_from_iter(project_ids.iter())) {
+            record(&mut deleted, "task_group_members", count);
+        }
+        let sql = format!(
+            "DELETE FROM task_similarity_groups WHERE project_id IN ({})",
+            pp
+        );
+        if let Ok(count) = run_or_count(conn, dry_run, &sql, params_from_iter(project_ids.iter())) {
+            record(&mut deleted, "task_similarity_groups", count);
         }
     }
     let sql = format!("DELETE FROM tasks WHERE sprint_id IN ({})", sp);
