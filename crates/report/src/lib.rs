@@ -7,6 +7,7 @@
 pub mod charts;
 mod flag_details;
 pub mod markdown;
+pub mod render_finding;
 pub mod url;
 pub mod xlsx;
 
