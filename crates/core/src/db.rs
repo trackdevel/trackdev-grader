@@ -52,13 +52,6 @@ impl Database {
         let migrations: &[(&str, &str, &str)] = &[
             ("pr_line_metrics", "merge_sha", "TEXT"),
             ("pr_line_metrics", "ld", "INTEGER"),
-            ("task_similarity_groups", "stack", "TEXT"),
-            ("task_similarity_groups", "layer", "TEXT"),
-            ("task_similarity_groups", "action", "TEXT"),
-            ("task_similarity_groups", "median_ls", "REAL"),
-            ("task_similarity_groups", "median_ls_per_point", "REAL"),
-            ("task_group_members", "ls_deviation", "REAL"),
-            ("task_group_members", "ls_per_point_deviation", "REAL"),
             ("pr_submission_tiers", "pr_kind", "TEXT"),
             ("pull_requests", "last_github_fetch_updated_at", "TEXT"),
             // T-P3.1: enrich architecture_violations with line ranges + classifier.
@@ -86,6 +79,25 @@ impl Database {
         // Retired helper table — drop if present.
         self.conn
             .execute("DROP TABLE IF EXISTS task_similarity_scores", [])?;
+
+        // Peer-group analysis became project-scoped (no per-sprint
+        // persistence). The legacy shape carried `sprint_id` in
+        // `task_similarity_groups` and `task_group_members`; the new
+        // shape replaces it with `project_id NOT NULL` and a
+        // density-only deviation column. Detect the legacy shape on
+        // either table and DROP both — the canonical `CREATE TABLE IF
+        // NOT EXISTS` below rebuilds them, and the next pipeline run
+        // repopulates from scratch.
+        let tsg_cols = self
+            .column_names("task_similarity_groups")
+            .unwrap_or_default();
+        let tgm_cols = self.column_names("task_group_members").unwrap_or_default();
+        if tsg_cols.iter().any(|c| c == "sprint_id") || tgm_cols.iter().any(|c| c == "sprint_id") {
+            self.conn
+                .execute("DROP TABLE IF EXISTS task_group_members", [])?;
+            self.conn
+                .execute("DROP TABLE IF EXISTS task_similarity_groups", [])?;
+        }
 
         // T-P3.4: artifact-level migration. Architecture violations used to
         // carry `sprint_id` in the PK so the same delivered code was rescored
@@ -892,6 +904,95 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 0, "legacy rows must be dropped along with the old shape");
+    }
+
+    /// Regression for the project-scoped peer-group rewrite: a DB carrying
+    /// the legacy per-sprint task_similarity_groups / task_group_members
+    /// shape (sprint_id NOT NULL in both) must be rewritten to the
+    /// project-scoped shape on the next `create_tables` call. Old rows
+    /// don't survive — the next pipeline run repopulates from scratch.
+    #[test]
+    fn migration_drops_legacy_per_sprint_task_similarity_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grading.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE task_similarity_groups (
+                    group_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sprint_id               INTEGER NOT NULL,
+                    project_id              INTEGER,
+                    representative_task_id  INTEGER NOT NULL,
+                    group_label             TEXT,
+                    stack                   TEXT,
+                    layer                   TEXT,
+                    action                  TEXT,
+                    member_count            INTEGER,
+                    median_points           REAL,
+                    median_lar              REAL,
+                    median_ls               REAL,
+                    median_ls_per_point     REAL
+                );
+                 CREATE TABLE task_group_members (
+                    group_id                INTEGER NOT NULL,
+                    task_id                 INTEGER NOT NULL,
+                    sprint_id               INTEGER NOT NULL,
+                    is_outlier              BOOLEAN DEFAULT 0,
+                    outlier_reason          TEXT,
+                    points_deviation        REAL,
+                    lar_deviation           REAL,
+                    ls_deviation            REAL,
+                    ls_per_point_deviation  REAL,
+                    PRIMARY KEY (group_id, task_id)
+                );
+                 INSERT INTO task_similarity_groups
+                    (sprint_id, project_id, representative_task_id, group_label,
+                     stack, layer, action, member_count)
+                    VALUES (10, 1, 100, 'Spring — Create Controller', 'spring',
+                            'spring_controller', 'create', 4);
+                 INSERT INTO task_group_members
+                    (group_id, task_id, sprint_id, is_outlier)
+                    VALUES (1, 100, 10, 0);",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        db.create_tables().unwrap();
+
+        let g_cols = db.column_names("task_similarity_groups").unwrap();
+        assert!(
+            !g_cols.iter().any(|c| c == "sprint_id"),
+            "legacy sprint_id must be dropped from task_similarity_groups, got: {g_cols:?}"
+        );
+        assert!(
+            g_cols.iter().any(|c| c == "median_stmts_per_point"),
+            "new median_stmts_per_point column must be present, got: {g_cols:?}"
+        );
+
+        let m_cols = db.column_names("task_group_members").unwrap();
+        assert!(
+            !m_cols.iter().any(|c| c == "sprint_id"),
+            "legacy sprint_id must be dropped from task_group_members, got: {m_cols:?}"
+        );
+        assert!(
+            m_cols.iter().any(|c| c == "stmts_per_point_deviation"),
+            "new stmts_per_point_deviation column must be present, got: {m_cols:?}"
+        );
+        assert!(
+            !m_cols.iter().any(|c| c == "ls_deviation"),
+            "stale per-deviation columns must be cleared, got: {m_cols:?}"
+        );
+
+        // Old rows were dropped along with the legacy shape; pipeline
+        // repopulates on next run.
+        let n: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM task_similarity_groups", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     /// Idempotency: running the migration on an already-new-shape DB
