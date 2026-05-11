@@ -6,6 +6,7 @@ pub mod finding;
 pub mod formatting;
 pub mod jitter;
 pub mod paths;
+pub mod rule_attribution;
 pub mod stats;
 pub mod time;
 

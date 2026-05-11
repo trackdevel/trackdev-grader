@@ -117,22 +117,30 @@ pub struct RuleFinding {
     pub extra: Option<String>,
 }
 
-/// One author's contribution to a finding, expressed as a share in [0.0, 1.0].
+/// One student's contribution to a finding, expressed as a share in
+/// `[0.0, 1.0]`.
+///
+/// The field is named `student_id` (not `author_login`) because the
+/// blame attribution tables in the schema all carry `students.id`
+/// values — the resolver in `collect::identity_resolver` resolves any
+/// upstream `(login, email)` to a `student_id` before the per-crate
+/// attribution stages run, so the value the renderer sees here is
+/// already a stable TrackDev identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuthorAttribution {
-    pub author_login: String,
+    pub student_id: String,
     pub blame_share: f32,
 }
 
 impl AuthorAttribution {
     /// Constructs a new attribution; debug-asserts the share is in `[0.0, 1.0]`.
-    pub fn new(author_login: impl Into<String>, blame_share: f32) -> Self {
+    pub fn new(student_id: impl Into<String>, blame_share: f32) -> Self {
         debug_assert!(
             (0.0..=1.0).contains(&blame_share),
             "blame_share must be in [0.0, 1.0]; got {blame_share}"
         );
         Self {
-            author_login: author_login.into(),
+            student_id: student_id.into(),
             blame_share,
         }
     }
