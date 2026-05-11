@@ -189,9 +189,12 @@ jitter_pct = 0.05
 # whose content changed. Default off.
 [architecture]
 llm_review = true
-judge = "deepseek-api"
-model_id = "deepseek-v4-pro"
+# judge = "deepseek-api"
+# model_id = "deepseek-v4-pro"
+judge = "claude-cli"
+model_id = "claude-haiku-4-5-20251001"
 thinking = "enabled"
+judge_workers = 10
 # REQUIRED. No default — empty/missing causes Config::load to fail. This
 # is a deliberate guard: the CLI judge would otherwise silently fall
 # back to whatever model the user's Claude session points at (Opus on
@@ -210,9 +213,11 @@ thinking = "enabled"
 max_tokens = 16000
 spring_rubric_path = "architecture-spring.md"
 android_rubric_path = "architecture-android.md"
-# Concurrent per-file LLM calls. Default is backend-aware: 10 for
-# `deepseek-api` / `anthropic-api`, 1 for `claude-cli` (subprocess +
-# subscription rate limits). Override here to tune for your API plan.
+# Concurrent per-file LLM calls. Default 10 across every backend
+# (claude-cli, anthropic-api, deepseek-api) — the Rayon fan-out is the
+# same code path regardless of judge, and `claude --print` handles
+# concurrent stateless invocations cleanly. Override here to throttle
+# for subscription quota / API rate limits or to crank higher.
 # judge_workers = 10
 llm_skip_globs = [
     "**/build/**",
@@ -225,10 +230,12 @@ llm_skip_globs = [
 # same reason as [architecture] — there is no default; missing/empty
 # causes Config::load to fail. `judge` defaults to "claude-cli".
 [evaluate]
-judge = "deepseek-api"
-model_id = "deepseek-v4-flash"
+# judge = "deepseek-api"
+# model_id = "deepseek-v4-flash"
 
-# model_id = "claude-haiku-4-5-20251001"
+judge = "claude-cli"
+model_id = "claude-haiku-4-5-20251001"
+judge_workers = 10
 thinking = "disabled"  # see [architecture] thinking notes
 
 # Mutation testing (T-P2.4). When `enabled = true` and a build profile
