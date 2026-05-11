@@ -76,16 +76,8 @@ fn llm_review_writes_violations_then_caches() {
         calls: std::sync::atomic::AtomicU32::new(0),
     };
 
-    let n = run_llm_review_for_repo(
-        &conn,
-        tmp.path(),
-        "udg/spring-x",
-        &rubric,
-        &judge,
-        &[],
-        1,
-    )
-    .unwrap();
+    let n = run_llm_review_for_repo(&conn, tmp.path(), "udg/spring-x", &rubric, &judge, &[], 1)
+        .unwrap();
     assert_eq!(n, 1, "one violation written");
     assert_eq!(
         judge.calls.load(std::sync::atomic::Ordering::Relaxed),
@@ -94,16 +86,8 @@ fn llm_review_writes_violations_then_caches() {
     );
 
     // Second pass: same file_sha + rubric + model → cache hit, no new call.
-    let n2 = run_llm_review_for_repo(
-        &conn,
-        tmp.path(),
-        "udg/spring-x",
-        &rubric,
-        &judge,
-        &[],
-        1,
-    )
-    .unwrap();
+    let n2 = run_llm_review_for_repo(&conn, tmp.path(), "udg/spring-x", &rubric, &judge, &[], 1)
+        .unwrap();
     assert_eq!(n2, 1);
     assert_eq!(
         judge.calls.load(std::sync::atomic::Ordering::Relaxed),
@@ -216,8 +200,7 @@ fn out_of_range_line_numbers_are_dropped() {
     let judge = LiarJudge {
         model: "stub".into(),
     };
-    let n =
-        run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, &judge, &[], 1).unwrap();
+    let n = run_llm_review_for_repo(&conn, tmp.path(), "x", &rubric, &judge, &[], 1).unwrap();
     assert_eq!(n, 1, "OK row inserted, BAD row dropped");
     let kept_rule: String = conn
         .query_row(

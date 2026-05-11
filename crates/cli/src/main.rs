@@ -132,7 +132,7 @@ fn default_project_root() -> PathBuf {
                   is gone). That is the end-of-sprint contract: rebuild from scratch.\n\
                   \n\
                   Use --dry-run on go/go-quick to preview the cascade per table before any\n\
-                  pipeline stage runs. See `<subcommand> --help` for the full per-variant contract.",
+                  pipeline stage runs. See `<subcommand> --help` for the full per-variant contract."
 )]
 struct Cli {
     /// Enable debug logging
@@ -312,6 +312,13 @@ enum Command {
         /// Commit and push updated report files directly to `main`
         #[arg(long)]
         push: bool,
+        /// Skip the TrackDev/GitHub collection pass and the post-collect
+        /// analysis rerun. Use right after a `run-all` / `go` when the
+        /// DB is already current — sync-reports then becomes pure
+        /// rendering: regenerate REPORT.md per project (and `--push`
+        /// it) without paying for another GitHub round-trip.
+        #[arg(long)]
+        skip_collect: bool,
     },
 
     // Full-pipeline variants
@@ -337,6 +344,15 @@ enum Command {
         skip_static_analysis: bool,
         #[arg(long)]
         force_pr_refresh: bool,
+        /// After analysis, force-rebase each project's android clone
+        /// onto `origin/main` and render the team-facing REPORT.md
+        /// (static-analysis section stripped) into the clone. Nothing
+        /// is committed or pushed — review the result with `git diff`
+        /// inside each clone and publish later via
+        /// `sprint-grader sync-reports --skip-collect --push` or a
+        /// manual `git push`.
+        #[arg(long)]
+        reports: bool,
     },
     /// End-of-sprint full run: purge → re-collect → full analysis + AI detection.
     ///
@@ -374,6 +390,11 @@ enum Command {
         /// working tree.
         #[arg(long)]
         require_clean_tree: bool,
+        /// Render the team-facing REPORT.md into each project's
+        /// android clone after analysis (no commit, no push). See
+        /// `run-all --reports` for details.
+        #[arg(long)]
+        reports: bool,
     },
     /// Like `run-all` but skips the per-file LLM architecture rubric.
     ///
@@ -406,6 +427,11 @@ enum Command {
         skip_static_analysis: bool,
         #[arg(long)]
         force_pr_refresh: bool,
+        /// Render the team-facing REPORT.md into each project's
+        /// android clone after analysis (no commit, no push). See
+        /// `run-all --reports` for details.
+        #[arg(long)]
+        reports: bool,
     },
     /// Like `go`, but heuristic-only PR doc eval and no static analysis by default.
     ///
@@ -443,6 +469,11 @@ enum Command {
         /// working tree.
         #[arg(long)]
         require_clean_tree: bool,
+        /// Render the team-facing REPORT.md into each project's
+        /// android clone after analysis (no commit, no push). See
+        /// `run-all --reports` for details.
+        #[arg(long)]
+        reports: bool,
     },
 
     // Diagnostics
@@ -832,15 +863,23 @@ fn main() -> Result<()> {
             }
         }
         Command::TaskSimilarity { projects } => {
+            // Peer-group analysis is project-scoped now: one pass per
+            // project across every sprint up to today, not per-sprint.
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
-            for sid in groups.iter().flat_map(|g| g.sprint_ids.iter().copied()) {
+            for g in &groups {
                 sprint_grader_repo_analysis::compute_task_similarity(
                     &db.conn,
-                    sid,
+                    g.project_id,
+                    &g.sprint_ids,
                     &config.repo_analysis,
                 )
-                .with_context(|| format!("task_similarity failed for sprint_id {sid}"))?;
+                .with_context(|| {
+                    format!(
+                        "task_similarity failed for project_id {} ({})",
+                        g.project_id, g.name
+                    )
+                })?;
             }
         }
         Command::TemporalAnalysis { projects } => {
@@ -1071,7 +1110,11 @@ fn main() -> Result<()> {
                 "reports generated"
             );
         }
-        Command::SyncReports { projects, push } => {
+        Command::SyncReports {
+            projects,
+            push,
+            skip_collect,
+        } => {
             drop(db);
             let result = sprint_grader_orchestration::sync_reports_through_sprint(
                 &config,
@@ -1081,6 +1124,7 @@ fn main() -> Result<()> {
                     today: today.clone(),
                     project_filter: parse_project_filter(projects.projects),
                     push,
+                    skip_collect,
                 },
             )
             .context("sync-reports failed")?;
@@ -1097,6 +1141,7 @@ fn main() -> Result<()> {
             skip_repos,
             skip_static_analysis,
             force_pr_refresh,
+            reports,
         } => {
             drop(db);
             let opts = sprint_grader_orchestration::pipeline::PipelineOptions {
@@ -1111,6 +1156,7 @@ fn main() -> Result<()> {
                 skip_arch_llm: false,
                 force_pr_refresh,
                 max_workers: None,
+                team_reports: reports,
             };
             sprint_grader_orchestration::run_pipeline(
                 &config,
@@ -1126,6 +1172,7 @@ fn main() -> Result<()> {
             skip_repos,
             skip_static_analysis,
             force_pr_refresh,
+            reports,
         } => {
             drop(db);
             let opts = sprint_grader_orchestration::pipeline::PipelineOptions {
@@ -1140,6 +1187,7 @@ fn main() -> Result<()> {
                 skip_arch_llm: true,
                 force_pr_refresh,
                 max_workers: None,
+                team_reports: reports,
             };
             sprint_grader_orchestration::run_pipeline(
                 &config,
@@ -1159,6 +1207,7 @@ fn main() -> Result<()> {
             force_pr_refresh,
             dry_run,
             require_clean_tree,
+            reports,
         } => {
             let project_filter = parse_project_filter(projects.projects);
             if require_clean_tree {
@@ -1185,6 +1234,7 @@ fn main() -> Result<()> {
                 skip_arch_llm: false,
                 force_pr_refresh,
                 max_workers: None,
+                team_reports: reports,
             };
             sprint_grader_orchestration::run_pipeline(
                 &config,
@@ -1204,6 +1254,7 @@ fn main() -> Result<()> {
             force_pr_refresh,
             dry_run,
             require_clean_tree,
+            reports,
         } => {
             let project_filter = parse_project_filter(projects.projects);
             if require_clean_tree {
@@ -1232,6 +1283,7 @@ fn main() -> Result<()> {
                 skip_arch_llm: false,
                 force_pr_refresh,
                 max_workers: None,
+                team_reports: reports,
             };
             sprint_grader_orchestration::run_pipeline(
                 &config,
@@ -1320,16 +1372,12 @@ fn main() -> Result<()> {
         }
         Command::ArchitectureRubric { stack } => {
             let normalized = stack.trim().to_lowercase();
-            let rel = if matches!(
-                normalized.as_str(),
-                "spring" | "java-spring" | "backend"
-            ) || normalized.contains("spring")
+            let rel = if matches!(normalized.as_str(), "spring" | "java-spring" | "backend")
+                || normalized.contains("spring")
             {
                 &config.architecture.spring_rubric_path
-            } else if matches!(
-                normalized.as_str(),
-                "android" | "java-android" | "mobile"
-            ) || normalized.contains("android")
+            } else if matches!(normalized.as_str(), "android" | "java-android" | "mobile")
+                || normalized.contains("android")
             {
                 &config.architecture.android_rubric_path
             } else {

@@ -1014,15 +1014,18 @@ fn write_pr_timing_sheet(
 fn write_estimation_analysis_sheet(
     ws: &mut Worksheet,
     conn: &Connection,
-    sprint_id: i64,
     project_id: i64,
 ) -> rusqlite::Result<bool> {
+    // Project-scoped now (peer-group analysis runs once per project,
+    // pooling every sprint up to today). The sprint argument used to
+    // exist on this sheet but the underlying table no longer carries
+    // sprint_id; per-team workbooks render the same global view.
     let mut stmt = conn.prepare(
         "SELECT group_id, group_label, stack, layer, action,
-                member_count, median_points, median_lar, median_ls, median_ls_per_point,
-                representative_task_id
+                member_count, median_points, median_ls, median_ls_per_point,
+                median_stmts_per_point, representative_task_id
          FROM task_similarity_groups
-         WHERE sprint_id = ? AND (project_id = ? OR project_id IS NULL)
+         WHERE project_id = ?
          ORDER BY stack ASC, layer ASC, action ASC, group_id ASC",
     )?;
     struct G {
@@ -1032,17 +1035,19 @@ fn write_estimation_analysis_sheet(
         median_points: Option<f64>,
         median_ls: Option<f64>,
         median_ls_per_point: Option<f64>,
+        median_stmts_per_point: Option<f64>,
         representative_task_id: i64,
     }
     let groups: Vec<G> = stmt
-        .query_map(rusqlite::params![sprint_id, project_id], |r| {
+        .query_map([project_id], |r| {
             Ok(G {
                 group_id: r.get::<_, i64>(0)?,
                 group_label: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 member_count: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
                 median_points: r.get::<_, Option<f64>>(6)?,
-                median_ls: r.get::<_, Option<f64>>(8)?,
-                median_ls_per_point: r.get::<_, Option<f64>>(9)?,
+                median_ls: r.get::<_, Option<f64>>(7)?,
+                median_ls_per_point: r.get::<_, Option<f64>>(8)?,
+                median_stmts_per_point: r.get::<_, Option<f64>>(9)?,
                 representative_task_id: r.get::<_, i64>(10)?,
             })
         })?
@@ -1060,6 +1065,7 @@ fn write_estimation_analysis_sheet(
         "Median Points",
         "Median LS",
         "Median LS/pt",
+        "Median Stmts/pt",
         "Representative Task",
     ];
     write_headers(ws, 0, summary_headers).map_err(to_rusqlite)?;
@@ -1103,16 +1109,20 @@ fn write_estimation_analysis_sheet(
             ws.write_number_with_format(row, 5, (v * 100.0).round() / 100.0, &dec)
                 .map_err(to_rusqlite)?;
         }
+        if let Some(v) = g.median_stmts_per_point {
+            ws.write_number_with_format(row, 6, (v * 100.0).round() / 100.0, &dec)
+                .map_err(to_rusqlite)?;
+        }
         if let Some((Some(_), _)) = &rep {
             let url = format!(
                 "https://trackdev.org/dashboard/tasks/{}",
                 g.representative_task_id
             );
             let link = Url::new(url).set_text(&rep_label);
-            ws.write_url_with_format(row, 6, link, &lnk)
+            ws.write_url_with_format(row, 7, link, &lnk)
                 .map_err(to_rusqlite)?;
         } else {
-            ws.write_string(row, 6, &rep_label).map_err(to_rusqlite)?;
+            ws.write_string(row, 7, &rep_label).map_err(to_rusqlite)?;
         }
     }
 
@@ -1166,7 +1176,7 @@ pub fn generate_team_report(
             .add_worksheet()
             .set_name("Estimation Analysis")
             .map_err(to_rusqlite)?;
-        let wrote = write_estimation_analysis_sheet(ws, conn, sprint_id, project_id)?;
+        let wrote = write_estimation_analysis_sheet(ws, conn, project_id)?;
         if !wrote {
             // No data — label the sheet so removing it isn't needed.
             write_headers(ws, 0, &["(no task similarity groups yet)"]).map_err(to_rusqlite)?;
@@ -1534,15 +1544,15 @@ mod tests {
                 student_id TEXT, sprint_id INTEGER, flag_type TEXT, severity TEXT,
                 details TEXT);
              CREATE TABLE task_similarity_groups (group_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sprint_id INTEGER, project_id INTEGER,
+                project_id INTEGER NOT NULL,
                 representative_task_id INTEGER, group_label TEXT,
                 stack TEXT, layer TEXT, action TEXT,
-                member_count INTEGER, median_points REAL, median_lar REAL,
-                median_ls REAL, median_ls_per_point REAL);
+                member_count INTEGER, median_points REAL,
+                median_ls REAL, median_ls_per_point REAL,
+                median_stmts_per_point REAL);
              CREATE TABLE task_group_members (group_id INTEGER, task_id INTEGER,
-                sprint_id INTEGER, is_outlier INTEGER, outlier_reason TEXT,
-                points_deviation REAL, lar_deviation REAL, ls_deviation REAL,
-                ls_per_point_deviation REAL,
+                is_outlier INTEGER, outlier_reason TEXT,
+                stmts_per_point_deviation REAL,
                 PRIMARY KEY (group_id, task_id));
              CREATE TABLE pr_submission_tiers (sprint_id INTEGER, pr_id TEXT,
                 merged_at TEXT, hours_before_deadline REAL, tier TEXT, pr_kind TEXT,
