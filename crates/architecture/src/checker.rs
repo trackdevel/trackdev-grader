@@ -9,6 +9,8 @@
 //! silently allowed — the rules describe what *internal* layers may
 //! depend on each other, not what stdlib calls are permitted.
 
+use sprint_grader_core::finding::{LineSpan, RuleFinding, RuleKind, Severity};
+
 use crate::rules::ArchitectureRules;
 use crate::scanner::JavaFileFacts;
 
@@ -94,6 +96,41 @@ impl ViolationKind {
             ViolationKind::LayerDependency => "layer_dependency",
             ViolationKind::ForbiddenImport => "forbidden_import",
             ViolationKind::AstRule(label) => label.as_str(),
+        }
+    }
+}
+
+impl Violation {
+    /// W2.T1: convert one scanner violation into the shared `RuleFinding`
+    /// shape consumed by the unified attribution + renderer pipeline.
+    /// Severity is supplied by the caller (currently
+    /// `ArchitectureRules::severity` for legacy rules,
+    /// `AstRule::severity` for AST rules, or the model-supplied severity
+    /// for LLM rules — none of which live on the in-memory `Violation`).
+    ///
+    /// `evidence` carries the LLM-supplied explanation (empty for
+    /// AST/glob rules); `extra` carries the offending import string so
+    /// the renderer can still show it where useful.
+    pub fn into_rule_finding(
+        self,
+        repo_full_name: &str,
+        severity: Severity,
+        evidence: String,
+    ) -> RuleFinding {
+        let span = match (self.start_line, self.end_line) {
+            (Some(s), Some(e)) if e > s => LineSpan::range(s, e),
+            (Some(s), _) => LineSpan::single(s),
+            _ => LineSpan::single(0),
+        };
+        RuleFinding {
+            rule_id: self.rule_name,
+            kind: RuleKind::Architecture,
+            severity,
+            repo_full_name: repo_full_name.to_string(),
+            file_repo_relative: self.file_path,
+            span,
+            evidence,
+            extra: Some(self.offending_import),
         }
     }
 }

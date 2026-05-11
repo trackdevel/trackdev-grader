@@ -27,6 +27,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use sprint_grader_core::config::DetectorThresholdsConfig;
+use sprint_grader_core::finding::{LineSpan, RuleFinding, RuleKind, Severity as CoreSeverity};
 use tracing::info;
 use tree_sitter::{Node, Parser};
 use walkdir::WalkDir;
@@ -157,6 +158,52 @@ impl Severity {
             Severity::Critical => "CRITICAL",
             Severity::Warning => "WARNING",
             Severity::Info => "INFO",
+        }
+    }
+
+    /// Map this crate's local severity onto the shared
+    /// `sprint_grader_core::finding::Severity` (W2.T2).
+    pub fn to_core(self) -> CoreSeverity {
+        match self {
+            Severity::Critical => CoreSeverity::Critical,
+            Severity::Warning => CoreSeverity::Warning,
+            Severity::Info => CoreSeverity::Info,
+        }
+    }
+}
+
+impl Finding {
+    /// W2.T2: convert one complexity scanner finding into the shared
+    /// `RuleFinding` shape consumed by the unified attribution +
+    /// renderer pipeline.
+    ///
+    /// `extra` carries the "measured > threshold" overflow string so
+    /// the unified renderer can append `(12 > 10)` without re-parsing
+    /// the rule. `evidence` carries `Finding::detail` which is the
+    /// human-readable prose the current renderer prints verbatim.
+    /// `rule_id` matches the legacy `rule_key` field so blame look-ups
+    /// keyed on `(file_path, rule_id)` stay valid.
+    pub fn into_rule_finding(self, repo_full_name: &str) -> RuleFinding {
+        let span = if self.end_line > self.start_line && self.start_line >= 1 {
+            LineSpan::range(self.start_line as u32, self.end_line as u32)
+        } else if self.start_line >= 1 {
+            LineSpan::single(self.start_line as u32)
+        } else {
+            LineSpan::single(0)
+        };
+        let extra = match (self.measured_value, self.threshold) {
+            (Some(m), Some(t)) => Some(format!("{m} > {t}")),
+            _ => None,
+        };
+        RuleFinding {
+            rule_id: self.rule_key,
+            kind: RuleKind::Complexity,
+            severity: self.severity.to_core(),
+            repo_full_name: repo_full_name.to_string(),
+            file_repo_relative: self.file_path,
+            span,
+            evidence: self.detail,
+            extra,
         }
     }
 }
@@ -1585,6 +1632,59 @@ fn resolve_qualified_repo_name(conn: &rusqlite::Connection, bare: &str) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finding_into_rule_finding_carries_extra_for_numeric_rules() {
+        // W2.T2: in-memory Finding → RuleFinding lossless for rules with
+        // measured_value + threshold (wide-signature, cyclomatic, etc.).
+        let f = Finding {
+            file_path: "src/main/java/Login.java".to_string(),
+            class_name: Some("LoginController".to_string()),
+            method_name: "authenticate".to_string(),
+            start_line: 42,
+            end_line: 99,
+            rule_key: "wide-signature".to_string(),
+            severity: Severity::Warning,
+            measured_value: Some(12.0),
+            threshold: Some(10.0),
+            detail: "Method takes more parameters than the ceiling allows.".to_string(),
+        };
+        let r = f.into_rule_finding("udg/spring-x");
+        assert_eq!(r.kind, RuleKind::Complexity);
+        assert_eq!(r.severity, CoreSeverity::Warning);
+        assert_eq!(r.rule_id, "wide-signature");
+        assert_eq!(r.repo_full_name, "udg/spring-x");
+        assert_eq!(r.file_repo_relative, "src/main/java/Login.java");
+        assert_eq!(r.span, LineSpan::range(42, 99));
+        assert_eq!(r.extra.as_deref(), Some("12 > 10"));
+        assert_eq!(
+            r.evidence,
+            "Method takes more parameters than the ceiling allows."
+        );
+    }
+
+    #[test]
+    fn finding_into_rule_finding_omits_extra_for_boolean_rules() {
+        // Targeted testability rules (broad-catch etc.) carry no
+        // measured/threshold pair; the renderer must not see a bogus
+        // "None > None" overflow.
+        let f = Finding {
+            file_path: "Foo.java".to_string(),
+            class_name: None,
+            method_name: "m".to_string(),
+            start_line: 13,
+            end_line: 13,
+            rule_key: "broad-catch".to_string(),
+            severity: Severity::Info,
+            measured_value: None,
+            threshold: None,
+            detail: String::new(),
+        };
+        let r = f.into_rule_finding("o/r");
+        assert_eq!(r.span, LineSpan::single(13));
+        assert!(r.extra.is_none(), "boolean rules carry no overflow string");
+        assert_eq!(r.severity, CoreSeverity::Info);
+    }
 
     #[test]
     fn keeps_spring_main_java_file() {
