@@ -17,6 +17,7 @@ toml.workspace = true
 rusqlite.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+camino.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

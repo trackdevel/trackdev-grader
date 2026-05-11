@@ -5,6 +5,7 @@ pub mod error;
 pub mod finding;
 pub mod formatting;
 pub mod jitter;
+pub mod paths;
 pub mod stats;
 pub mod time;
 
