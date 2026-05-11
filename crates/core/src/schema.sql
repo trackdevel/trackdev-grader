@@ -683,10 +683,15 @@ CREATE TABLE IF NOT EXISTS code_practices_evaluation (
     PRIMARY KEY (project_id, sprint_id, repo_type)
 );
 
+-- Peer-group analysis (project-scoped). Each row is a similarity bucket of
+-- DONE TASK/BUG rows that share (stack, layer, action) across every sprint
+-- in the project, where layer is derived from the *file paths* of the
+-- linked PRs' surviving fingerprints (not from task-name keyword scans).
+-- Rebuilt from scratch on each pipeline run; idempotency = DELETE WHERE
+-- project_id = ? before INSERT.
 CREATE TABLE IF NOT EXISTS task_similarity_groups (
     group_id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    sprint_id               INTEGER NOT NULL,
-    project_id              INTEGER,
+    project_id              INTEGER NOT NULL,
     representative_task_id  INTEGER NOT NULL,
     group_label             TEXT,
     stack                   TEXT,
@@ -694,27 +699,24 @@ CREATE TABLE IF NOT EXISTS task_similarity_groups (
     action                  TEXT,
     member_count            INTEGER,
     median_points           REAL,
-    median_lar              REAL,
     median_ls               REAL,
     median_ls_per_point     REAL,
-    FOREIGN KEY (sprint_id)              REFERENCES sprints(id),
+    median_stmts_per_point  REAL,
+    FOREIGN KEY (project_id)             REFERENCES projects(id),
     FOREIGN KEY (representative_task_id) REFERENCES tasks(id)
 );
 
 CREATE TABLE IF NOT EXISTS task_group_members (
     group_id                      INTEGER NOT NULL,
     task_id                       INTEGER NOT NULL,
-    sprint_id                     INTEGER NOT NULL,
     is_outlier                    BOOLEAN DEFAULT 0,
     outlier_reason                TEXT,
-    points_deviation              REAL,
-    lar_deviation                 REAL,
-    ls_deviation                  REAL,
-    ls_per_point_deviation        REAL,
+    -- (value − group median) / group MAD on stmts_normalized / points.
+    -- Sole driver of `is_outlier`; |z| > mad_k_threshold → outlier.
+    stmts_per_point_deviation     REAL,
     PRIMARY KEY (group_id, task_id),
     FOREIGN KEY (group_id)  REFERENCES task_similarity_groups(group_id),
-    FOREIGN KEY (task_id)   REFERENCES tasks(id),
-    FOREIGN KEY (sprint_id) REFERENCES sprints(id)
+    FOREIGN KEY (task_id)   REFERENCES tasks(id)
 );
 
 CREATE TABLE IF NOT EXISTS pr_submission_tiers (
