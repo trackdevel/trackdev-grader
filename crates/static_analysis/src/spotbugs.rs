@@ -186,7 +186,7 @@ impl Analyzer for SpotBugs {
         let stderr_tail = tail(&output.stderr, 4_000);
         let duration_ms = started.elapsed().as_millis() as u64;
 
-        let findings = match sarif::parse(&sarif_path) {
+        let findings = match sarif::parse(&sarif_path, Some(input.repo_path)) {
             Ok(mut fs) => {
                 fs.retain(|f| f.severity.at_least(cfg.severity_floor));
                 if fs.len() > cfg.max_findings {
