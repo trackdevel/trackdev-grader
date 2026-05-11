@@ -20,7 +20,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use camino::Utf8Path;
 use serde::Deserialize;
+use sprint_grader_core::paths::repo_relative;
+use tracing::warn;
 
 use crate::adapter::{Category, Finding, Severity};
 
@@ -123,22 +126,33 @@ struct SarifRegion {
 /// analyzer is auto-detected from `runs[*].tool.driver.name`. Empty or
 /// missing `runs` arrays return an empty vec; structurally-malformed JSON
 /// surfaces as `Err`.
-pub fn parse(path: &Path) -> Result<Vec<Finding>> {
+///
+/// W2.T3: when `repo_root` is `Some`, each finding's `file_path` is
+/// converted to a repo-relative POSIX string via
+/// `sprint_grader_core::paths::repo_relative`. Findings whose URI points
+/// outside `repo_root` are dropped with a `tracing::warn!` rather than
+/// landing as malformed rows that produce `…/blob/HEAD//home/…` URLs in
+/// the rendered report. Pass `None` only from unit tests that exercise
+/// the SARIF schema in isolation.
+pub fn parse(path: &Path, repo_root: Option<&Path>) -> Result<Vec<Finding>> {
     let body = std::fs::read_to_string(path)
         .with_context(|| format!("reading SARIF from {}", path.display()))?;
-    parse_str(&body)
+    parse_str(&body, repo_root)
 }
 
-pub fn parse_str(body: &str) -> Result<Vec<Finding>> {
+pub fn parse_str(body: &str, repo_root: Option<&Path>) -> Result<Vec<Finding>> {
     let report: SarifReport =
         serde_json::from_str(body).context("parsing SARIF — not valid JSON or wrong schema")?;
+    let repo_root_utf8 = repo_root.and_then(|p| Utf8Path::from_path(p).map(|p| p.to_owned()));
     let mut out = Vec::new();
     for run in &report.runs {
         let driver_name = run.tool.driver.name.to_ascii_lowercase();
         let analyzer_id = analyzer_id_from_driver(&driver_name);
         let rule_lookup = build_rule_lookup(&run.tool.driver.rules);
         for result in &run.results {
-            if let Some(finding) = result_to_finding(analyzer_id, &rule_lookup, result) {
+            if let Some(finding) =
+                result_to_finding(analyzer_id, &rule_lookup, result, repo_root_utf8.as_deref())
+            {
                 out.push(finding);
             }
         }
@@ -186,6 +200,7 @@ fn result_to_finding(
     analyzer: &'static str,
     rules: &[RuleMeta],
     result: &SarifResult,
+    repo_root: Option<&Utf8Path>,
 ) -> Option<Finding> {
     // rule_id: prefer `result.ruleId`; fall back to indexed lookup, then
     // to a defensive sentinel.
@@ -214,6 +229,29 @@ fn result_to_finding(
     }
     // SARIF URIs sometimes carry a `file://` prefix — normalise.
     let file_path = strip_file_scheme(&file_path);
+    // W2.T3: canonicalise against repo_root so the persisted path is
+    // always repo-relative and the GitHub blob-URL builder can emit a
+    // valid link. Drop findings outside the repo with a warning — a
+    // malformed analyzer that emits a path under /home/... must not
+    // produce a clickable but broken `…/blob/HEAD//home/...` row in the
+    // report. When `repo_root` is `None` (unit tests parsing fixture
+    // SARIF off-disk), the value passes through unchanged.
+    let file_path = match canonicalise_path(&file_path, repo_root) {
+        Some(p) => p,
+        None => {
+            warn!(
+                target: "static_analysis::sarif",
+                analyzer,
+                rule_id = %result
+                    .rule_id
+                    .as_deref()
+                    .unwrap_or("?"),
+                raw_uri = %file_path,
+                "dropping static-analysis finding: path is outside repo_root"
+            );
+            return None;
+        }
+    };
 
     let region = location.and_then(|p| p.region.as_ref());
     let start_line = region.and_then(|r| r.start_line);
@@ -248,6 +286,31 @@ fn result_to_finding(
         help_uri,
         fingerprint,
     })
+}
+
+/// W2.T3: convert a SARIF-derived file URI into a repo-relative POSIX
+/// path. Returns `None` when `repo_root` is provided and the path lies
+/// outside it (in which case the caller drops the finding).
+///
+/// When `repo_root` is `None` the input is returned unchanged — that
+/// path is only used by the standalone SARIF unit tests, which never
+/// see real filesystem paths.
+fn canonicalise_path(raw: &str, repo_root: Option<&Utf8Path>) -> Option<String> {
+    let Some(root) = repo_root else {
+        return Some(raw.to_string());
+    };
+    // Already repo-relative? Treat as authoritative — Checkstyle in
+    // particular emits paths relative to whatever CWD it was launched
+    // from, and when our launcher uses `repo_root` as cwd those are
+    // already correct. Run them through repo_relative anyway so any
+    // residual `..` segments collapse and the output is POSIX-slashed.
+    let path = Utf8Path::new(raw);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    repo_relative(root, &candidate).ok()
 }
 
 /// Strip the `file:` URI scheme from a SARIF artifact URI. SpotBugs and
@@ -413,7 +476,7 @@ mod tests {
 
     #[test]
     fn parses_pmd_sarif_into_findings() {
-        let findings = parse_str(PMD_SARIF).unwrap();
+        let findings = parse_str(PMD_SARIF, None).unwrap();
         assert_eq!(findings.len(), 2);
 
         let f0 = &findings[0];
@@ -443,7 +506,7 @@ mod tests {
 
     #[test]
     fn fingerprint_is_set_per_finding() {
-        let findings = parse_str(PMD_SARIF).unwrap();
+        let findings = parse_str(PMD_SARIF, None).unwrap();
         assert_eq!(findings[0].fingerprint.len(), 40);
         assert_ne!(findings[0].fingerprint, findings[1].fingerprint);
     }
@@ -463,12 +526,12 @@ mod tests {
     #[test]
     fn empty_runs_yields_empty_findings() {
         let body = r#"{"version": "2.1.0", "runs": []}"#;
-        assert_eq!(parse_str(body).unwrap().len(), 0);
+        assert_eq!(parse_str(body, None).unwrap().len(), 0);
     }
 
     #[test]
     fn malformed_json_returns_error() {
-        let err = parse_str("not json").unwrap_err();
+        let err = parse_str("not json", None).unwrap_err();
         assert!(err.to_string().contains("SARIF"));
     }
 
@@ -483,7 +546,7 @@ mod tests {
                 ]
             }]
         }"#;
-        let findings = parse_str(body).unwrap();
+        let findings = parse_str(body, None).unwrap();
         assert_eq!(
             findings.len(),
             0,
@@ -510,7 +573,7 @@ mod tests {
                 }]
             }]
         }"#;
-        let findings = parse_str(body).unwrap();
+        let findings = parse_str(body, None).unwrap();
         assert_eq!(findings[0].severity, Severity::Warning);
         assert_eq!(findings[0].analyzer, "checkstyle");
     }
@@ -549,7 +612,7 @@ mod tests {
                 ]
             }]
         }"#;
-        let findings = parse_str(body).unwrap();
+        let findings = parse_str(body, None).unwrap();
         assert_eq!(findings[0].severity, Severity::Critical); // rank 3
         assert_eq!(findings[1].severity, Severity::Info); // rank 15
     }
@@ -580,7 +643,110 @@ mod tests {
                 }]
             }]
         }"#;
-        let findings = parse_str(body).unwrap();
+        let findings = parse_str(body, None).unwrap();
         assert_eq!(findings[0].category, Category::Security);
+    }
+
+    #[test]
+    fn parse_canonicalises_absolute_paths_against_repo_root() {
+        // W2.T3: a SARIF body whose `artifactLocation.uri` is an absolute
+        // path inside `repo_root` must surface as a repo-relative
+        // `Finding::file_path`. This is the production failure mode that
+        // produced `…/blob/HEAD//home/imartin/…` URLs.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::fs::create_dir_all(repo.join("src/main/java")).unwrap();
+        std::fs::write(repo.join("src/main/java/Login.java"), "").unwrap();
+
+        // Canonicalise the temp dir up-front to handle macOS /var → /private/var
+        // (the SARIF body must reference the canonical form).
+        let repo_canonical = std::fs::canonicalize(repo).unwrap();
+        let body = format!(
+            r#"{{
+                "version": "2.1.0",
+                "runs": [{{
+                    "tool": {{"driver": {{"name": "PMD", "rules": []}}}},
+                    "results": [{{
+                        "ruleId": "UnusedPrivateMethod",
+                        "level": "note",
+                        "message": {{"text": "..."}},
+                        "locations": [{{
+                            "physicalLocation": {{
+                                "artifactLocation": {{"uri": "file://{abs}/src/main/java/Login.java"}},
+                                "region": {{"startLine": 42, "endLine": 99}}
+                            }}
+                        }}]
+                    }}]
+                }}]
+            }}"#,
+            abs = repo_canonical.to_str().unwrap(),
+        );
+        let findings = parse_str(&body, Some(repo)).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file_path, "src/main/java/Login.java");
+        assert_eq!(findings[0].start_line, Some(42));
+        assert_eq!(findings[0].end_line, Some(99));
+    }
+
+    #[test]
+    fn parse_drops_findings_outside_repo_root() {
+        // W2.T3: a finding whose path is absolute but outside the repo
+        // (e.g. a transitive /home/.../gradle/... include) must be
+        // dropped rather than persisted as a row that the renderer can
+        // only ever URL-format incorrectly.
+        let tmp = tempfile::tempdir().unwrap();
+        let body = r#"{
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {"driver": {"name": "PMD", "rules": []}},
+                "results": [{
+                    "ruleId": "X",
+                    "level": "warning",
+                    "message": {"text": "x"},
+                    "locations": [{
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": "file:///etc/passwd"},
+                            "region": {"startLine": 1}
+                        }
+                    }]
+                }]
+            }]
+        }"#;
+        let findings = parse_str(body, Some(tmp.path())).unwrap();
+        assert_eq!(
+            findings.len(),
+            0,
+            "findings outside repo_root must be dropped, not persisted with absolute paths"
+        );
+    }
+
+    #[test]
+    fn parse_with_repo_root_keeps_already_relative_paths() {
+        // Checkstyle launched with cwd=repo_root emits paths like
+        // `src/main/java/Foo.java`. Those must pass through after a no-op
+        // canonicalisation (POSIX-slashed, `..` collapsed).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src/main/java")).unwrap();
+        std::fs::write(tmp.path().join("src/main/java/Foo.java"), "").unwrap();
+        let body = r#"{
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {"driver": {"name": "Checkstyle", "rules": []}},
+                "results": [{
+                    "ruleId": "MissingJavadocMethod",
+                    "level": "error",
+                    "message": {"text": "..."},
+                    "locations": [{
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": "src/main/java/Foo.java"},
+                            "region": {"startLine": 7}
+                        }
+                    }]
+                }]
+            }]
+        }"#;
+        let findings = parse_str(body, Some(tmp.path())).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file_path, "src/main/java/Foo.java");
     }
 }
