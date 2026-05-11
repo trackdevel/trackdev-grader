@@ -25,3 +25,4 @@ sprint-grader-quality = { path = "../quality" }
 
 [dev-dependencies]
 tempfile.workspace = true
+insta = { version = "1", features = ["filters"] }

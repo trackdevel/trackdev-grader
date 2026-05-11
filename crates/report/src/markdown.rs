@@ -23,6 +23,7 @@ use tracing::info;
 
 use crate::charts::{html_escape, sparkline_svg, stacked_bars_svg, StackedRow};
 use crate::flag_details::{enrich_flag_details, render_flag_details, render_flag_severity};
+use crate::url::{github_blob_url, line_anchor, line_suffix, span_from_db};
 
 /// Render an ISO-8601 / minute-precision timestamp as a Catalan-academic
 /// human form anchored to UDG's local time (Europe/Madrid). Falls back to
@@ -1166,7 +1167,7 @@ fn count_severity(conn: &Connection, sprint_id: i64, project_id: i64, severity: 
 ///
 /// `repo_full_qualified` is the `<org>/<repo>` form pulled from the matching
 /// fingerprint row. It survives the basename-based join so the renderer can
-/// build a `https://github.com/<org>/<repo>/blob/HEAD/<file_path>` URL.
+/// hand it to `url::github_blob_url` to produce a clickable GitHub link.
 #[derive(Debug, Clone)]
 struct AttributedArchViolation {
     rule_name: String,
@@ -1391,19 +1392,6 @@ fn format_blame_weight_suffix(weight: f64) -> String {
     format!(" · {}% of lines", pct)
 }
 
-/// Build a clickable GitHub URL for a file at the default branch (`HEAD`).
-/// Returns `None` when `repo_full_qualified` is missing the `<org>/<repo>`
-/// form (e.g. an old DB row that only stored the bare repo name).
-fn github_file_url(repo_full_qualified: &str, file_path: &str) -> Option<String> {
-    if !repo_full_qualified.contains('/') {
-        return None;
-    }
-    Some(format!(
-        "https://github.com/{}/blob/HEAD/{}",
-        repo_full_qualified, file_path
-    ))
-}
-
 /// Build a `bare-repo-name → <org>/<repo>` map by scanning
 /// `pull_requests.repo_full_name`. Legacy `architecture_violations`
 /// rows wrote only the bare directory name; the report rendering uses
@@ -1441,27 +1429,6 @@ fn qualify_repo_name(repo: &str, by_basename: &HashMap<String, String>) -> Strin
         .get(repo)
         .cloned()
         .unwrap_or_else(|| repo.to_string())
-}
-
-/// Render the line range as a `:Lstart-Lend` (or `:L<line>` when
-/// start == end) suffix appended to the file basename. Returns empty
-/// string when the violation has no line information.
-fn format_line_suffix(start: Option<i64>, end: Option<i64>) -> String {
-    match (start, end) {
-        (Some(s), Some(e)) if e > s => format!(" :L{}-L{}", s, e),
-        (Some(s), _) => format!(" :L{}", s),
-        _ => String::new(),
-    }
-}
-
-/// GitHub anchor (`#L<n>` or `#L<s>-L<e>`) so the file link jumps to
-/// the offending range. Empty when no line information exists.
-fn format_url_line_anchor(start: Option<i64>, end: Option<i64>) -> String {
-    match (start, end) {
-        (Some(s), Some(e)) if e > s => format!("#L{}-L{}", s, e),
-        (Some(s), _) => format!("#L{}", s),
-        _ => String::new(),
-    }
 }
 
 /// MAD-based deviation of a density (stmts/points) from the project's
@@ -2092,18 +2059,21 @@ fn write_student_architecture_block(buf: &mut String, violations: &[AttributedAr
     for v in sorted {
         let basename = v.file_path.rsplit('/').next().unwrap_or(&v.file_path);
         let label = format!("`{}`", md_escape(basename));
-        let line_suffix = format_line_suffix(v.start_line, v.end_line);
-        let url_anchor = format_url_line_anchor(v.start_line, v.end_line);
-        let file_cell = match github_file_url(&v.repo_full_qualified, &v.file_path) {
-            Some(url) => format!(
+        let span = span_from_db(v.start_line, v.end_line);
+        let suffix = line_suffix(span);
+        let anchor = line_anchor(span);
+        let url = github_blob_url(&v.repo_full_qualified, "HEAD", &v.file_path, None);
+        let file_cell = if !url.is_empty() {
+            format!(
                 "[{}{}]({}{} \"{}\")",
                 label,
-                line_suffix,
+                suffix,
                 url,
-                url_anchor,
+                anchor,
                 md_escape(&v.file_path)
-            ),
-            None => format!("{}{}", label, line_suffix),
+            )
+        } else {
+            format!("{}{}", label, suffix)
         };
         let weight_suffix = format_blame_weight_suffix(v.weight);
         let _ = writeln!(
@@ -2226,11 +2196,14 @@ fn write_student_static_analysis_block(buf: &mut String, findings: &[SaFinding],
     for f in findings.iter() {
         let basename = f.file_path.rsplit('/').next().unwrap_or(&f.file_path);
         let label = format!("`{}`", basename);
-        let line_suffix = format_line_suffix(f.start_line, f.end_line);
-        let url_anchor = format_url_line_anchor(f.start_line, f.end_line);
-        let file_cell = match github_file_url(&f.repo_full_name, &f.file_path) {
-            Some(url) => format!("[{}{}]({}{})", label, line_suffix, url, url_anchor),
-            None => format!("{}{}", label, line_suffix),
+        let span = span_from_db(f.start_line, f.end_line);
+        let suffix = line_suffix(span);
+        let anchor = line_anchor(span);
+        let url = github_blob_url(&f.repo_full_name, "HEAD", &f.file_path, None);
+        let file_cell = if !url.is_empty() {
+            format!("[{}{}]({}{})", label, suffix, url, anchor)
+        } else {
+            format!("{}{}", label, suffix)
         };
         let weight_suffix = format_blame_weight_suffix(f.weight);
         let _ = writeln!(
@@ -2360,18 +2333,21 @@ fn write_student_complexity_block(
             .map(|c| format!("{c}."))
             .unwrap_or_default();
         let label = format!("`{}{}()`", class_prefix, f.method_name);
-        let url_anchor = format_url_line_anchor(Some(f.start_line), Some(f.end_line));
-        let line_suffix = format_line_suffix(Some(f.start_line), Some(f.end_line));
-        let file_cell = match github_file_url(&repo, &f.file_path) {
-            Some(url) => format!(
+        let span = span_from_db(Some(f.start_line), Some(f.end_line));
+        let suffix = line_suffix(span);
+        let anchor = line_anchor(span);
+        let url = github_blob_url(&repo, "HEAD", &f.file_path, None);
+        let file_cell = if !url.is_empty() {
+            format!(
                 "[{}{}]({}{} \"{}\")",
                 label,
-                line_suffix,
+                suffix,
                 url,
-                url_anchor,
+                anchor,
                 md_escape(&f.file_path)
-            ),
-            None => format!("{}{}", label, line_suffix),
+            )
+        } else {
+            format!("{}{}", label, suffix)
         };
         let prose = cxi18n::rule_prose(&f.rule_key);
         let measured_tail = match (f.measured_value, f.threshold) {
@@ -2576,10 +2552,13 @@ fn write_section_complexity_attribution(
                     .map(|c| format!("{c}."))
                     .unwrap_or_default();
             let method_label = format!("`{}{}()`", class_prefix, r.7);
-            let url_anchor = format_url_line_anchor(Some(r.8), Some(r.9));
-            let method_link = match github_file_url(&repo, &r.5) {
-                Some(url) => format!("[{}]({}{})", method_label, url, url_anchor),
-                None => method_label,
+            let span = span_from_db(Some(r.8), Some(r.9));
+            let anchor = line_anchor(span);
+            let url = github_blob_url(&repo, "HEAD", &r.5, None);
+            let method_link = if !url.is_empty() {
+                format!("[{}]({}{})", method_label, url, anchor)
+            } else {
+                method_label
             };
             let prose = cxi18n::rule_prose(&r.4);
             let _ = writeln!(
