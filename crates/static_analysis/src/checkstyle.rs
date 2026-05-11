@@ -188,7 +188,7 @@ impl Analyzer for Checkstyle {
         // Disambiguate: if the SARIF file parses, we got real findings
         // regardless of exit code. Only when the file is missing or
         // unparseable do we treat as Crashed.
-        let findings = match sarif::parse(&sarif_path) {
+        let findings = match sarif::parse(&sarif_path, Some(input.repo_path)) {
             Ok(mut fs) => {
                 fs.retain(|f| f.severity.at_least(cfg.severity_floor));
                 if fs.len() > cfg.max_findings {
