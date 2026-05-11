@@ -126,15 +126,21 @@ pub struct RuleFinding {
 /// upstream `(login, email)` to a `student_id` before the per-crate
 /// attribution stages run, so the value the renderer sees here is
 /// already a stable TrackDev identity.
+///
+/// `blame_share` is `f64` to match the SQL `weight REAL` column. A
+/// narrower `f32` lost precision around the percent-rounding boundary
+/// (e.g. 0.325 round-trips to 0.324999… and renders as "32%" instead
+/// of "33%"), breaking byte-identical re-rendering after the W2.T5
+/// renderer migration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuthorAttribution {
     pub student_id: String,
-    pub blame_share: f32,
+    pub blame_share: f64,
 }
 
 impl AuthorAttribution {
     /// Constructs a new attribution; debug-asserts the share is in `[0.0, 1.0]`.
-    pub fn new(student_id: impl Into<String>, blame_share: f32) -> Self {
+    pub fn new(student_id: impl Into<String>, blame_share: f64) -> Self {
         debug_assert!(
             (0.0..=1.0).contains(&blame_share),
             "blame_share must be in [0.0, 1.0]; got {blame_share}"
