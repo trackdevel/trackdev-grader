@@ -1924,6 +1924,7 @@ name = "sprint-grader-static-analysis"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "camino",
  "chrono",
  "rusqlite",
  "serde",
