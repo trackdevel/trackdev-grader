@@ -1,0 +1,181 @@
+---
+source: crates/report/tests/snapshots.rs
+expression: body
+---
+# Project report — PDS Mini
+
+## Table of contents
+
+- [Team identity map](#team-identity-map)
+- [0. Glossary — how to read this report](#0-glossary--how-to-read-this-report)
+- [Code quality on main](#code-quality-on-main)
+  - [Alice Adams](#alice-adams)
+- [Sprint 1 (1 April 2026, 02:00 CEST — 1 May 2026, 01:59 CEST)](#sprint-1-1-april-2026-0200-cest--1-may-2026-0159-cest)
+  - [A. Team snapshot](#a-team-snapshot)
+  - [B. Student dashboards](#b-student-dashboards)
+    - [Alice Adams](#alice-adams-1)
+    - [Bob Brown](#bob-brown)
+- [C. Peer-group analysis](#c-peer-group-analysis)
+- [D. Cumulative per-student summary](#d-cumulative-per-student-summary)
+
+## Team identity map
+
+_All PRs that touch this team are scoped to it (no cross-project PRs)._
+
+| TrackDev user | Full name | TrackDev email | GitHub | GitHub email |
+|---|---|---|---|---|
+|  | Alice Adams |  | [alice-gh](https://github.com/alice-gh) | — |
+|  | Bob Brown |  | [bob-gh](https://github.com/bob-gh) | — |
+
+## 0. Glossary — how to read this report
+
+This report aggregates four kinds of evidence per sprint: **task delivery** (TrackDev), **code authorship** (Git blame on merged PRs), **code quality & process** (commits, reviews, build outcomes), and **architectural conformance** (static analysis of the cloned repos). The terms below are used throughout the tables, charts and flags.
+
+### Code volume
+
+- **LAT** — *Lines Added Total*. Raw `+` lines in the merged diff (before any filtering). The most permissive measure of code volume; includes formatting changes, generated code and renames.
+- **LAR** — *Lines Added Real*. LAT after stripping blank lines and comment-only lines. The diff line count we treat as "actual code" without any survival or cosmetic-rewrite filter applied.
+- **LD** — *Lines Deleted*. Lines removed by the PR's diff, used to recognise legitimate refactor/cleanup work that LS alone would miss.
+- **LS** — *Lines Surviving*. Statements introduced by the student that still exist (after AST-fingerprint-aware blame) at the report's reference date. This is the volume figure used in Section B and in flags. LS attributes at the *statement* level, not the line level — whitespace changes and identifier renames don't inflate or deflate it.
+- **LS/pt** — LS divided by the task's estimation points. A density measure: high values mean the task delivered more surviving code per estimated point than typical; low values mean the opposite.
+- **Stmts** — *Surviving statements (normalised)*. AST-normalised statements introduced by the student that survive at the report's reference date, taken from `pr_survival.statements_surviving_normalized`. Less sensitive to verbosity, formatting, identifier renames and cosmetic rewrites than LS, because the AST normaliser collapses whitespace, masks identifiers and masks literals before counting. For tasks the value is distributed across a PR's linked tasks weighted by estimation-point share; for PRs the value is the raw PR-level total.
+- **Stmts/pt** — Stmts divided by the task's (or the PR's linked tasks') estimation points. The same density idea as LS/pt but on the statement unit, which is the better red flag for over- or under-estimation: it is harder to inflate by reformatting, harder to deflate by refactor, and is the unit used in the per-student `estimation_density` aggregate.
+- **Weighted PR Lines** — each PR's `+` and `-` lines distributed across its linked tasks weighted by estimation-point share. Used in the cumulative summary so multi-task PRs don't double-count.
+
+### Estimation calibration
+
+- **Density Δ** — MAD-normalised deviation of this row's `stmts/points` from the median density across the relevant scope: `(stmts_per_pt − median) / MAD`. In the per-student summary the median is computed across teammates; in the per-task and per-PR tables it is computed across the project's tasks/PRs in the sprint. **▲** denser than typical (more code per point — under-pointed or unusually dense work), **▼** sparser than typical (over-pointed or light task), **≈** within ±1 MAD-z. Empty when MAD is zero (density is uniform — no normalisation possible) or the row has zero estimation points.
+
+### PR submission timing
+
+The horizontal stacked bar in section A classifies each merged PR by when it landed relative to the sprint deadline:
+
+- **Regular** — submitted with at least a working day of runway.
+- **Late** — close to the deadline but not at the wire.
+- **Critical / Cramming** — pushed in the final hours; correlates with weak review and rushed integration.
+- **Fix** — explicit fix-up PR (title or linked task type).
+
+### Code ownership
+
+- **Truck factor** — the smallest number of authors whose combined ownership covers ≥ 50 % of the team's surviving code. Higher is better (less concentrated). The owners list shows top contributors by share.
+
+### Architecture conformance
+
+The cloned repos are scanned against the project rubric (`config/architecture.toml`). Every offending Java file produces a **violation** with three pieces of metadata:
+
+- **Rule** — what was violated. Layered rules read as `<from>` *must not depend on* `<to>` (e.g. *presentation must not depend on infrastructure*); AST rules document a structural constraint such as "fragments must not hold Retrofit fields".
+- **Severity** — *CRITICAL*, *WARNING* or *INFO*, set by the rule itself.
+- **Attribution** — the dominant author of the offending file (by surviving statements). That author owns the violation in section B.
+
+### Static analysis (per student)
+
+Each student dashboard ends with a **Static analysis** block summarising findings from PMD, Checkstyle and SpotBugs that `git blame` attributes to that student. **Informational only — these findings do not affect the assignment grade.** The headline reports total findings broken down by severity, plus a `weight` figure: weight reflects how much of each offending region the student authored, so a 1-line typo fix on a 30-line method weighs ~0.03, not 0.50. Findings are listed top-`weight` first; the team-wide tally (when present) appears just under the section B heading.
+
+### Flags
+
+Flags are signal triggers: each one fires when a specific evidence threshold is crossed. They appear under **Flags** in each student dashboard with a severity tag:
+
+- **CRITICAL** — strong evidence of an issue that warrants direct discussion (e.g. *Ghost contributor*, *PR does not compile*).
+- **WARNING** — meaningful concern that the student should be aware of (e.g. *Low survival rate*, *Cramming*, *Architecture drift*).
+- **INFO** — informational signal, often paired contextually with a warning elsewhere (e.g. the *Cosmetic rewrite — victim* row pairs with the *actor* row).
+
+The **⚠** glyph next to a PR number means the data pipeline recorded an attribution error (base-SHA fallback, missing author, GitHub HTTP hiccup). It is observability metadata, never a grading penalty.
+
+### Doc-score signals
+
+- **Doc score** (per-PR cell) — rendered as `title + description` on a 0.25-step grid: title is 0–2, description is 0–4, so the displayed sum is in the range 0–6. Reading the two halves separately tells you whether a low score came from a vague title, a missing description, or both.
+- **Avg Doc Score** (cumulative summary) — mean of those per-PR totals across the student's DONE TASKs/BUGs in the sprint, on the same 0–6 scale. Computed by an LLM rubric when one is configured, otherwise by deterministic heuristics (empty body / generic title).
+
+### Peer-group analysis (section C)
+
+Tasks across **every sprint in the project so far** are bucketed into peer groups by **stack × layer × action**. The *layer* is inferred from the file paths the linked PRs touched (controller, service, fragment, …) — not from the task title — so a task labelled "Implementar pantalla detall" lands in the same bucket as another team's "Add detail screen". The *action* is read from the diff itself: PRs whose `+` lines dominate are *create*; balanced diffs are *modify*. Only DONE TASK / BUG rows whose linked PRs are *all* merged participate — WIP work and tasks linked to open PRs would distort the densities.
+
+Within each group, the **density** (statements surviving normalised ÷ estimation points) is compared against the group's median using a robust scale estimate (MAD, falling back to mean absolute deviation when the cluster is too tight for MAD to be informative). Tasks whose density z-score crosses the configured threshold are marked as **outliers** with the deviation surfaced in the *Reason* column. An outlier is a discussion seed, not a verdict.
+
+## Code quality on main
+
+Per-member breakdown of architecture violations, complexity / testability findings, and static-analysis findings surviving on the default branch. Each bullet links to the offending file at HEAD; the `% of lines` suffix on architecture rows is the student's blame share over the offending range. Sprint-level behavioural metrics follow below.
+
+**Static analysis (team):** 1 (0 critical · 0 warning · 1 info)
+
+### Alice Adams
+
+**Architecture violations:** 1 (0 critical · 1 warning · 0 info)
+
+- [`Login.java` :L42-L99](https://github.com/udg-pds/spring-mini/blob/HEAD/src/main/java/Login.java#L42-L99 "src/main/java/Login.java") — VALIDATION IN UI _(warning)_ · 100% of lines
+  - Validation belongs in the service layer, not the controller.
+
+**Complexity & testability:** 1 (0 critical · 1 warning · 0 info)
+
+- [`LoginController.authenticate()` :L42-L99](https://github.com/udg-pds/spring-mini/blob/HEAD/src/main/java/Login.java#L42-L99 "src/main/java/Login.java") — Complexity / testability concern _(warning)_ (12 > 10) · 100% of lines
+
+**Static analysis:** 1 (0 critical · 0 warning · 1 info) — weight 1.0
+
+- [`Login.java` :L42-L99](https://github.com/udg-pds/spring-mini/blob/HEAD/src/main/java/Login.java#L42-L99) — `pmd:UnusedPrivateMethod` · _info_ — Avoid unused private methods such as helper(). · 100% of lines
+
+## Sprint 1 (1 April 2026, 02:00 CEST — 1 May 2026, 01:59 CEST)
+
+### A. Team snapshot
+
+#### This sprint
+
+| Student | GitHub | Points | Share | PR lines | LS | LD | LS/pt | Survival | Density Δ | Flags |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Alice Adams | [alice-gh](https://github.com/alice-gh) | 0 | 0% | 0 | 0 | 0 | 0 | 0% |  | 0 |
+| Bob Brown | [bob-gh](https://github.com/bob-gh) | 0 | 0% | 0 | 0 | 0 | 0 | 0% |  | 0 |
+
+#### Cumulative through this sprint
+
+| Student | GitHub | Points | Share | PR lines | LS | LD | LS/pt | Survival | Density Δ | Flags |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Alice Adams | [alice-gh](https://github.com/alice-gh) | 0 | 0% | 0 | 0 | 0 | 0 | 0% |  | 0 |
+| Bob Brown | [bob-gh](https://github.com/bob-gh) | 0 | 0% | 0 | 0 | 0 | 0 | 0% |  | 0 |
+
+_Legend:_ **Density Δ** = MAD-normalised deviation of this student's surviving statements per estimated point from the team median: ▲ denser than typical (more code per point — under-pointed or unusually dense work), ▼ sparser than typical (over-pointed or light task), ≈ within ±1 MAD-z. Empty when MAD is zero or the student has no surviving code.
+
+**Team flag totals:** 0 critical · 0 warning · 0 info
+
+### B. Student dashboards
+
+#### Alice Adams
+_GitHub: [`alice-gh`](https://github.com/alice-gh)_
+
+**Tasks**
+
+| Key | Name | Points | LS | LD | LS/pt | Stmts | Stmts/pt | Density Δ | Status |
+|---|---|---|---|---|---|---|---|---|---|
+| [T-1](https://trackdev.org/dashboard/tasks/1) | Login endpoint | 5 | 0 | 0 | 0 | 0 | 0 |  | DONE |
+
+**Pull requests**
+
+| # | Repo | Title | +/- | Est. points | LS | LD | LS/pt | Stmts | Stmts/pt | Density Δ | Doc score |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| [#1](https://github.com/udg-pds/spring-mini/pull/1) | spring-mini | [Add login endpoint](https://github.com/udg-pds/spring-mini/pull/1) | +100 / -20 | 5 | 0 | 0 | 0 | 0 | 0 |  |  |
+
+---
+
+#### Bob Brown
+_GitHub: [`bob-gh`](https://github.com/bob-gh)_
+
+---
+
+## C. Peer-group analysis
+
+_No peer groups for this project._
+
+
+## D. Cumulative per-student summary
+
+Totals per sprint across the DONE tasks assigned to each student. Weighted PR Lines distributes each PR's additions+deletions across its linked tasks by estimation-point share.
+
+### Alice Adams
+
+| Sprint | Points (DONE) | PRs | Commits | Files | Weighted PR Lines | Avg Doc Score |
+|---|---|---|---|---|---|---|
+| Sprint 1 | 5 | 1 | 0 | 0 | 0 | — |
+
+### Bob Brown
+
+| Sprint | Points (DONE) | PRs | Commits | Files | Weighted PR Lines | Avg Doc Score |
+|---|---|---|---|---|---|---|
+| Sprint 1 | 0 | 0 | 0 | 0 | 0 | — |

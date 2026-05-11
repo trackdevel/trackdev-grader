@@ -1905,6 +1905,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "chrono-tz",
+ "insta",
  "rusqlite",
  "rust_xlsxwriter",
  "serde",
