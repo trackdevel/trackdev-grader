@@ -33,7 +33,6 @@ use std::process::Command;
 use std::time::Duration;
 
 use rusqlite::{params, Connection};
-use sprint_grader_core::finding::{LineSpan, RuleFinding, RuleKind, Severity as CoreSeverity};
 use tracing::{info, warn};
 
 /// Scan one cloned repo: run enabled analyzers, persist findings to
@@ -455,68 +454,6 @@ fn git_head_sha(repo_path: &Path) -> Option<String> {
     Some(s.trim().to_string())
 }
 
-/// W2.T3: read every `static_analysis_findings` row for `repo_full_name`
-/// and convert each into a shared `RuleFinding`. The renderer
-/// unification in W2.T5 will consume this in place of the per-crate
-/// `SaFinding` SELECT inlined in `crates/report/src/markdown.rs`.
-///
-/// `rule_id` is namespaced (`pmd:UnusedPrivateMethod`,
-/// `checkstyle:MissingJavadocMethod`, `spotbugs:DM_DEFAULT_ENCODING`) so
-/// the unified renderer can surface the source tool inline.
-///
-/// Path safety: W2.T3 enforces repo-relative paths at ingestion time
-/// (`sarif::parse(..., Some(repo_root))`). Pre-W2.T3 rows may still
-/// hold absolute paths; the renderer's debug-assert in
-/// `report::url::github_blob_url` will catch any that slip through.
-pub fn load_rule_findings_for_repo(
-    conn: &Connection,
-    repo_full_name: &str,
-) -> rusqlite::Result<Vec<RuleFinding>> {
-    let mut stmt = conn.prepare(
-        "SELECT file_path, analyzer, rule_id, severity,
-                start_line, end_line, message
-         FROM static_analysis_findings
-         WHERE repo_full_name = ?
-         ORDER BY file_path, start_line, analyzer, rule_id",
-    )?;
-    let rows = stmt.query_map(params![repo_full_name], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, Option<i64>>(4)?,
-            r.get::<_, Option<i64>>(5)?,
-            r.get::<_, String>(6)?,
-        ))
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (file, analyzer, rule_id, severity_s, s_line, e_line, message) = row?;
-        let span = match (s_line, e_line) {
-            (Some(s), Some(e)) if e > s && s >= 1 && e >= 1 => LineSpan::range(s as u32, e as u32),
-            (Some(s), _) if s >= 1 => LineSpan::single(s as u32),
-            _ => LineSpan::single(0),
-        };
-        let severity = match severity_s.to_ascii_uppercase().as_str() {
-            "CRITICAL" | "ERROR" => CoreSeverity::Critical,
-            "INFO" | "INFORMATIONAL" | "NOTICE" => CoreSeverity::Info,
-            _ => CoreSeverity::Warning,
-        };
-        out.push(RuleFinding {
-            rule_id: format!("{analyzer}:{rule_id}"),
-            kind: RuleKind::StaticAnalysis,
-            severity,
-            repo_full_name: repo_full_name.to_string(),
-            file_repo_relative: file,
-            span,
-            evidence: message,
-            extra: None,
-        });
-    }
-    Ok(out)
-}
-
 /// Look up the `<org>/<repo>` form for a bare repo directory name by
 /// matching against `pull_requests.repo_full_name`. Returns `None` if no
 /// PR row references this repo (e.g. fresh project with no PRs yet).
@@ -588,68 +525,5 @@ mod tests {
         apply_schema(&conn).unwrap();
         let n = scan_project_to_db(&conn, Path::new("/no/such/dir"), &Rules::default()).unwrap();
         assert_eq!(n, 0);
-    }
-
-    #[test]
-    fn finding_into_rule_finding_namespaces_analyzer_into_rule_id() {
-        // W2.T3: the unified renderer wants `pmd:UnusedPrivateMethod`,
-        // not just `UnusedPrivateMethod` — the analyzer is the bit
-        // students look up first when they see a finding.
-        let f = adapter::Finding {
-            analyzer: "pmd".to_string(),
-            rule_id: "UnusedPrivateMethod".to_string(),
-            category: adapter::Category::Bug,
-            severity: adapter::Severity::Info,
-            file_path: "src/main/java/Login.java".to_string(),
-            start_line: Some(42),
-            end_line: Some(99),
-            message: "Avoid unused private methods such as 'helper()'.".to_string(),
-            help_uri: None,
-            fingerprint: "fp".to_string(),
-        };
-        let r = f.into_rule_finding("udg/spring-x");
-        assert_eq!(r.kind, RuleKind::StaticAnalysis);
-        assert_eq!(r.severity, CoreSeverity::Info);
-        assert_eq!(r.rule_id, "pmd:UnusedPrivateMethod");
-        assert_eq!(r.file_repo_relative, "src/main/java/Login.java");
-        assert_eq!(r.span, LineSpan::range(42, 99));
-        assert_eq!(
-            r.evidence,
-            "Avoid unused private methods such as 'helper()'."
-        );
-    }
-
-    #[test]
-    fn load_static_analysis_rule_findings_round_trips_through_db() {
-        let conn = Connection::open_in_memory().unwrap();
-        apply_schema(&conn).unwrap();
-        conn.execute_batch(
-            "INSERT INTO static_analysis_findings
-                (repo_full_name, analyzer, rule_id, severity, file_path,
-                 start_line, end_line, message, fingerprint)
-             VALUES
-                ('udg/spring-x', 'pmd', 'UnusedPrivateMethod', 'INFO',
-                 'src/main/java/A.java', 42, 99,
-                 'Avoid unused private methods.', 'fp1'),
-                ('udg/spring-x', 'checkstyle', 'MissingJavadocMethod', 'WARNING',
-                 'src/main/java/B.java', 7, 7, 'Missing javadoc.', 'fp2'),
-                ('udg/spring-other', 'spotbugs', 'DM_DEFAULT_ENCODING', 'CRITICAL',
-                 'C.java', 1, 1, '...', 'fp3');",
-        )
-        .unwrap();
-        let findings = load_rule_findings_for_repo(&conn, "udg/spring-x").unwrap();
-        assert_eq!(findings.len(), 2, "must scope by repo_full_name");
-        // Sorted by file_path → A first.
-        let a = &findings[0];
-        assert_eq!(a.kind, RuleKind::StaticAnalysis);
-        assert_eq!(a.rule_id, "pmd:UnusedPrivateMethod");
-        assert_eq!(a.severity, CoreSeverity::Info);
-        assert_eq!(a.file_repo_relative, "src/main/java/A.java");
-        assert_eq!(a.span, LineSpan::range(42, 99));
-        // B uses single-line span and warning severity.
-        let b = &findings[1];
-        assert_eq!(b.rule_id, "checkstyle:MissingJavadocMethod");
-        assert_eq!(b.severity, CoreSeverity::Warning);
-        assert_eq!(b.span, LineSpan::single(7));
     }
 }
