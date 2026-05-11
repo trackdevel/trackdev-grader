@@ -21,7 +21,8 @@ use rusqlite::Connection;
 use sprint_grader_core::{db::configure_pragmas, Config, Database};
 use tracing::{info, warn};
 
-use crate::android_repo_root;
+use crate::report_sync::sync_repo_to_origin_main;
+use crate::{android_repo_root, repo_has_report_changes};
 
 /// Describes one of the three full-pipeline variants. Frozen so the CLI can
 /// pattern-match by equality and callers can't silently tweak a single field.
@@ -75,6 +76,13 @@ pub struct PipelineOptions {
     pub skip_arch_llm: bool,
     pub force_pr_refresh: bool,
     pub max_workers: Option<usize>,
+    /// When `true`, the report stage rebases each team's android clone
+    /// onto `origin/main` and renders the **team-facing** REPORT.md
+    /// flavor (no static-analysis section) into the clone. Nothing is
+    /// committed or pushed — the user reviews `git diff` locally and
+    /// publishes via `sync-reports --skip-collect --push` (or a manual
+    /// `git push`) once satisfied. Ignored when `skip_reports` is set.
+    pub team_reports: bool,
 }
 
 impl PipelineOptions {
@@ -91,6 +99,7 @@ impl PipelineOptions {
             skip_arch_llm: false,
             force_pr_refresh: false,
             max_workers: None,
+            team_reports: false,
         }
     }
 }
@@ -312,15 +321,9 @@ fn run_project_stage_block(
         sprint_grader_process::compute_all_collaboration(&conn, sprint_id)
     });
 
-    // repo_analysis block
-    stage("task_similarity", &mut || {
-        sprint_grader_repo_analysis::compute_task_similarity(
-            &conn,
-            sprint_id,
-            &config.repo_analysis,
-        )
-        .map(|_| ())
-    });
+    // repo_analysis block. Peer-group analysis is project-scoped (one
+    // pass per project across every sprint up to today) and runs
+    // outside this per-sprint block — see `run_pipeline`.
     stage("temporal_analysis", &mut || {
         sprint_grader_repo_analysis::compute_temporal_analysis(
             &conn,
@@ -1434,6 +1437,22 @@ pub fn run_pipeline(
         }
     }
 
+    // Peer-group analysis (project-scoped). Runs after every per-sprint
+    // analysis stage has populated `pr_line_metrics`, `pr_survival`,
+    // and `fingerprints` — those are the inputs the path-based layer
+    // inference and density-only outlier detector read. Idempotent
+    // (DELETE WHERE project_id = ? before INSERT).
+    for g in &groups {
+        if let Err(e) = sprint_grader_repo_analysis::compute_task_similarity(
+            &db.conn,
+            g.project_id,
+            &g.sprint_ids,
+            &config.repo_analysis,
+        ) {
+            warn!(project = %g.name, error = %e, "peer-group analysis failed");
+        }
+    }
+
     // Stage 5: trajectory aggregation (runs once — cross-sprint).
     let trajectory_stage = if variant.ai_detection() { 5 } else { 4 };
     info!(
@@ -1465,6 +1484,13 @@ pub fn run_pipeline(
         .context("Excel report generation failed")?;
 
     // Markdown: one multi-sprint REPORT.md per Android repository.
+    // When `--reports` is set we rebase each clone onto origin/main
+    // first and render the team-facing flavor (no static-analysis
+    // section) into the clone — but never commit or push. The user
+    // reviews `git diff` locally and publishes manually (or via
+    // `sync-reports --skip-collect --push`) once satisfied. Without
+    // the flag the historical instructor-facing flavor is written.
+    let mut dirty_repos = 0usize;
     for g in &groups {
         let Some(repo_root) = android_repo_root(&opts.entregues_dir, &g.name) else {
             warn!(
@@ -1473,16 +1499,68 @@ pub fn run_pipeline(
             );
             continue;
         };
-        let report_path = repo_root.join("REPORT.md");
-        if let Err(e) = sprint_grader_report::generate_markdown_report_multi_to_path(
-            &db.conn,
-            g.project_id,
-            &g.name,
-            &g.sprint_ids,
-            &report_path,
-        ) {
-            warn!(project = %g.name, path = %report_path.display(), error = %e, "markdown report failed");
+        if opts.team_reports {
+            if let Err(e) = sync_repo_to_origin_main(&repo_root) {
+                warn!(project = %g.name, error = %e, "git sync to origin/main failed; skipping report for this team");
+                continue;
+            }
         }
+        let report_path = repo_root.join("REPORT.md");
+        let render_result = if opts.team_reports {
+            // Team-facing flavor: static analysis stripped (instructor-only by phase-1 sign-off).
+            sprint_grader_report::generate_markdown_report_multi_to_path_ex(
+                &db.conn,
+                g.project_id,
+                &g.name,
+                &g.sprint_ids,
+                &report_path,
+                false,
+            )
+        } else {
+            sprint_grader_report::generate_markdown_report_multi_to_path(
+                &db.conn,
+                g.project_id,
+                &g.name,
+                &g.sprint_ids,
+                &report_path,
+            )
+        };
+        if let Err(e) = render_result {
+            warn!(project = %g.name, path = %report_path.display(), error = %e, "markdown report failed");
+            continue;
+        }
+        if opts.team_reports {
+            // Content-level dirty check so the summary reports only
+            // clones whose REPORT.md actually differs from origin/main.
+            // Pure observability — we do not act on the result.
+            match repo_has_report_changes(&repo_root, &[report_path.clone()]) {
+                Ok(true) => {
+                    dirty_repos += 1;
+                    info!(
+                        project = %g.name,
+                        path = %report_path.display(),
+                        "team-facing REPORT.md ready for review (cd in and `git diff`)"
+                    );
+                }
+                Ok(false) => {
+                    info!(project = %g.name, "team-facing REPORT.md unchanged from origin/main");
+                }
+                Err(e) => {
+                    warn!(
+                        repo = %repo_root.display(),
+                        error = %e,
+                        "git status check failed; report still rendered"
+                    );
+                }
+            }
+        }
+    }
+
+    if opts.team_reports {
+        info!(
+            dirty_repos,
+            "team-facing reports rendered — review with `git diff` per clone, then push via `sync-reports --skip-collect --push` or a manual `git push`"
+        );
     }
 
     info!(variant = variant.name(), "pipeline complete");
