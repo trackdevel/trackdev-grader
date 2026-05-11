@@ -207,7 +207,7 @@ impl Analyzer for Pmd {
             };
         }
 
-        let findings = match sarif::parse(&sarif_path) {
+        let findings = match sarif::parse(&sarif_path, Some(input.repo_path)) {
             Ok(mut fs) => {
                 // Drop sub-floor severity findings before INSERT.
                 fs.retain(|f| f.severity.at_least(cfg.severity_floor));
