@@ -35,7 +35,6 @@ use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::{params, Connection};
-use sprint_grader_core::finding::{LineSpan, RuleFinding, RuleKind, Severity};
 use tracing::{info, warn};
 
 const STATUS_OK: &str = "OK";
@@ -306,76 +305,6 @@ pub fn scan_project_to_db(
     Ok(total)
 }
 
-/// W2.T1: read every `architecture_violations` row for `repo_full_name`
-/// and convert each into a shared `RuleFinding`. The renderer
-/// unification in W2.T5 will consume this in place of the per-crate
-/// `AttributedArchViolation` SELECT currently inlined in
-/// `crates/report/src/markdown.rs`.
-///
-/// Path safety: the architecture stage writes repo-relative paths to
-/// `file_path` (see `scanner::scan_repo`), so the value passes through
-/// `RuleFinding::file_repo_relative` unchanged. If a malformed legacy
-/// row contains an absolute path the renderer's debug-assert in
-/// `report::url::github_blob_url` will catch it.
-pub fn load_rule_findings_for_repo(
-    conn: &Connection,
-    repo_full_name: &str,
-) -> rusqlite::Result<Vec<RuleFinding>> {
-    let mut stmt = conn.prepare(
-        "SELECT file_path, rule_name, offending_import, severity,
-                start_line, end_line, COALESCE(explanation, '')
-         FROM architecture_violations
-         WHERE repo_full_name = ?
-         ORDER BY file_path, start_line, rule_name, offending_import",
-    )?;
-    let rows = stmt.query_map(params![repo_full_name], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, Option<i64>>(4)?,
-            r.get::<_, Option<i64>>(5)?,
-            r.get::<_, String>(6)?,
-        ))
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (file, rule_name, offending, severity_s, s_line, e_line, explanation) = row?;
-        let span = build_span(s_line, e_line);
-        out.push(RuleFinding {
-            rule_id: rule_name,
-            kind: RuleKind::Architecture,
-            severity: parse_severity(&severity_s),
-            repo_full_name: repo_full_name.to_string(),
-            file_repo_relative: file,
-            span,
-            evidence: explanation,
-            extra: Some(offending),
-        });
-    }
-    Ok(out)
-}
-
-fn build_span(start: Option<i64>, end: Option<i64>) -> LineSpan {
-    match (start, end) {
-        (Some(s), Some(e)) if e > s && s >= 1 && e >= 1 => {
-            // start ≥ 1 / end ≥ 1 guarded above; the casts are safe.
-            LineSpan::range(s as u32, e as u32)
-        }
-        (Some(s), _) if s >= 1 => LineSpan::single(s as u32),
-        _ => LineSpan::single(0),
-    }
-}
-
-fn parse_severity(s: &str) -> Severity {
-    match s.to_ascii_uppercase().as_str() {
-        "CRITICAL" | "ERROR" => Severity::Critical,
-        "INFO" | "INFORMATIONAL" | "NOTICE" => Severity::Info,
-        _ => Severity::Warning,
-    }
-}
-
 /// Look up the `<org>/<repo>` form for a bare repo directory name by
 /// matching against `pull_requests.repo_full_name`. Returns `None` if no
 /// PR row references this repo (e.g. fresh project with no PRs yet).
@@ -623,86 +552,5 @@ may_depend_on = []
             )
             .unwrap();
         assert_eq!(stored, "spring-y");
-    }
-
-    #[test]
-    fn into_rule_finding_carries_span_severity_and_extra() {
-        // W2.T1: in-memory Violation → RuleFinding conversion is lossless.
-        // Range-shaped span with explicit severity and an LLM evidence string.
-        let v = Violation {
-            file_path: "src/main/java/Login.java".to_string(),
-            rule_name: "VALIDATION_IN_UI".to_string(),
-            kind: ViolationKind::AstRule("ast_forbidden_method_call".to_string()),
-            offending_import: "LoginController::validate".to_string(),
-            start_line: Some(42),
-            end_line: Some(99),
-        };
-        let f = v.into_rule_finding(
-            "udg-pds/spring-mini",
-            Severity::Warning,
-            "Validation belongs in the service layer.".to_string(),
-        );
-        assert_eq!(f.kind, RuleKind::Architecture);
-        assert_eq!(f.severity, Severity::Warning);
-        assert_eq!(f.rule_id, "VALIDATION_IN_UI");
-        assert_eq!(f.repo_full_name, "udg-pds/spring-mini");
-        assert_eq!(f.file_repo_relative, "src/main/java/Login.java");
-        assert_eq!(f.span, LineSpan::range(42, 99));
-        assert_eq!(f.evidence, "Validation belongs in the service layer.");
-        assert_eq!(f.extra.as_deref(), Some("LoginController::validate"));
-    }
-
-    #[test]
-    fn into_rule_finding_collapses_single_line_span() {
-        let v = Violation {
-            file_path: "Foo.java".to_string(),
-            rule_name: "x".to_string(),
-            kind: ViolationKind::LayerDependency,
-            offending_import: "com.x.Y".to_string(),
-            start_line: Some(13),
-            end_line: Some(13),
-        };
-        let f = v.into_rule_finding("o/r", Severity::Critical, String::new());
-        assert_eq!(f.span, LineSpan::single(13));
-        assert_eq!(f.evidence, "");
-    }
-
-    #[test]
-    fn load_rule_findings_for_repo_round_trips_through_db() {
-        let conn = Connection::open_in_memory().unwrap();
-        sprint_grader_core::db::apply_schema(&conn).unwrap();
-        conn.execute_batch(
-            "INSERT INTO architecture_violations
-                (repo_full_name, file_path, rule_name, violation_kind,
-                 offending_import, severity, start_line, end_line, rule_kind, explanation)
-             VALUES
-                ('udg/spring-x', 'src/main/java/A.java', 'VALIDATION_IN_UI',
-                 'ast_forbidden_method_call', 'A::validate', 'CRITICAL', 42, 99,
-                 'ast_forbidden_method_call', 'Validation belongs in service.'),
-                ('udg/spring-x', 'src/main/java/B.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING', 7, 7,
-                 'layer_dependency', NULL),
-                ('udg/spring-other', 'src/main/java/Z.java', 'r', 'layer_dependency',
-                 'com.z.X', 'INFO', 1, 1, 'layer_dependency', NULL);",
-        )
-        .unwrap();
-        let findings = load_rule_findings_for_repo(&conn, "udg/spring-x").unwrap();
-        assert_eq!(findings.len(), 2, "must scope by repo_full_name");
-        // Sorted by file_path → A first, then B.
-        let a = &findings[0];
-        assert_eq!(a.file_repo_relative, "src/main/java/A.java");
-        assert_eq!(a.severity, Severity::Critical);
-        assert_eq!(a.rule_id, "VALIDATION_IN_UI");
-        assert_eq!(a.span, LineSpan::range(42, 99));
-        assert_eq!(a.evidence, "Validation belongs in service.");
-        assert_eq!(a.extra.as_deref(), Some("A::validate"));
-
-        let b = &findings[1];
-        assert_eq!(b.severity, Severity::Warning);
-        assert_eq!(b.span, LineSpan::single(7));
-        assert_eq!(
-            b.evidence, "",
-            "NULL explanation must surface as empty string"
-        );
     }
 }
