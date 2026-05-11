@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
-use sprint_grader_core::finding::{LineSpan, RuleFinding, RuleKind, Severity as CoreSeverity};
 
 /// Inputs handed to every analyzer per (repo, sprint) invocation. Lifetime
 /// `'a` borrows the cloned-repo paths and identifiers from the orchestration
@@ -114,35 +113,6 @@ pub struct Finding {
 }
 
 impl Finding {
-    /// W2.T3: convert one PMD/Checkstyle/SpotBugs finding into the shared
-    /// `RuleFinding` shape consumed by the unified attribution +
-    /// renderer pipeline. The `rule_id` is namespaced
-    /// (`pmd:UnusedPrivateMethod`, `checkstyle:MissingJavadocMethod`,
-    /// `spotbugs:DM_DEFAULT_ENCODING`) so the unified renderer can
-    /// surface the source tool inline.
-    pub fn into_rule_finding(self, repo_full_name: &str) -> RuleFinding {
-        let span = match (self.start_line, self.end_line) {
-            (Some(s), Some(e)) if e > s => LineSpan::range(s, e),
-            (Some(s), _) => LineSpan::single(s),
-            _ => LineSpan::single(0),
-        };
-        let severity = match self.severity {
-            Severity::Critical => CoreSeverity::Critical,
-            Severity::Warning => CoreSeverity::Warning,
-            Severity::Info => CoreSeverity::Info,
-        };
-        RuleFinding {
-            rule_id: format!("{}:{}", self.analyzer, self.rule_id),
-            kind: RuleKind::StaticAnalysis,
-            severity,
-            repo_full_name: repo_full_name.to_string(),
-            file_repo_relative: self.file_path,
-            span,
-            evidence: self.message,
-            extra: None,
-        }
-    }
-
     /// Stable identifier used for the `UNIQUE (repo, sprint, fingerprint)`
     /// constraint on `static_analysis_findings`. SHA-1 of the canonical
     /// composite `analyzer|rule_id|file_path|start_line|message[..120]` —
