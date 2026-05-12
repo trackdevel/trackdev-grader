@@ -38,7 +38,6 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
-use tracing::warn;
 use tree_sitter::{Node, Parser};
 
 use crate::checker::{Violation, ViolationKind};
@@ -155,20 +154,6 @@ pub struct RawAstRule {
     /// the file's own package.
     #[serde(default)]
     pub type_package_allowlist: Option<String>,
-    /// Wave A of the legacy-rule deprecation path: mark a rule
-    /// `deprecated = true` and the loader emits a one-shot warning per
-    /// rule name. The rule still fires — the goal is to surface the
-    /// fact that a successor rule (named in `replaced_by`) is now the
-    /// authoritative one. Wave B will run the DELETE migration that
-    /// removes legacy rows from `architecture_violations`; Wave C
-    /// removes the `[[ast_rule]]` block itself.
-    #[serde(default)]
-    pub deprecated: bool,
-    /// Optional human-readable hint naming the rubric peer that
-    /// supersedes a deprecated rule. Surfaced in the deprecation
-    /// warning; has no behavioural effect.
-    #[serde(default)]
-    pub replaced_by: Option<String>,
     #[serde(default = "default_severity")]
     pub severity: String,
 }
@@ -450,23 +435,6 @@ pub struct AstRule {
 
 impl AstRule {
     pub fn from_raw(raw: RawAstRule) -> anyhow::Result<Self> {
-        // Wave A: surface deprecated rules so reviewers see them in logs
-        // long before Wave B's DELETE migration runs.
-        if raw.deprecated {
-            match raw.replaced_by.as_deref() {
-                Some(peer) => warn!(
-                    rule = %raw.name,
-                    replaced_by = peer,
-                    "deprecated architecture rule loaded; the named successor is authoritative — \
-                     this block will be removed in a later wave"
-                ),
-                None => warn!(
-                    rule = %raw.name,
-                    "deprecated architecture rule loaded with no `replaced_by` hint; \
-                     this block will be removed in a later wave"
-                ),
-            }
-        }
         // Compile cross-kind state before destructuring the RawClassMatch
         // so the resulting borrow of `raw` is still whole.
         let visibility = Visibility::parse(raw.visibility.as_deref())?;
@@ -3348,53 +3316,5 @@ mod tests {
         "#;
         let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
         assert_eq!(v.len(), 1, "List<UserRepository> field must fire: {v:?}");
-    }
-
-    // ---------- Wave A: deprecated flag ----------
-
-    #[test]
-    fn deprecated_flag_round_trips_through_toml_and_rule_still_loads() {
-        // The deprecated flag must not block the rule from compiling
-        // and firing. Wave A's job is only to surface the warning; the
-        // delete migration is Wave B.
-        let raw: RawAstRule = toml::from_str(
-            r#"
-            name = "controller-no-repo-field-legacy"
-            class_match.annotation = "RestController"
-            kind = "forbidden_field_type"
-            type_regex = ".*Repository$"
-            deprecated = true
-            replaced_by = "CONTROLLER_USES_REPOSITORY"
-            "#,
-        )
-        .expect("deprecated/replaced_by must deserialise");
-        assert!(raw.deprecated);
-        assert_eq!(
-            raw.replaced_by.as_deref(),
-            Some("CONTROLLER_USES_REPOSITORY")
-        );
-        let r = AstRule::from_raw(raw).expect("deprecated rule must still compile");
-        let src = r#"
-            package com.x.controller;
-            @RestController
-            public class C { private UserRepository repo; }
-        "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
-        assert_eq!(v.len(), 1, "deprecated rule must still fire");
-    }
-
-    #[test]
-    fn deprecated_defaults_to_false_when_absent() {
-        let raw: RawAstRule = toml::from_str(
-            r#"
-            name = "CONTROLLER_USES_REPOSITORY"
-            class_match.annotation = "RestController"
-            kind = "forbidden_field_type"
-            type_regex = ".*Repository$"
-            "#,
-        )
-        .expect("rule with no deprecated key must parse");
-        assert!(!raw.deprecated);
-        assert!(raw.replaced_by.is_none());
     }
 }
