@@ -111,7 +111,7 @@ For each rule: a trigger (deterministic detection criterion), one BAD example yo
 (b) **DTO-shaped by name** (secondary signal, used when the folder check is inconclusive) — the simple type name contains `dto`, `request`, or `response` (case-insensitive). Catches DTOs in projects that haven't adopted the folder convention.
 (c) **A stdlib value type** — a primitive wrapper, `String`, `UUID`, `BigDecimal` / `BigInteger`, `URI` / `URL`, or any `java.time.*` type.
 
-Generic wrappers (`ResponseEntity<T>`, `Optional<T>`, `List<T>`, `Page<T>`, `Mono<T>`, `Flux<T>`) are stripped before the type is tested, so the inner type is what matters. The rule's name and intent both lead with "non-DTO" rather than "entity" deliberately — the architectural sin is exposing a non-DTO type at the controller boundary, regardless of whether that type is a JPA `@Entity`, a domain object, or a plain POJO.
+Generic wrappers are stripped before the type is tested, so the inner type is what matters. Recognised wrappers are unwrapped recursively: `ResponseEntity<T>`, `Optional<T>`, `List<T>`, `Collection<T>`, `Set<T>`, `Iterable<T>`, `Iterator<T>`, `Stream<T>`, `Queue<T>`, `Deque<T>`, `Page<T>`, `Slice<T>`, `PageImpl<T>`, `Mono<T>`, `Flux<T>`, `CompletableFuture<T>`, `Future<T>`, `Callable<T>`. `Map<K, V>` is intentionally not unwrapped (two type parameters; ambiguous which to test). So `ResponseEntity<List<UserDto>>` is tested as `UserDto`, and `List<User>` from a `domain` package still fires. The rule's name and intent both lead with "non-DTO" rather than "entity" deliberately — the architectural sin is exposing a non-DTO type at the controller boundary, regardless of whether that type is a JPA `@Entity`, a domain object, or a plain POJO.
 
 **BAD (fires):** controller returning `UserView`, imported as `com.example.app.domain.UserView`. Stage (a) negative — not under a `dto/` folder. Stage (b) negative — name doesn't contain `dto`, `request`, or `response`. Stage (c) negative — not a stdlib type. Violation.
 ```java
@@ -339,7 +339,7 @@ public X create(@Valid @RequestBody CreateXRequest req) { ... }
 (b) **DTO-shaped by name** (secondary signal, used when the folder check is inconclusive) — the simple type name contains `dto`, `request`, or `response` (case-insensitive). Catches DTOs in projects that haven't adopted the folder convention.
 (c) **A stdlib value type** — a primitive wrapper, `String`, `UUID`, `BigDecimal` / `BigInteger`, `URI` / `URL`, or any `java.time.*` type.
 
-Generic wrappers (`ResponseEntity<T>`, `Optional<T>`, `List<T>`, `Page<T>`, `Mono<T>`, `Flux<T>`) are stripped before the type is tested, so the inner type is what matters. Methods declared `private`, `protected`, or package-private (no modifier) are NOT flagged — they may legitimately exchange any type with same-package collaborators.
+Generic wrappers are stripped before the type is tested, so the inner type is what matters. The same wrapper list as `CONTROLLER_RETURNS_NON_DTO` applies (see that rule for the full list). Methods declared `private`, `protected`, or package-private (no modifier) are NOT flagged — they may legitimately exchange any type with same-package collaborators.
 
 **BAD (fires):** public service method exchanging a `User` imported from a domain package.
 ```java
