@@ -5,6 +5,15 @@ target_stack: spring-boot-3.x / java-21
 scope: single-file analysis
 ---
 
+> **TARGETING.** This file is the human-readable spec for the AST rules
+> in `config/architecture.toml`. As of Wave 4 of the AST-rubric
+> migration it is **no longer fed to an LLM**. The deterministic AST
+> engine in `crates/architecture/src/ast_rules.rs` is authoritative;
+> this document is reference material for the instructor, and the
+> golden source for the `crates/architecture/tests/spring_v8_fixtures.rs`
+> integration tests. Bump `rubric_version` and tune the corresponding
+> `[[ast_rule]]` block in `architecture.toml` when the policy changes.
+
 # Spring Boot Architecture Rubric
 
 ## Task
