@@ -29,7 +29,7 @@ pub use checker::{check_file, check_repo, Violation, ViolationKind};
 pub use glob::PackagePattern;
 pub use rubric::Rubric;
 pub use rules::{ArchitectureRules, Forbidden, Layer};
-pub use scanner::{parse_java, scan_repo, ImportLine, JavaFileFacts};
+pub use scanner::{scan_repo, ImportLine, ScannedFile};
 
 use std::path::Path;
 use std::time::Instant;
@@ -190,20 +190,13 @@ pub fn scan_repo_to_db(
             insert_violation(conn, repo_full_name, &rules.severity, &v)?;
             written += 1;
         }
-        // AST rules (T-P3.1).
+        // AST rules (T-P3.1). The scanner already parsed the file; the
+        // pre-built tree on `ScannedFile` is reused so each file is read
+        // off disk and parsed exactly once per scan.
         if !rules.ast_rules.is_empty() {
-            let abs = repo_path.join(&file.rel_path);
-            if let Ok(src) = std::fs::read(&abs) {
-                let ast_violations = ast_rules::check_java_file(
-                    &rules.ast_rules,
-                    &file.rel_path,
-                    &file.package,
-                    &src,
-                );
-                for v in ast_violations {
-                    insert_violation(conn, repo_full_name, &rules.severity, &v)?;
-                    written += 1;
-                }
+            for v in ast_rules::check_java_file(&rules.ast_rules, file) {
+                insert_violation(conn, repo_full_name, &rules.severity, &v)?;
+                written += 1;
             }
         }
     }
