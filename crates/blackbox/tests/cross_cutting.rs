@@ -135,9 +135,9 @@ fn t_t4_3_markdown_report_includes_new_p2_sections() {
     // a line range so the new shape's PK (which includes start_line) holds.
     conn.execute(
         "INSERT INTO architecture_violations
-            (repo_full_name, file_path, rule_name, violation_kind,
-             offending_import, severity, start_line, end_line)
-         VALUES ('udg/r', 'A.java', 'rule', 'layer_dependency', 'com.x.y', 'WARNING', 1, 1)",
+            (repo_full_name, file_path, rule_name,
+             offending_import, severity, start_line, end_line, rule_kind)
+         VALUES ('udg/r', 'A.java', 'rule', 'com.x.y', 'WARNING', 1, 1, 'layer_dependency')",
         [],
     )
     .unwrap();
