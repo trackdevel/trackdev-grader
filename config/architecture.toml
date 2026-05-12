@@ -311,7 +311,13 @@ kind = "forbidden_field_type"
 type_regex = ".*(Service|Repository|Component)$"
 severity = "WARNING"
 
-# --- Android client AST rules (pre-v1 rubric) ---------------------------
+# --- Legacy Android AST rules (pre-v1 rubric, kept for cache continuity) ---
+#
+# Pre-v1 rules. Their rule_names appear in already-cached
+# architecture_runs.head_sha rows, so removing them would force a rescan
+# of every previously-graded repo. Functionally subsumed by the new
+# SHOUTY_SNAKE_CASE rules below (FRAGMENT_BYPASSES_VIEWMODEL +
+# VIEWMODEL_BYPASSES_REPOSITORY), but kept additively.
 
 # Android: Activities and Fragments must not hold a Retrofit/ApiService directly.
 [[ast_rule]]
@@ -342,4 +348,356 @@ name = "viewmodel-no-retrofit-ctor-param"
 class_match.extends = "ViewModel"
 kind = "forbidden_constructor_param"
 type_regex = "^(Retrofit|.*ApiService)$"
+severity = "WARNING"
+
+# --- Android v1 rubric --------------------------------------------------
+#
+# Verbatim rule IDs from `config/android-rubric.md` (v1). Severity
+# matches the rubric's table.
+#
+# Class identification (rubric §"Class identification by name suffix"):
+#   ViewModel   = name_suffix "ViewModel"   OR extends "ViewModel" / "AndroidViewModel"
+#                                            OR annotation "HiltViewModel"
+#   Fragment    = name_suffix "Fragment"    OR extends "Fragment" / "DialogFragment"
+#                                            / "BottomSheetDialogFragment" / "PreferenceFragmentCompat"
+#   Activity    = name_suffix "Activity"    OR extends "Activity" / "AppCompatActivity"
+#                                            / "FragmentActivity" / "ComponentActivity"
+#   Repository  = name_suffix "Repository"
+#
+# Where a rule needs multiple class shapes, multiple `[[ast_rule]]`
+# blocks share the same `name = "..."` — the violations PK collapses
+# duplicates produced when one class matches several shapes.
+
+# --- VIEWMODEL_IMPORTS_ANDROID_UI --- CRITICAL ---
+#
+# A ViewModel must not see the View layer; importing it virtually
+# guarantees a memory leak. Three class-shape variants share one
+# import_regex.
+
+[[ast_rule]]
+name = "VIEWMODEL_IMPORTS_ANDROID_UI"
+class_match.name_suffix = "ViewModel"
+kind = "forbidden_import"
+import_regex = "^(android\\.view\\.|android\\.widget\\.|.+\\.[A-Z]\\w*Binding$|.+\\.\\w*(Fragment|Activity)\\w*$)"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "VIEWMODEL_IMPORTS_ANDROID_UI"
+class_match.extends = "ViewModel"
+kind = "forbidden_import"
+import_regex = "^(android\\.view\\.|android\\.widget\\.|.+\\.[A-Z]\\w*Binding$|.+\\.\\w*(Fragment|Activity)\\w*$)"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "VIEWMODEL_IMPORTS_ANDROID_UI"
+class_match.extends = "AndroidViewModel"
+kind = "forbidden_import"
+import_regex = "^(android\\.view\\.|android\\.widget\\.|.+\\.[A-Z]\\w*Binding$|.+\\.\\w*(Fragment|Activity)\\w*$)"
+severity = "CRITICAL"
+
+# --- VIEWMODEL_HOLDS_CONTEXT --- CRITICAL ---
+#
+# The ViewModel outlives its Activity/Fragment, so any Context/Activity/
+# Fragment/View field leaks them. AndroidViewModel is exempt (it holds an
+# Application reference, which is process-scoped).
+
+[[ast_rule]]
+name = "VIEWMODEL_HOLDS_CONTEXT"
+class_match.extends = "ViewModel"
+class_match.not_extends = "AndroidViewModel"
+kind = "forbidden_field_type"
+type_regex = "^(Context|Activity|AppCompatActivity|FragmentActivity|Fragment|View|ViewGroup|TextView|Button|EditText|ImageView|RecyclerView)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "VIEWMODEL_HOLDS_CONTEXT"
+class_match.name_suffix = "ViewModel"
+class_match.not_extends = "AndroidViewModel"
+kind = "forbidden_field_type"
+type_regex = "^(Context|Activity|AppCompatActivity|FragmentActivity|Fragment|View|ViewGroup|TextView|Button|EditText|ImageView|RecyclerView)$"
+severity = "CRITICAL"
+
+# --- FRAGMENT_BYPASSES_VIEWMODEL --- CRITICAL ---
+#
+# The View layer must talk only to its ViewModel — no Retrofit / repo
+# / ApiService fields, no direct retrofit2.* imports.
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_field_type"
+type_regex = ".*(Repository|ApiService)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Activity"
+kind = "forbidden_field_type"
+type_regex = ".*(Repository|ApiService)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_import"
+import_regex = "^retrofit2\\."
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Activity"
+kind = "forbidden_import"
+import_regex = "^retrofit2\\."
+severity = "CRITICAL"
+
+# --- REPOSITORY_DEPENDS_ON_VIEW_LAYER --- CRITICAL ---
+#
+# Repositories must not see UI types. Plain `android.content.Context`
+# is allowed (Hilt @ApplicationContext); excluded from the field/param
+# type regex below.
+
+[[ast_rule]]
+name = "REPOSITORY_DEPENDS_ON_VIEW_LAYER"
+class_match.name_suffix = "Repository"
+kind = "forbidden_field_type"
+type_regex = "^(Activity|AppCompatActivity|FragmentActivity|Fragment|View|ViewGroup|TextView|Button|EditText|ImageView|RecyclerView|.+ViewModel|.+Binding)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "REPOSITORY_DEPENDS_ON_VIEW_LAYER"
+class_match.name_suffix = "Repository"
+kind = "forbidden_method_param"
+type_regex = "^(Activity|AppCompatActivity|FragmentActivity|Fragment|View|ViewGroup|TextView|Button|EditText|ImageView|RecyclerView|.+ViewModel|.+Binding)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "REPOSITORY_DEPENDS_ON_VIEW_LAYER"
+class_match.name_suffix = "Repository"
+kind = "forbidden_import"
+import_regex = "^(android\\.app\\.Activity$|androidx\\.fragment\\.app\\.Fragment$|androidx\\.appcompat\\.app\\.AppCompatActivity$|android\\.view\\.|android\\.widget\\.)"
+severity = "CRITICAL"
+
+# --- ASYNCTASK_USAGE --- CRITICAL ---
+#
+# AsyncTask was deprecated in API 30 and removed from new SDKs. No class
+# shape gate — the rule fires anywhere AsyncTask is imported. We attach
+# it to a generic class match by extending `Object`-shaped classes (i.e.
+# every public class) via the package_glob escape hatch: an empty match
+# means "match every class". We approximate that with a wildcard
+# package_glob.
+
+[[ast_rule]]
+name = "ASYNCTASK_USAGE"
+class_match.package_glob = "**"
+kind = "forbidden_import"
+import_regex = "^android\\.os\\.AsyncTask"
+severity = "CRITICAL"
+
+# --- STATIC_VIEW_OR_CONTEXT_FIELD --- CRITICAL ---
+#
+# Any class holding a static reference to a UI / Context type leaks it
+# process-wide.
+
+[[ast_rule]]
+name = "STATIC_VIEW_OR_CONTEXT_FIELD"
+class_match.package_glob = "**"
+kind = "forbidden_field_type"
+type_regex = "^(Context|Activity|AppCompatActivity|FragmentActivity|Fragment|View|ViewGroup|TextView|Button|EditText|ImageView|RecyclerView)$"
+required_modifier = "static"
+severity = "CRITICAL"
+
+# --- FRAGMENT_BINDING_NOT_NULLED --- CRITICAL ---
+#
+# A Fragment with a *Binding field must null it in onDestroyView, or
+# the Fragment's View outlives the binding.
+
+[[ast_rule]]
+name = "FRAGMENT_BINDING_NOT_NULLED"
+class_match.name_suffix = "Fragment"
+kind = "must_null_in_lifecycle"
+type_regex = ".*Binding$"
+method_name = "onDestroyView"
+severity = "CRITICAL"
+
+# --- LIVEDATA_OBSERVED_WITH_FRAGMENT_THIS --- CRITICAL ---
+#
+# In a Fragment, the lifecycle owner of a LiveData observer MUST be
+# `getViewLifecycleOwner()`, not `this` — using `this` outlives the
+# View and produces duplicate observers / IllegalStateException.
+
+[[ast_rule]]
+name = "LIVEDATA_OBSERVED_WITH_FRAGMENT_THIS"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_call_source"
+source_regex = "\\.observe\\(\\s*this\\s*,"
+severity = "CRITICAL"
+
+# --- VIEWMODEL_BYPASSES_REPOSITORY --- WARNING ---
+#
+# The ViewModel must depend on a Repository, not on Retrofit or an API
+# service directly.
+
+[[ast_rule]]
+name = "VIEWMODEL_BYPASSES_REPOSITORY"
+class_match.name_suffix = "ViewModel"
+kind = "forbidden_field_type"
+type_regex = ".*ApiService$"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "VIEWMODEL_BYPASSES_REPOSITORY"
+class_match.name_suffix = "ViewModel"
+kind = "forbidden_import"
+import_regex = "^retrofit2\\."
+severity = "WARNING"
+
+# --- FINDVIEWBYID_USAGE --- WARNING ---
+#
+# ViewBinding replaces every findViewById call in the project. The
+# pattern matches both the dotted form (`view.findViewById(...)`,
+# `this.findViewById(...)`) and the bare same-class form inherited from
+# Activity (`findViewById(R.id.foo)` with no receiver). Anchoring with
+# `(^|\.)` and `$` keeps the match precise — `someOther_findViewById`
+# (no preceding dot) does not fire.
+
+[[ast_rule]]
+name = "FINDVIEWBYID_USAGE"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_method_call"
+call_regex = "(^|\\.)findViewById$"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "FINDVIEWBYID_USAGE"
+class_match.name_suffix = "Activity"
+kind = "forbidden_method_call"
+call_regex = "(^|\\.)findViewById$"
+severity = "WARNING"
+
+# --- NAVIGATION_VIA_FRAGMENT_TRANSACTION --- WARNING ---
+#
+# The project uses Navigation Component; navigate via
+# `NavController.navigate(...)` rather than FragmentManager.beginTransaction().
+
+[[ast_rule]]
+name = "NAVIGATION_VIA_FRAGMENT_TRANSACTION"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_call_source"
+source_regex = "beginTransaction\\(\\s*\\)\\s*\\.(?:add|replace|remove)"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "NAVIGATION_VIA_FRAGMENT_TRANSACTION"
+class_match.name_suffix = "Activity"
+kind = "forbidden_call_source"
+source_regex = "beginTransaction\\(\\s*\\)\\s*\\.(?:add|replace|remove)"
+severity = "WARNING"
+
+# --- FRAGMENT_CASTS_PARENT_ACTIVITY --- WARNING ---
+#
+# Fragment-to-Activity coupling should go through a shared ViewModel,
+# not a downcast.
+
+[[ast_rule]]
+name = "FRAGMENT_CASTS_PARENT_ACTIVITY"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_call_source"
+source_regex = "\\(\\s*\\(\\s*[A-Z]\\w*\\s*\\)\\s*(?:requireActivity|getActivity)\\(\\s*\\)\\s*\\)"
+severity = "WARNING"
+
+# --- RAW_THREAD_FOR_BACKGROUND_WORK --- WARNING ---
+#
+# Background work must use Executors so threads are pooled, named, and
+# shut down properly. `new Thread(...)` anywhere in a Fragment /
+# Activity / ViewModel / Repository fires the rule.
+
+[[ast_rule]]
+name = "RAW_THREAD_FOR_BACKGROUND_WORK"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_constructor_call"
+type_regex = "^Thread$"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "RAW_THREAD_FOR_BACKGROUND_WORK"
+class_match.name_suffix = "Activity"
+kind = "forbidden_constructor_call"
+type_regex = "^Thread$"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "RAW_THREAD_FOR_BACKGROUND_WORK"
+class_match.name_suffix = "ViewModel"
+kind = "forbidden_constructor_call"
+type_regex = "^Thread$"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "RAW_THREAD_FOR_BACKGROUND_WORK"
+class_match.name_suffix = "Repository"
+kind = "forbidden_constructor_call"
+type_regex = "^Thread$"
+severity = "WARNING"
+
+# --- MUTABLELIVEDATA_EXPOSED_PUBLICLY --- WARNING ---
+#
+# Consumers (Fragments) must only see `LiveData<T>` — they should not be
+# able to call setValue / postValue. Two forms: public field and public
+# getter returning MutableLiveData.
+
+[[ast_rule]]
+name = "MUTABLELIVEDATA_EXPOSED_PUBLICLY"
+class_match.name_suffix = "ViewModel"
+kind = "forbidden_field_type"
+type_regex = "^MutableLiveData$"
+required_modifier = "public"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "MUTABLELIVEDATA_EXPOSED_PUBLICLY"
+class_match.name_suffix = "ViewModel"
+kind = "forbidden_return_type"
+visibility = "public"
+type_regex = "^MutableLiveData$"
+severity = "WARNING"
+
+# --- FAT_FRAGMENT_OR_ACTIVITY_METHOD --- WARNING ---
+#
+# Lifecycle methods legitimately include view binding, observer
+# registration, and click listeners — threshold is higher than for a
+# Spring controller. 40 top-level statements.
+
+[[ast_rule]]
+name = "FAT_FRAGMENT_OR_ACTIVITY_METHOD"
+class_match.name_suffix = "Fragment"
+kind = "max_method_statements"
+max = 40
+severity = "WARNING"
+
+[[ast_rule]]
+name = "FAT_FRAGMENT_OR_ACTIVITY_METHOD"
+class_match.name_suffix = "Activity"
+kind = "max_method_statements"
+max = 40
+severity = "WARNING"
+
+# --- MISSING_HILT_VIEWMODEL --- WARNING ---
+#
+# A class extending ViewModel / AndroidViewModel with an @Inject
+# constructor must carry @HiltViewModel.
+
+[[ast_rule]]
+name = "MISSING_HILT_VIEWMODEL"
+class_match.extends = "ViewModel"
+kind = "class_requires_annotation"
+required_annotation = "HiltViewModel"
+trigger_constructor_annotation = "Inject"
+severity = "WARNING"
+
+[[ast_rule]]
+name = "MISSING_HILT_VIEWMODEL"
+class_match.extends = "AndroidViewModel"
+kind = "class_requires_annotation"
+required_annotation = "HiltViewModel"
+trigger_constructor_annotation = "Inject"
 severity = "WARNING"
