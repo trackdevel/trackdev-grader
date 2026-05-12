@@ -127,6 +127,34 @@ impl Database {
                 .execute("DROP INDEX IF EXISTS idx_arch_attr_sprint", [])?;
         }
 
+        // Drop the dead `violation_kind` column. T-P2.2 introduced it
+        // with two possible values; T-P3.1 added a nullable `rule_kind`
+        // intended to widen the domain but every writer since has
+        // populated both columns with the same string. The schema (post
+        // this migration) keeps only `rule_kind`. Idempotent: no-op once
+        // `violation_kind` is gone. Re-read column names after the
+        // sprint_id-drop branch above — that branch may have already
+        // dropped the whole table, in which case the new schema below
+        // recreates it cleanly without `violation_kind`.
+        let post_drop_cols = self
+            .column_names("architecture_violations")
+            .unwrap_or_default();
+        if post_drop_cols.iter().any(|c| c == "violation_kind") {
+            // Backfill rule_kind from violation_kind for any row whose
+            // rule_kind is still NULL. Defensive: every writer post-T-P3.1
+            // already populates both, but pre-T-P3.1 rows have NULL.
+            self.conn.execute(
+                "UPDATE architecture_violations
+                    SET rule_kind = violation_kind
+                  WHERE rule_kind IS NULL",
+                [],
+            )?;
+            self.conn.execute(
+                "ALTER TABLE architecture_violations DROP COLUMN violation_kind",
+                [],
+            )?;
+        }
+
         // T-P3.4 PR 2: same shape collapse for complexity findings —
         // method_complexity_findings, method_complexity_attribution,
         // method_complexity_runs all lose sprint_id, runs PK becomes
@@ -995,6 +1023,96 @@ mod tests {
         assert_eq!(n, 0);
     }
 
+    /// Regression: a DB carrying the post-T-P3.4 / pre-violation_kind-drop
+    /// shape (sprint_id already gone, but violation_kind still NOT NULL)
+    /// must lose the dead column on the next `create_tables` call without
+    /// losing rows. Pre-T-P3.1 rows (rule_kind = NULL) must have their
+    /// `rule_kind` backfilled from `violation_kind` before the drop.
+    #[test]
+    fn migration_drops_violation_kind_column_and_preserves_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grading.db");
+
+        // Seed the post-T-P3.4 + pre-this-change shape by hand.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE architecture_violations (
+                    repo_full_name       TEXT NOT NULL,
+                    file_path            TEXT NOT NULL,
+                    rule_name            TEXT NOT NULL,
+                    violation_kind       TEXT NOT NULL,
+                    offending_import     TEXT NOT NULL,
+                    severity             TEXT NOT NULL,
+                    start_line           INTEGER,
+                    end_line             INTEGER,
+                    rule_kind            TEXT,
+                    rule_version         TEXT,
+                    explanation          TEXT,
+                    introduced_sprint_id INTEGER,
+                    PRIMARY KEY (repo_full_name, file_path, rule_name, offending_import, start_line)
+                );
+                 INSERT INTO architecture_violations
+                    (repo_full_name, file_path, rule_name, violation_kind,
+                     offending_import, severity, start_line, end_line, rule_kind)
+                 VALUES
+                    -- A: rule_kind populated (post-T-P3.1 writer).
+                    ('udg/spring-x', 'A.java', 'r-a', 'layer_dependency',
+                     'imp-a', 'WARNING', 1, 2, 'layer_dependency'),
+                    -- B: rule_kind NULL (pre-T-P3.1 ghost row) — must be backfilled.
+                    ('udg/spring-x', 'B.java', 'r-b', 'forbidden_import',
+                     'imp-b', 'CRITICAL', 3, 3, NULL);",
+            )
+            .unwrap();
+        }
+
+        // Open + migrate.
+        let db = Database::open(&path).unwrap();
+        db.create_tables().unwrap();
+
+        // violation_kind is gone.
+        let cols = db.column_names("architecture_violations").unwrap();
+        assert!(
+            !cols.iter().any(|c| c == "violation_kind"),
+            "violation_kind must be dropped, got cols: {cols:?}"
+        );
+
+        // Both rows survive.
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM architecture_violations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 2, "rows must be preserved across the DROP COLUMN");
+
+        // Row B: rule_kind was NULL pre-migration → backfilled from
+        // violation_kind (= 'forbidden_import').
+        let kind_b: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT rule_kind FROM architecture_violations WHERE file_path = 'B.java'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            kind_b.as_deref(),
+            Some("forbidden_import"),
+            "rule_kind must be backfilled from violation_kind when NULL"
+        );
+
+        // Second create_tables call is a no-op.
+        db.create_tables().unwrap();
+        let n2: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM architecture_violations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n2, 2, "second migration must be a no-op");
+    }
+
     /// Idempotency: running the migration on an already-new-shape DB
     /// must be a no-op (no DROP, no data loss).
     #[test]
@@ -1008,10 +1126,10 @@ mod tests {
         db.conn
             .execute(
                 "INSERT INTO architecture_violations
-                    (repo_full_name, file_path, rule_name, violation_kind,
-                     offending_import, severity, start_line, end_line)
+                    (repo_full_name, file_path, rule_name,
+                     offending_import, severity, start_line, end_line, rule_kind)
                     VALUES ('udg-pds/spring-x', 'Foo.java', 'rule-a',
-                            'layer_dependency', 'org.example', 'WARNING', 12, 12)",
+                            'org.example', 'WARNING', 12, 12, 'layer_dependency')",
                 [],
             )
             .unwrap();
