@@ -374,9 +374,9 @@ fn insert_llm_violation(
     conn.execute(
         "INSERT OR REPLACE INTO architecture_violations
             (repo_full_name, file_path, rule_name,
-             violation_kind, offending_import, severity,
+             offending_import, severity,
              start_line, end_line, rule_kind, rule_version, explanation)
-         VALUES (?, ?, ?, 'llm', ?, ?, ?, ?, 'llm', ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'llm', ?, ?)",
         params![
             repo_full_name,
             file_path,
