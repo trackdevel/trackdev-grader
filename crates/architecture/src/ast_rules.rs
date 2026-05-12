@@ -132,6 +132,16 @@ pub struct RawAstRule {
     /// `parameter_annotation_requires_companion` (W2.5).
     #[serde(default)]
     pub required_annotation_regex: Option<String>,
+    /// `class_requires_annotation` (W3.1) — the class-level annotation
+    /// the matched class MUST carry once the trigger condition fires
+    /// (e.g. `"HiltViewModel"` for `MISSING_HILT_VIEWMODEL`).
+    #[serde(default)]
+    pub required_annotation: Option<String>,
+    /// `class_requires_annotation` (W3.1) — the constructor-level
+    /// annotation whose presence enables the rule (e.g. `"Inject"`).
+    /// Without this trigger the rule stays silent.
+    #[serde(default)]
+    pub trigger_constructor_annotation: Option<String>,
     /// 3-stage non-DTO gate (W2.x). Suppresses a field/param/return-type
     /// finding when the offending type's simple name matches (e.g.
     /// stdlib value types: `String`, `UUID`, ...).
@@ -380,6 +390,13 @@ pub enum AstRuleKind {
         type_regex: Regex,
         max: usize,
     },
+    /// W3.1 — when any constructor carries `trigger_constructor_annotation`,
+    /// the class itself MUST carry `required_annotation` as a class-level
+    /// annotation; otherwise fires. Used by `MISSING_HILT_VIEWMODEL`.
+    ClassRequiresAnnotation {
+        required_annotation: String,
+        trigger_constructor_annotation: String,
+    },
 }
 
 impl AstRuleKind {
@@ -403,6 +420,7 @@ impl AstRuleKind {
                 "ast_parameter_annotation_requires_companion"
             }
             AstRuleKind::FieldCountWithTypePattern { .. } => "ast_field_count_with_type_pattern",
+            AstRuleKind::ClassRequiresAnnotation { .. } => "ast_class_requires_annotation",
         }
     }
 }
@@ -525,6 +543,24 @@ impl AstRule {
                         raw.name
                     )
                 })?,
+            },
+            "class_requires_annotation" => AstRuleKind::ClassRequiresAnnotation {
+                required_annotation: raw.required_annotation.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ast_rule '{}' kind=class_requires_annotation requires `required_annotation`",
+                        raw.name
+                    )
+                })?,
+                trigger_constructor_annotation: raw
+                    .trigger_constructor_annotation
+                    .clone()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "ast_rule '{}' kind=class_requires_annotation requires \
+                             `trigger_constructor_annotation`",
+                            raw.name
+                        )
+                    })?,
             },
             other => {
                 anyhow::bail!("ast_rule '{}' has unknown kind '{}'", raw.name, other)
@@ -1154,6 +1190,33 @@ fn apply_rule(
                     anchor,
                 ));
             }
+        }
+        AstRuleKind::ClassRequiresAnnotation {
+            required_annotation,
+            trigger_constructor_annotation,
+        } => {
+            // Trigger: any constructor carries the trigger annotation.
+            // `method_annotations` walks the modifier list and works for
+            // constructor_declaration too (same AST shape).
+            let has_trigger = children(body).into_iter().any(|m| {
+                m.kind() == "constructor_declaration"
+                    && method_annotations(m, source)
+                        .iter()
+                        .any(|a| a == trigger_constructor_annotation)
+            });
+            if !has_trigger {
+                return;
+            }
+            if info.annotations.iter().any(|a| a == required_annotation) {
+                return;
+            }
+            let anchor = class_identifier(info.node).unwrap_or(info.node);
+            out.push(make_violation(
+                rel_path,
+                rule,
+                &format!("{}::missing-@{}", info.name, required_annotation),
+                anchor,
+            ));
         }
     }
 }
@@ -2968,5 +3031,99 @@ mod tests {
             Some("CRITICAL"),
             "the rule's severity must travel on the Violation: {v:?}"
         );
+    }
+
+    // ---------- W3.1: class_requires_annotation ----------
+
+    #[test]
+    fn missing_hilt_viewmodel_fires_when_inject_constructor_lacks_class_annotation() {
+        let r = rule(
+            r#"
+            name = "MISSING_HILT_VIEWMODEL"
+            class_match.extends = "ViewModel"
+            kind = "class_requires_annotation"
+            required_annotation = "HiltViewModel"
+            trigger_constructor_annotation = "Inject"
+            severity = "WARNING"
+            "#,
+        );
+        let src = r#"
+            package com.x.home;
+            public class HomeViewModel extends ViewModel {
+                @Inject HomeViewModel(UserRepository repo) {}
+            }
+        "#;
+        let v = check_java_file(&[r], "HomeViewModel.java", "com.x.home", src.as_bytes());
+        assert_eq!(v.len(), 1, "missing @HiltViewModel should fire: {v:?}");
+        assert!(v[0].offending_import.contains("missing-@HiltViewModel"));
+        assert_eq!(v[0].severity.as_deref(), Some("WARNING"));
+    }
+
+    #[test]
+    fn missing_hilt_viewmodel_silent_when_class_carries_required_annotation() {
+        let r = rule(
+            r#"
+            name = "MISSING_HILT_VIEWMODEL"
+            class_match.extends = "ViewModel"
+            kind = "class_requires_annotation"
+            required_annotation = "HiltViewModel"
+            trigger_constructor_annotation = "Inject"
+            "#,
+        );
+        let src = r#"
+            package com.x.home;
+            @HiltViewModel
+            public class HomeViewModel extends ViewModel {
+                @Inject HomeViewModel(UserRepository repo) {}
+            }
+        "#;
+        let v = check_java_file(&[r], "HomeViewModel.java", "com.x.home", src.as_bytes());
+        assert!(v.is_empty(), "@HiltViewModel present → no fire: {v:?}");
+    }
+
+    #[test]
+    fn missing_hilt_viewmodel_silent_without_trigger_constructor() {
+        let r = rule(
+            r#"
+            name = "MISSING_HILT_VIEWMODEL"
+            class_match.extends = "ViewModel"
+            kind = "class_requires_annotation"
+            required_annotation = "HiltViewModel"
+            trigger_constructor_annotation = "Inject"
+            "#,
+        );
+        // No @Inject constructor — the trigger doesn't fire, so the rule
+        // stays silent regardless of @HiltViewModel.
+        let src = r#"
+            package com.x.home;
+            public class HomeViewModel extends ViewModel {
+                HomeViewModel() {}
+            }
+        "#;
+        let v = check_java_file(&[r], "HomeViewModel.java", "com.x.home", src.as_bytes());
+        assert!(v.is_empty(), "no @Inject trigger → no fire: {v:?}");
+    }
+
+    #[test]
+    fn missing_hilt_viewmodel_silent_when_class_shape_doesnt_match() {
+        let r = rule(
+            r#"
+            name = "MISSING_HILT_VIEWMODEL"
+            class_match.extends = "ViewModel"
+            kind = "class_requires_annotation"
+            required_annotation = "HiltViewModel"
+            trigger_constructor_annotation = "Inject"
+            "#,
+        );
+        // Not a ViewModel — class_match gates the rule out before the
+        // trigger is ever evaluated.
+        let src = r#"
+            package com.x.home;
+            public class HomeService {
+                @Inject HomeService() {}
+            }
+        "#;
+        let v = check_java_file(&[r], "HomeService.java", "com.x.home", src.as_bytes());
+        assert!(v.is_empty(), "non-ViewModel must not fire: {v:?}");
     }
 }
