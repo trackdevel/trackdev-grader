@@ -758,12 +758,6 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
     created_at      TEXT NOT NULL
 );
 
--- Architecture conformance violations (T-P2.2). One row per
--- (file, rule, offending import) so a single layer-leak in a controller
--- importing a repository doesn't get aggregated away. `violation_kind`
--- is one of `layer_dependency` (a layered rule was broken) or
--- `forbidden_import` (a category-level prohibition fired). `rule_name`
--- is the rule label from `architecture.toml` for cross-referencing.
 -- Architecture conformance violations (T-P2.2 / T-P3.1 / T-P3.3 / T-P3.4).
 -- Artifact-level rows: one per (repo, file, rule, offending_import,
 -- start_line) describing a violation that survives in the team's main
@@ -771,12 +765,16 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
 -- the per-sprint trajectory. `introduced_sprint_id` records the
 -- earliest sprint window that contains the minimum author-date among
 -- the lines blamed for [start_line..=end_line]; NULL when no window
--- matches (e.g. commits before the course started).
+-- matches (e.g. commits before the course started). The T-P2.2
+-- `violation_kind` column has been dropped — its value was always the
+-- same as `rule_kind` (every writer wrote both columns with the same
+-- string); `apply_additive_migrations` backfills `rule_kind` from the
+-- legacy `violation_kind` for any pre-T-P3.1 row that still has NULL
+-- before issuing `ALTER TABLE ... DROP COLUMN`.
 CREATE TABLE IF NOT EXISTS architecture_violations (
     repo_full_name       TEXT NOT NULL,
     file_path            TEXT NOT NULL,
     rule_name            TEXT NOT NULL,
-    violation_kind       TEXT NOT NULL,
     offending_import     TEXT NOT NULL,
     severity             TEXT NOT NULL,
     -- 1-based inclusive line range. Part of the PK so the same rule
@@ -787,7 +785,7 @@ CREATE TABLE IF NOT EXISTS architecture_violations (
     -- whose line was historically NULL on some inputs.
     start_line           INTEGER,
     end_line             INTEGER,
-    -- "package_glob" / "forbidden_import" / "ast_*" / "llm".
+    -- "layer_dependency" / "forbidden_import" / "ast_*" / "llm".
     rule_kind            TEXT,
     -- T-P3.3: hash of the rubric/rule body that produced this row, so
     -- a rubric edit invalidates cached LLM judgements. NULL on
