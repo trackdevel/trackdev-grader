@@ -10,7 +10,7 @@
 //! depend on each other, not what stdlib calls are permitted.
 
 use crate::rules::ArchitectureRules;
-use crate::scanner::JavaFileFacts;
+use crate::scanner::ScannedFile;
 
 /// Package roots we never classify as belonging to a student layer.
 ///
@@ -127,14 +127,15 @@ fn import_to_package(import: &str) -> String {
     }
 }
 
-pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Violation> {
+pub fn check_file(rules: &ArchitectureRules, file: &ScannedFile) -> Vec<Violation> {
     let mut out = Vec::new();
-    let own_layer = rules.layer_of(&facts.package);
+    let own_layer = rules.layer_of(&file.package);
 
-    for imp in &facts.imports {
+    for imp in &file.imports {
         let raw_import = &imp.text;
         let imp_pkg = import_to_package(raw_import);
-        let line = imp.line;
+        let start = Some(imp.start_line);
+        let end = Some(imp.end_line);
         if let Some(own) = own_layer {
             // Framework / JDK imports never belong to a *student* layer, even
             // when their package happens to match a layer glob (e.g.
@@ -152,12 +153,12 @@ pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Viola
                         .unwrap_or(false);
                     if !allowed {
                         out.push(Violation {
-                            file_path: facts.rel_path.clone(),
+                            file_path: file.rel_path.clone(),
                             rule_name: format!("{own}->!{target_layer}"),
                             kind: ViolationKind::LayerDependency,
                             offending_import: raw_import.clone(),
-                            start_line: line,
-                            end_line: line,
+                            start_line: start,
+                            end_line: end,
                             severity: None,
                         });
                     }
@@ -166,16 +167,15 @@ pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Viola
         }
 
         for f in &rules.forbidden {
-            if f.from.matches(&facts.package)
-                && f.must_not_match.iter().any(|p| p.matches(&imp_pkg))
+            if f.from.matches(&file.package) && f.must_not_match.iter().any(|p| p.matches(&imp_pkg))
             {
                 out.push(Violation {
-                    file_path: facts.rel_path.clone(),
+                    file_path: file.rel_path.clone(),
                     rule_name: f.label.clone(),
                     kind: ViolationKind::ForbiddenImport,
                     offending_import: raw_import.clone(),
-                    start_line: line,
-                    end_line: line,
+                    start_line: start,
+                    end_line: end,
                     severity: None,
                 });
             }
@@ -186,7 +186,7 @@ pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Viola
 
 pub fn check_repo<'a>(
     rules: &'a ArchitectureRules,
-    files: &'a [JavaFileFacts],
+    files: &'a [ScannedFile],
 ) -> impl Iterator<Item = Violation> + 'a {
     files.iter().flat_map(move |f| check_file(rules, f))
 }
@@ -238,17 +238,19 @@ must_not_match = ["org/springframework/web/**"]
         assert_eq!(import_to_package("com.x.*"), "com.x");
     }
 
+    fn scan(rel: &str, src: &str) -> ScannedFile {
+        ScannedFile::from_inline(rel, src.as_bytes()).expect("inline source must declare a package")
+    }
+
     #[test]
     fn controller_importing_repository_is_a_violation() {
         let r = rules();
-        let f = JavaFileFacts {
-            rel_path: "src/main/java/UserController.java".into(),
-            package: "com.x.controller".into(),
-            imports: vec![crate::scanner::ImportLine {
-                text: "com.x.repository.UserRepository".into(),
-                line: Some(2),
-            }],
-        };
+        let f = scan(
+            "src/main/java/UserController.java",
+            "package com.x.controller;\n\
+             import com.x.repository.UserRepository;\n\
+             public class UserController {}\n",
+        );
         let vs = check_file(&r, &f);
         assert_eq!(vs.len(), 1);
         assert_eq!(vs[0].kind, ViolationKind::LayerDependency);
@@ -259,28 +261,24 @@ must_not_match = ["org/springframework/web/**"]
     #[test]
     fn application_importing_domain_is_allowed() {
         let r = rules();
-        let f = JavaFileFacts {
-            rel_path: "Svc.java".into(),
-            package: "com.x.application.svc".into(),
-            imports: vec![crate::scanner::ImportLine {
-                text: "com.x.domain.user.User".into(),
-                line: Some(2),
-            }],
-        };
+        let f = scan(
+            "Svc.java",
+            "package com.x.application.svc;\n\
+             import com.x.domain.user.User;\n\
+             public class Svc {}\n",
+        );
         assert!(check_file(&r, &f).is_empty());
     }
 
     #[test]
     fn forbidden_import_fires_independently_of_layer() {
         let r = rules();
-        let f = JavaFileFacts {
-            rel_path: "Domain.java".into(),
-            package: "com.x.domain.user".into(),
-            imports: vec![crate::scanner::ImportLine {
-                text: "org.springframework.web.bind.annotation.RestController".into(),
-                line: Some(2),
-            }],
-        };
+        let f = scan(
+            "Domain.java",
+            "package com.x.domain.user;\n\
+             import org.springframework.web.bind.annotation.RestController;\n\
+             public class Domain {}\n",
+        );
         let vs = check_file(&r, &f);
         assert!(vs
             .iter()
@@ -290,14 +288,12 @@ must_not_match = ["org/springframework/web/**"]
     #[test]
     fn java_stdlib_import_is_allowed() {
         let r = rules();
-        let f = JavaFileFacts {
-            rel_path: "Domain.java".into(),
-            package: "com.x.domain.user".into(),
-            imports: vec![crate::scanner::ImportLine {
-                text: "java.util.List".into(),
-                line: Some(2),
-            }],
-        };
+        let f = scan(
+            "Domain.java",
+            "package com.x.domain.user;\n\
+             import java.util.List;\n\
+             public class Domain {}\n",
+        );
         assert!(check_file(&r, &f).is_empty());
     }
 
@@ -320,28 +316,16 @@ packages = ["**/infrastructure/**", "**/repository/**", "**/persistence/**"]
 may_depend_on = ["domain"]
 "#;
         let r = ArchitectureRules::from_toml_str(RULES).unwrap();
-        let f = JavaFileFacts {
-            rel_path: "src/main/java/com/x/model/Comment.java".into(),
-            package: "com.x.model".into(),
-            imports: vec![
-                crate::scanner::ImportLine {
-                    text: "jakarta.persistence.Entity".into(),
-                    line: Some(3),
-                },
-                crate::scanner::ImportLine {
-                    text: "jakarta.persistence.*".into(),
-                    line: Some(4),
-                },
-                crate::scanner::ImportLine {
-                    text: "javax.persistence.Id".into(),
-                    line: Some(5),
-                },
-                crate::scanner::ImportLine {
-                    text: "org.springframework.data.jpa.repository.Repository".into(),
-                    line: Some(6),
-                },
-            ],
-        };
+        let f = scan(
+            "src/main/java/com/x/model/Comment.java",
+            "package com.x.model;\n\
+             \n\
+             import jakarta.persistence.Entity;\n\
+             import jakarta.persistence.*;\n\
+             import javax.persistence.Id;\n\
+             import org.springframework.data.jpa.repository.Repository;\n\
+             @Entity public class Comment {}\n",
+        );
         let vs = check_file(&r, &f);
         assert!(
             vs.iter()
@@ -355,14 +339,12 @@ may_depend_on = ["domain"]
         // The guard must be a no-op for genuine cross-layer dependencies
         // between student packages.
         let r = rules();
-        let f = JavaFileFacts {
-            rel_path: "Bad.java".into(),
-            package: "com.x.controller".into(),
-            imports: vec![crate::scanner::ImportLine {
-                text: "com.x.repository.UserRepository".into(),
-                line: Some(2),
-            }],
-        };
+        let f = scan(
+            "Bad.java",
+            "package com.x.controller;\n\
+             import com.x.repository.UserRepository;\n\
+             public class Bad {}\n",
+        );
         let vs = check_file(&r, &f);
         assert_eq!(vs.len(), 1);
         assert!(matches!(vs[0].kind, ViolationKind::LayerDependency));
@@ -384,14 +366,12 @@ from = "**/domain/**"
 must_not_match = ["jakarta/persistence/**", "javax/persistence/**"]
 "#;
         let r = ArchitectureRules::from_toml_str(RULES_WITH_JPA_BAN).unwrap();
-        let f = JavaFileFacts {
-            rel_path: "Domain.java".into(),
-            package: "com.x.domain.user".into(),
-            imports: vec![crate::scanner::ImportLine {
-                text: "jakarta.persistence.Entity".into(),
-                line: Some(2),
-            }],
-        };
+        let f = scan(
+            "Domain.java",
+            "package com.x.domain.user;\n\
+             import jakarta.persistence.Entity;\n\
+             public class Domain {}\n",
+        );
         let vs = check_file(&r, &f);
         assert_eq!(vs.len(), 1);
         assert!(matches!(vs[0].kind, ViolationKind::ForbiddenImport));
