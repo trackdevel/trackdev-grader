@@ -203,4 +203,47 @@ must_not_match = ["org/springframework/web/**", "org/springframework/data/**"]
             ArchitectureRules::from_toml_str("[[layers]]\nname = \"a\"\npackages = []\n").unwrap();
         assert_eq!(r.severity, "WARNING");
     }
+
+    /// Smoke test: the production `config/architecture.toml` must parse
+    /// cleanly. Anything that breaks here would silently disable the
+    /// architecture stage in CI, since the loader bails on the first
+    /// regex / unknown-kind error.
+    #[test]
+    fn production_config_loads_cleanly() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/architecture.toml");
+        if !path.exists() {
+            eprintln!("skipping: {} not present", path.display());
+            return;
+        }
+        let r = ArchitectureRules::load(&path).expect("architecture.toml must parse");
+        assert!(
+            !r.ast_rules.is_empty(),
+            "expected at least one [[ast_rule]] in production config"
+        );
+
+        // Every Spring v8 rubric rule ID should be wired in at least once.
+        let names: std::collections::HashSet<&str> =
+            r.ast_rules.iter().map(|x| x.name.as_str()).collect();
+        for rule_id in &[
+            "CONTROLLER_RETURNS_NON_DTO",
+            "CONTROLLER_USES_REPOSITORY",
+            "CONTROLLER_HAS_TRANSACTIONAL",
+            "TRANSACTIONAL_ON_NON_PUBLIC_METHOD",
+            "UNBOUNDED_FIND_ALL",
+            "ENTITY_USES_LOMBOK_DATA",
+            "ENTITY_USES_JAVAX_IMPORT",
+            "FAT_CONTROLLER_METHOD",
+            "MANUAL_DTO_MAPPING_IN_CONTROLLER",
+            "MISSING_VALID_ON_REQUEST_BODY",
+            "SERVICE_PUBLIC_METHOD_USES_NON_DTO",
+            "SERVICE_USES_MULTIPLE_REPOSITORIES",
+            "ENTITY_DEPENDS_ON_SPRING_BEAN",
+        ] {
+            assert!(
+                names.contains(rule_id),
+                "expected Spring v8 rule '{rule_id}' in architecture.toml"
+            );
+        }
+    }
 }
