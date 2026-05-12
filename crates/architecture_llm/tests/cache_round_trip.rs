@@ -1,5 +1,12 @@
 //! End-to-end test for the LLM architecture review stage using a
 //! deterministic stub judge — no network required.
+//!
+//! Wave 4 deprecated `run_llm_review_for_repo`; this test still
+//! exercises the cache + persistence path to protect the
+//! emergency-rollback flag (`[architecture] llm_review = true`). The
+//! file-level `#[allow(deprecated)]` keeps the build warning-clean.
+
+#![allow(deprecated)]
 
 use rusqlite::Connection;
 use sprint_grader_architecture::Rubric;
