@@ -83,13 +83,34 @@ must_not_match = [
 #   - extends        — class extends a class whose simple name matches
 #   - implements     — class implements an interface whose simple name matches
 #   - package_glob   — file's package matches the glob
+#   - name_suffix    — class name ends with the given suffix (Android-friendly)
+#   - not_extends    — fail the match when the extends clause names this class
 #
-# Five `kind`s are supported:
-#   - forbidden_field_type        (`type_regex`)
+# Kinds supported (T-P3.1 + W1/W2 plan):
+#   - forbidden_field_type        (`type_regex`, optional `required_modifier`,
+#                                  `type_allowlist`, `type_package_allowlist`)
 #   - forbidden_constructor_param (`type_regex`)
-#   - forbidden_method_call       (`call_regex`, matched against `obj.method`)
-#   - forbidden_return_type       (`type_regex`)
+#   - forbidden_method_call       (`call_regex`, optional `arg_count`)
+#   - forbidden_return_type       (`type_regex`, optional `visibility`,
+#                                  `type_allowlist`, `type_package_allowlist`)
+#   - forbidden_method_param      (`type_regex`, optional `visibility`,
+#                                  `type_allowlist`, `type_package_allowlist`)
 #   - max_method_statements       (`max`)
+#   - forbidden_import            (`import_regex`)  — file-level
+#   - must_null_in_lifecycle      (`type_regex`, `method_name`)
+#   - forbidden_call_source       (`source_regex`)  — raw source-text match
+#   - class_has_forbidden_annotation        (`annotation_regex`, `scope`)
+#   - method_annotation_visibility_mismatch (`annotation_regex`, `required_visibility`)
+#   - forbidden_constructor_call  (`type_regex`, optional `min_args`)
+#   - parameter_annotation_requires_companion (`trigger_annotation`, `required_annotation_regex`)
+#   - field_count_with_type_pattern (`type_regex`, `max`)
+
+# --- Legacy AST rules (kept for cache continuity) -----------------------
+#
+# These are the pre-v8 rules wired up in T-P3.1. They overlap with the
+# new SHOUTY_SNAKE_CASE rules below but their `rule_name` is referenced
+# from `architecture_runs` cache entries on already-graded repos, so
+# removing them would invalidate the head_sha skip path. They stay.
 
 # Spring: controllers don't hold repositories.
 [[ast_rule]]
@@ -114,6 +135,183 @@ class_match.annotation = "RestController"
 kind = "max_method_statements"
 max = 20
 severity = "INFO"
+
+# --- Spring v8 rubric ---------------------------------------------------
+#
+# Verbatim rule IDs from `config/spring-boot-rubric.md` (v8). Severity
+# matches the rubric's table. The non-DTO 3-stage gate
+# (CONTROLLER_RETURNS_NON_DTO, SERVICE_PUBLIC_METHOD_USES_NON_DTO) uses:
+#
+#   type_regex             = ".+"                — fire on any type
+#   type_allowlist         = "(?i).*(dto|request|response).*|<stdlib>" — name suppressor
+#   type_package_allowlist = "(?i)(^|\\.)(dto|dtos)(\\.|$)"            — package suppressor
+#
+# Rust's `regex` crate has no lookaround, so the plan's lookahead-based
+# `type_regex` is folded into `type_allowlist`. Stages 1 (package), 2
+# (DTO-shape name) and 3 (stdlib name) are all positive suppressors —
+# any match suppresses the finding.
+
+# CONTROLLER_RETURNS_NON_DTO — controllers must return DTOs.
+[[ast_rule]]
+name = "CONTROLLER_RETURNS_NON_DTO"
+class_match.annotation = "RestController"
+kind = "forbidden_return_type"
+visibility = "public"
+type_regex = ".+"
+type_allowlist = "(?i).*(dto|request|response).*|^(Void|Boolean|Byte|Short|Integer|Long|Float|Double|Character|String|BigDecimal|BigInteger|UUID|LocalDate|LocalDateTime|LocalTime|Instant|Duration|Period|ZonedDateTime|OffsetDateTime|Date|URI|URL|Object|Map|HashMap|Number)$"
+type_package_allowlist = "(?i)(^|\\.)(dto|dtos)(\\.|$)"
+severity = "CRITICAL"
+
+# CONTROLLER_USES_REPOSITORY — field form (alias for the legacy rule).
+[[ast_rule]]
+name = "CONTROLLER_USES_REPOSITORY"
+class_match.annotation = "RestController"
+kind = "forbidden_field_type"
+type_regex = ".*Repository$"
+severity = "CRITICAL"
+
+# CONTROLLER_USES_REPOSITORY — constructor-param form.
+[[ast_rule]]
+name = "CONTROLLER_USES_REPOSITORY"
+class_match.annotation = "RestController"
+kind = "forbidden_constructor_param"
+type_regex = ".*Repository$"
+severity = "CRITICAL"
+
+# CONTROLLER_HAS_TRANSACTIONAL — `@Transactional` on a `@RestController`
+# class or any of its methods.
+[[ast_rule]]
+name = "CONTROLLER_HAS_TRANSACTIONAL"
+class_match.annotation = "RestController"
+kind = "class_has_forbidden_annotation"
+annotation_regex = "^Transactional$"
+scope = "class_or_method"
+severity = "CRITICAL"
+
+# TRANSACTIONAL_ON_NON_PUBLIC_METHOD — Spring AOP can't intercept
+# non-public methods, so the annotation is silently ignored.
+[[ast_rule]]
+name = "TRANSACTIONAL_ON_NON_PUBLIC_METHOD"
+kind = "method_annotation_visibility_mismatch"
+annotation_regex = "^Transactional$"
+required_visibility = "public"
+severity = "CRITICAL"
+
+# UNBOUNDED_FIND_ALL — `<id>.findAll()` (zero args) inside a stereotyped
+# class. `findAll(pageable)`/`findAll(spec, pageable)` do not fire.
+[[ast_rule]]
+name = "UNBOUNDED_FIND_ALL"
+class_match.annotation = "RestController"
+kind = "forbidden_method_call"
+call_regex = "\\.findAll$"
+arg_count = 0
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "UNBOUNDED_FIND_ALL"
+class_match.annotation = "Service"
+kind = "forbidden_method_call"
+call_regex = "\\.findAll$"
+arg_count = 0
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "UNBOUNDED_FIND_ALL"
+class_match.annotation = "Component"
+kind = "forbidden_method_call"
+call_regex = "\\.findAll$"
+arg_count = 0
+severity = "CRITICAL"
+
+# ENTITY_USES_LOMBOK_DATA — `@Data` / `@EqualsAndHashCode` / `@ToString`
+# on an `@Entity` class.
+[[ast_rule]]
+name = "ENTITY_USES_LOMBOK_DATA"
+class_match.annotation = "Entity"
+kind = "class_has_forbidden_annotation"
+annotation_regex = "^(Data|EqualsAndHashCode|ToString)$"
+scope = "class"
+severity = "CRITICAL"
+
+# ENTITY_USES_JAVAX_IMPORT — Spring Boot 3 ignores `javax.*` annotations.
+[[ast_rule]]
+name = "ENTITY_USES_JAVAX_IMPORT"
+class_match.annotation = "Entity"
+kind = "forbidden_import"
+import_regex = "^javax\\.(persistence|validation)\\."
+severity = "CRITICAL"
+
+# FAT_CONTROLLER_METHOD — body span > 25 top-level statements.
+# Aliases the legacy `controller-method-not-fat` rule with the rubric ID;
+# threshold raised to 25 to match the rubric prose.
+[[ast_rule]]
+name = "FAT_CONTROLLER_METHOD"
+class_match.annotation = "RestController"
+kind = "max_method_statements"
+max = 25
+severity = "WARNING"
+
+# MANUAL_DTO_MAPPING_IN_CONTROLLER — `new <X>(Dto|Response|Request)(...)`
+# with at least two args, inside a controller method body.
+[[ast_rule]]
+name = "MANUAL_DTO_MAPPING_IN_CONTROLLER"
+class_match.annotation = "RestController"
+kind = "forbidden_constructor_call"
+type_regex = "^\\w+(Dto|Response|Request)$"
+min_args = 2
+severity = "WARNING"
+
+# MISSING_VALID_ON_REQUEST_BODY — `@RequestBody` without `@Valid` /
+# `@Validated` on the same parameter.
+[[ast_rule]]
+name = "MISSING_VALID_ON_REQUEST_BODY"
+class_match.annotation = "RestController"
+kind = "parameter_annotation_requires_companion"
+trigger_annotation = "RequestBody"
+required_annotation_regex = "^(Valid|Validated)$"
+severity = "WARNING"
+
+# SERVICE_PUBLIC_METHOD_USES_NON_DTO — public method return type.
+[[ast_rule]]
+name = "SERVICE_PUBLIC_METHOD_USES_NON_DTO"
+class_match.annotation = "Service"
+kind = "forbidden_return_type"
+visibility = "public"
+type_regex = ".+"
+type_allowlist = "(?i).*(dto|request|response).*|^(Void|Boolean|Byte|Short|Integer|Long|Float|Double|Character|String|BigDecimal|BigInteger|UUID|LocalDate|LocalDateTime|LocalTime|Instant|Duration|Period|ZonedDateTime|OffsetDateTime|Date|URI|URL|Object|Map|HashMap|Number)$"
+type_package_allowlist = "(?i)(^|\\.)(dto|dtos)(\\.|$)"
+severity = "WARNING"
+
+# SERVICE_PUBLIC_METHOD_USES_NON_DTO — public method parameter type.
+[[ast_rule]]
+name = "SERVICE_PUBLIC_METHOD_USES_NON_DTO"
+class_match.annotation = "Service"
+kind = "forbidden_method_param"
+visibility = "public"
+type_regex = ".+"
+type_allowlist = "(?i).*(dto|request|response).*|^(Void|Boolean|Byte|Short|Integer|Long|Float|Double|Character|String|BigDecimal|BigInteger|UUID|LocalDate|LocalDateTime|LocalTime|Instant|Duration|Period|ZonedDateTime|OffsetDateTime|Date|URI|URL|Object|Map|HashMap|Number)$"
+type_package_allowlist = "(?i)(^|\\.)(dto|dtos)(\\.|$)"
+severity = "WARNING"
+
+# SERVICE_USES_MULTIPLE_REPOSITORIES — one repository per service.
+[[ast_rule]]
+name = "SERVICE_USES_MULTIPLE_REPOSITORIES"
+class_match.annotation = "Service"
+kind = "field_count_with_type_pattern"
+type_regex = ".*Repository$"
+max = 1
+severity = "WARNING"
+
+# ENTITY_DEPENDS_ON_SPRING_BEAN — `@Entity` holding a Service/Repository
+# /Component field.
+[[ast_rule]]
+name = "ENTITY_DEPENDS_ON_SPRING_BEAN"
+class_match.annotation = "Entity"
+kind = "forbidden_field_type"
+type_regex = ".*(Service|Repository|Component)$"
+severity = "WARNING"
+
+# --- Android client AST rules (pre-v1 rubric) ---------------------------
 
 # Android: Activities and Fragments must not hold a Retrofit/ApiService directly.
 [[ast_rule]]
