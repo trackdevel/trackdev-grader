@@ -1,6 +1,6 @@
 ---
-rubric_version: 1
-target_model: claude-haiku
+rubric_version: 2
+target_model: none
 target_stack: android-java-21 / mvvm-with-repository / hilt / retrofit-3 / view-binding / navigation-component
 scope: single-file analysis
 ---
@@ -426,11 +426,11 @@ public class HomeViewModel extends ViewModel {
 
 ### `FAT_FRAGMENT_OR_ACTIVITY_METHOD` — WARNING
 
-**Trigger.** The file is a Fragment or an Activity, AND some method has a body whose closing `}` is more than **40 lines** below its opening `{`. Methods whose body span is ≤ 40 lines MUST NOT be flagged regardless of perceived complexity. The threshold is higher than for a Spring controller because Android lifecycle methods legitimately include view binding, observer registration, and click listeners.
+**Trigger.** The file is a Fragment or an Activity, AND some method body contains **more than 40 top-level statements**. Statements are counted at the method's `block` level (direct children classified as `*_statement`, `local_variable_declaration`, or `expression_statement`); nested statements inside `if` / `for` / lambda bodies don't add to the count. Methods at or below 40 top-level statements MUST NOT be flagged regardless of perceived complexity. The threshold is higher than for a Spring controller because Android lifecycle methods legitimately include view binding, observer registration, and click listeners.
 
-**BAD:** an `onViewCreated` method whose body opens at line 30 and closes at line 95 (65 lines).
+**BAD:** an `onViewCreated` method whose body lists 45+ top-level statements (view bindings + LiveData observers + click listeners + navigation setup, all unfactored).
 
-**GOOD:** any Fragment / Activity method whose body spans 40 lines or fewer, even if it looks dense — extract privates as you wish, but the rubric does not require it under this threshold.
+**GOOD:** any Fragment / Activity method whose body has 40 or fewer top-level statements — even if it spans many physical lines through formatting. The threshold is a structural count, not a line count.
 
 ---
 
