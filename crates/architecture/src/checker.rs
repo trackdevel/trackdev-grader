@@ -76,6 +76,10 @@ pub struct Violation {
     /// the LLM path (T-P3.3) fills them from the model response.
     pub start_line: Option<u32>,
     pub end_line: Option<u32>,
+    /// Per-rule severity override. AST rules set this from their TOML
+    /// `severity` field; the legacy layered + forbidden-import paths
+    /// leave it `None` and fall back to `ArchitectureRules::severity`.
+    pub severity: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +158,7 @@ pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Viola
                             offending_import: raw_import.clone(),
                             start_line: line,
                             end_line: line,
+                            severity: None,
                         });
                     }
                 }
@@ -171,6 +176,7 @@ pub fn check_file(rules: &ArchitectureRules, facts: &JavaFileFacts) -> Vec<Viola
                     offending_import: raw_import.clone(),
                     start_line: line,
                     end_line: line,
+                    severity: None,
                 });
             }
         }
