@@ -258,14 +258,13 @@ fn insert_violation(
     conn.execute(
         "INSERT OR REPLACE INTO architecture_violations
             (repo_full_name, file_path, rule_name,
-             violation_kind, offending_import, severity,
+             offending_import, severity,
              start_line, end_line, rule_kind)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             repo_full_name,
             v.file_path,
             v.rule_name,
-            rule_kind,
             v.offending_import,
             severity,
             v.start_line.map(|n| n as i64),
@@ -393,11 +392,9 @@ may_depend_on = []
         assert_eq!(n, 1, "controller→repository must produce one violation");
 
         let kind: String = conn
-            .query_row(
-                "SELECT violation_kind FROM architecture_violations",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT rule_kind FROM architecture_violations", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(kind, "layer_dependency");
 
@@ -432,11 +429,11 @@ may_depend_on = []
         // Seed a bare-name row from a hypothetical pre-qualifier-fix run.
         conn.execute(
             "INSERT INTO architecture_violations
-                (repo_full_name, file_path, rule_name, violation_kind,
+                (repo_full_name, file_path, rule_name,
                  offending_import, severity, start_line, end_line, rule_kind)
              VALUES
                 ('spring-x', 'OldFile.java', 'domain->!infrastructure',
-                 'layer_dependency', 'jakarta.persistence.Entity', 'WARNING',
+                 'jakarta.persistence.Entity', 'WARNING',
                  1, 1, 'layer_dependency')",
             [],
         )

@@ -4279,7 +4279,7 @@ mod tests {
                 truck_factor INTEGER, owners_csv TEXT,
                 PRIMARY KEY (project_id, sprint_id));
              CREATE TABLE architecture_violations (repo_full_name TEXT, file_path TEXT,
-                rule_name TEXT, violation_kind TEXT,
+                rule_name TEXT,
                 offending_import TEXT, severity TEXT,
                 start_line INTEGER, end_line INTEGER,
                 rule_kind TEXT, rule_version TEXT, explanation TEXT,
@@ -4857,14 +4857,14 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO architecture_violations
                 (repo_full_name, file_path, rule_name,
-                 violation_kind, offending_import, severity, start_line, end_line)
+                 offending_import, severity, start_line, end_line, rule_kind)
              VALUES
                 ('udg/spring-foo', 'A.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING', 1, 1),
+                 'com.x.repository.UserRepository', 'WARNING', 1, 1, 'layer_dependency'),
                 ('udg/spring-foo', 'B.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repository.UserRepository', 'WARNING', 1, 1),
+                 'com.x.repository.UserRepository', 'WARNING', 1, 1, 'layer_dependency'),
                 ('udg/spring-foo', 'C.java', 'domain-no-spring-web',
-                 'forbidden_import', 'org.springframework.web.RestController', 'WARNING', 1, 1);",
+                 'org.springframework.web.RestController', 'WARNING', 1, 1, 'forbidden_import');",
         )
         .unwrap();
         let tmp = TempDir::new().unwrap();
@@ -4900,20 +4900,20 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO architecture_violations
                 (repo_full_name, file_path, rule_name,
-                 violation_kind, offending_import, severity,
+                 offending_import, severity,
                  start_line, end_line, rule_kind, explanation)
              VALUES
                 ('udg/spring-foo', 'A.java', 'HARDCODED_API_URL',
-                 'llm', 'HARDCODED_API_URL', 'WARNING', 13, 13, 'llm',
+                 'HARDCODED_API_URL', 'WARNING', 13, 13, 'llm',
                  'API URL should use BuildConfig instead of a literal string.'),
                 ('udg/spring-foo', 'B.java', 'HARDCODED_API_URL',
-                 'llm', 'HARDCODED_API_URL', 'WARNING', 26, 49, 'llm',
+                 'HARDCODED_API_URL', 'WARNING', 26, 49, 'llm',
                  'Repository hits the network without checking the cache.'),
                 ('udg/spring-foo', 'C.java', 'HARDCODED_API_URL',
-                 'llm', 'HARDCODED_API_URL', 'WARNING', 7, 7, 'llm',
+                 'HARDCODED_API_URL', 'WARNING', 7, 7, 'llm',
                  'Third hard-coded URL.'),
                 ('udg/spring-foo', 'D.java', 'HARDCODED_API_URL',
-                 'llm', 'HARDCODED_API_URL', 'WARNING', 9, 9, 'llm',
+                 'HARDCODED_API_URL', 'WARNING', 9, 9, 'llm',
                  'Fourth hard-coded URL.');
              INSERT INTO architecture_violation_attribution
                 (violation_rowid, student_id, lines_authored, total_lines, weight)
@@ -4989,10 +4989,10 @@ mod tests {
                 VALUES ('pr1', 'udg-pds/spring-foo');
              INSERT INTO architecture_violations
                 (repo_full_name, file_path, rule_name,
-                 violation_kind, offending_import, severity, start_line, end_line)
+                 offending_import, severity, start_line, end_line, rule_kind)
              VALUES
                 ('spring-foo', 'A.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING', 1, 1);
+                 'com.x.repo.UserRepo', 'WARNING', 1, 1, 'layer_dependency');
              INSERT INTO architecture_violation_attribution
                 (violation_rowid, student_id, lines_authored, total_lines, weight)
                 SELECT rowid, 'u1', 1, 1, 1.0 FROM architecture_violations;
@@ -5027,14 +5027,14 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO architecture_violations
                 (repo_full_name, file_path, rule_name,
-                 violation_kind, offending_import, severity, start_line, end_line)
+                 offending_import, severity, start_line, end_line, rule_kind)
              VALUES
                 ('udg/spring-foo', 'A.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repo.UserRepo', 'WARNING', 1, 1),
+                 'com.x.repo.UserRepo', 'WARNING', 1, 1, 'layer_dependency'),
                 ('udg/spring-foo', 'A.java', 'domain-no-spring-web',
-                 'forbidden_import', 'org.springframework.web.RestController', 'CRITICAL', 1, 1),
+                 'org.springframework.web.RestController', 'CRITICAL', 1, 1, 'forbidden_import'),
                 ('udg/spring-foo', 'C.java', 'presentation->!infrastructure',
-                 'layer_dependency', 'com.x.repo.OtherRepo', 'WARNING', 1, 1);
+                 'com.x.repo.OtherRepo', 'WARNING', 1, 1, 'layer_dependency');
              INSERT INTO architecture_violation_attribution
                 (violation_rowid, student_id, lines_authored, total_lines, weight)
                 SELECT rowid, 'u1', 1, 1, 1.0 FROM architecture_violations

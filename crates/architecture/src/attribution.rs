@@ -259,9 +259,9 @@ mod tests {
     ) -> i64 {
         conn.execute(
             "INSERT INTO architecture_violations
-                (repo_full_name, file_path, rule_name, violation_kind,
+                (repo_full_name, file_path, rule_name,
                  offending_import, severity, start_line, end_line, rule_kind)
-             VALUES (?, ?, ?, 'ast_forbidden_field_type', ?, 'WARNING', ?, ?, 'ast_forbidden_field_type')",
+             VALUES (?, ?, ?, ?, 'WARNING', ?, ?, 'ast_forbidden_field_type')",
             params![
                 repo_full_name,
                 file_path,

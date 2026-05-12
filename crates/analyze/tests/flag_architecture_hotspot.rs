@@ -15,9 +15,9 @@ use sprint_grader_core::Config;
 fn insert_violation(conn: &rusqlite::Connection, file: &str, rule: &str, severity: &str) -> i64 {
     conn.execute(
         "INSERT INTO architecture_violations
-            (repo_full_name, file_path, rule_name, violation_kind,
+            (repo_full_name, file_path, rule_name,
              offending_import, severity, start_line, end_line, rule_kind)
-         VALUES ('udg/x', ?, ?, 'ast_forbidden_field_type', 'anchor', ?, 1, 5, 'ast_forbidden_field_type')",
+         VALUES ('udg/x', ?, ?, 'anchor', ?, 1, 5, 'ast_forbidden_field_type')",
         params![file, rule, severity],
     )
     .unwrap();
