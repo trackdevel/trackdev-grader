@@ -245,5 +245,29 @@ must_not_match = ["org/springframework/web/**", "org/springframework/data/**"]
                 "expected Spring v8 rule '{rule_id}' in architecture.toml"
             );
         }
+        // Every Android v1 rubric rule ID should also be wired in.
+        for rule_id in &[
+            "VIEWMODEL_IMPORTS_ANDROID_UI",
+            "VIEWMODEL_HOLDS_CONTEXT",
+            "FRAGMENT_BYPASSES_VIEWMODEL",
+            "REPOSITORY_DEPENDS_ON_VIEW_LAYER",
+            "ASYNCTASK_USAGE",
+            "STATIC_VIEW_OR_CONTEXT_FIELD",
+            "FRAGMENT_BINDING_NOT_NULLED",
+            "LIVEDATA_OBSERVED_WITH_FRAGMENT_THIS",
+            "VIEWMODEL_BYPASSES_REPOSITORY",
+            "FINDVIEWBYID_USAGE",
+            "NAVIGATION_VIA_FRAGMENT_TRANSACTION",
+            "FRAGMENT_CASTS_PARENT_ACTIVITY",
+            "RAW_THREAD_FOR_BACKGROUND_WORK",
+            "MUTABLELIVEDATA_EXPOSED_PUBLICLY",
+            "FAT_FRAGMENT_OR_ACTIVITY_METHOD",
+            "MISSING_HILT_VIEWMODEL",
+        ] {
+            assert!(
+                names.contains(rule_id),
+                "expected Android v1 rule '{rule_id}' in architecture.toml"
+            );
+        }
     }
 }

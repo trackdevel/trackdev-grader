@@ -1302,6 +1302,71 @@ const KNOWN_RULE_DESCRIPTIONS: &[(&str, &str)] = &[
         "ENTITY_DEPENDS_ON_SPRING_BEAN",
         "Entities are persistent POJOs — holding a Service / Repository / Component field mixes persistence with business logic",
     ),
+    // Android v1 rubric (AST rules — replaces the per-file LLM judge).
+    (
+        "VIEWMODEL_IMPORTS_ANDROID_UI",
+        "ViewModels must not see the View layer — importing Fragment / Activity / View / Binding leaks the Activity",
+    ),
+    (
+        "VIEWMODEL_HOLDS_CONTEXT",
+        "ViewModels outlive their Activity / Fragment — holding a Context / Activity / View field leaks them across configuration changes",
+    ),
+    (
+        "FRAGMENT_BYPASSES_VIEWMODEL",
+        "Fragments / Activities must talk to their ViewModel only — direct Retrofit / Repository / ApiService access bypasses MVVM",
+    ),
+    (
+        "REPOSITORY_DEPENDS_ON_VIEW_LAYER",
+        "Repositories must not see UI types — `@ApplicationContext Context` is the only Context allowed here (for Room / SharedPreferences)",
+    ),
+    (
+        "ASYNCTASK_USAGE",
+        "`android.os.AsyncTask` was deprecated in API 30 and removed from new SDKs — use Executors + LiveData",
+    ),
+    (
+        "STATIC_VIEW_OR_CONTEXT_FIELD",
+        "A `static` field of Context / Activity / View / ViewGroup leaks them process-wide for the lifetime of the app",
+    ),
+    (
+        "FRAGMENT_BINDING_NOT_NULLED",
+        "Fragments must null their ViewBinding field in `onDestroyView` — otherwise the binding outlives its View and leaks memory",
+    ),
+    (
+        "LIVEDATA_OBSERVED_WITH_FRAGMENT_THIS",
+        "In a Fragment, LiveData observers must use `getViewLifecycleOwner()` — `this` outlives the View and produces duplicate observers",
+    ),
+    (
+        "VIEWMODEL_BYPASSES_REPOSITORY",
+        "ViewModels must depend on a Repository — direct Retrofit / ApiService access skips the data layer",
+    ),
+    (
+        "FINDVIEWBYID_USAGE",
+        "ViewBinding replaces every `findViewById` call in this project — use `binding.<id>` instead",
+    ),
+    (
+        "NAVIGATION_VIA_FRAGMENT_TRANSACTION",
+        "Use Navigation Component (`NavController.navigate(...)`) — manual `FragmentManager.beginTransaction()` add/replace/remove bypasses the back-stack model",
+    ),
+    (
+        "FRAGMENT_CASTS_PARENT_ACTIVITY",
+        "Fragments should share state with their host Activity via a shared ViewModel, not a downcast — `((HostActivity) requireActivity())` is tight coupling",
+    ),
+    (
+        "RAW_THREAD_FOR_BACKGROUND_WORK",
+        "Background work must use `Executors` so threads are pooled, named, and shut down properly — `new Thread(...)` leaks the thread lifecycle",
+    ),
+    (
+        "MUTABLELIVEDATA_EXPOSED_PUBLICLY",
+        "ViewModels must expose `LiveData<T>`, not `MutableLiveData<T>` — public Mutable LiveData lets Fragments call `setValue` / `postValue`",
+    ),
+    (
+        "FAT_FRAGMENT_OR_ACTIVITY_METHOD",
+        "Fragment / Activity methods should stay under 40 top-level statements — extract privates when they grow past the lifecycle work",
+    ),
+    (
+        "MISSING_HILT_VIEWMODEL",
+        "A ViewModel with an `@Inject` constructor must carry `@HiltViewModel` — without it Hilt cannot resolve the constructor and `ViewModelProvider.get(...)` fails",
+    ),
 ];
 
 /// Best-effort humanizer for unknown rule keys: replaces `-` and `_` with
@@ -4108,6 +4173,42 @@ mod tests {
             // with a non-template phrase. Smoke-check: the prose is
             // substantive (>= 30 chars) and free of underscores from the
             // rule_id.
+            assert!(
+                s.len() >= 30,
+                "rule_id '{rule_id}' has missing or stub prose: {s}"
+            );
+            assert!(
+                !s.contains('_'),
+                "rule_id '{rule_id}' prose still contains underscores from the key: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn humanize_rule_name_uses_known_description_for_android_v1_rule_ids() {
+        for rule_id in [
+            "VIEWMODEL_IMPORTS_ANDROID_UI",
+            "VIEWMODEL_HOLDS_CONTEXT",
+            "FRAGMENT_BYPASSES_VIEWMODEL",
+            "REPOSITORY_DEPENDS_ON_VIEW_LAYER",
+            "ASYNCTASK_USAGE",
+            "STATIC_VIEW_OR_CONTEXT_FIELD",
+            "FRAGMENT_BINDING_NOT_NULLED",
+            "LIVEDATA_OBSERVED_WITH_FRAGMENT_THIS",
+            "VIEWMODEL_BYPASSES_REPOSITORY",
+            "FINDVIEWBYID_USAGE",
+            "NAVIGATION_VIA_FRAGMENT_TRANSACTION",
+            "FRAGMENT_CASTS_PARENT_ACTIVITY",
+            "RAW_THREAD_FOR_BACKGROUND_WORK",
+            "MUTABLELIVEDATA_EXPOSED_PUBLICLY",
+            "FAT_FRAGMENT_OR_ACTIVITY_METHOD",
+            "MISSING_HILT_VIEWMODEL",
+        ] {
+            let s = humanize_rule_name(rule_id);
+            assert!(
+                !s.contains(rule_id),
+                "rule_id '{rule_id}' should not leak into prose: {s}"
+            );
             assert!(
                 s.len() >= 30,
                 "rule_id '{rule_id}' has missing or stub prose: {s}"
