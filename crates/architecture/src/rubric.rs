@@ -100,9 +100,17 @@ fn split_frontmatter(text: &str) -> (&str, &str) {
 }
 
 fn read_version(frontmatter: &str) -> Option<String> {
+    // Accept either `version:` (original key) or `rubric_version:` (used
+    // by the Haiku-targeted rubrics — `spring-boot-rubric.md`,
+    // `android-rubric.md`). Both feed the same cache-invalidation knob,
+    // so the field name is purely a readability choice for the rubric
+    // author.
     for line in frontmatter.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("version:") {
+        if let Some(rest) = line
+            .strip_prefix("rubric_version:")
+            .or_else(|| line.strip_prefix("version:"))
+        {
             return Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
         }
     }
@@ -202,6 +210,25 @@ version: 2
         let r = parse(body).unwrap();
         assert_eq!(r.version, "0");
         assert!(r.body.contains("a rule"));
+    }
+
+    #[test]
+    fn accepts_rubric_version_alias() {
+        let text = "\
+---
+rubric_version: 8
+target_model: claude-haiku
+---
+
+# Spring Boot rubric
+- a rule.
+";
+        let r = parse(text).unwrap();
+        assert_eq!(
+            r.version, "8",
+            "`rubric_version:` must work alongside `version:` so the \
+             Haiku-targeted rubrics still drive cache invalidation"
+        );
     }
 
     #[test]
