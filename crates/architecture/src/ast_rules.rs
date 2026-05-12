@@ -1277,6 +1277,78 @@ fn last_identifier_segment(s: &str) -> &str {
     s.rsplit('.').next().unwrap_or(s).trim()
 }
 
+/// Generic-type "wrappers" whose outer name does not encode the
+/// semantically interesting type. `List<UserDto>` is a list-of-DTO at
+/// the API boundary; the rubric treats it as a DTO return. `Map` is
+/// intentionally absent — it has two type parameters and unwrapping is
+/// ambiguous; it stays in the stdlib allowlist by its outer name.
+const GENERIC_WRAPPERS: &[&str] = &[
+    // Spring / reactive
+    "ResponseEntity",
+    "Mono",
+    "Flux",
+    // JDK collections + value containers
+    "Optional",
+    "List",
+    "Collection",
+    "Set",
+    "Iterable",
+    "Iterator",
+    "Stream",
+    "Queue",
+    "Deque",
+    // Spring Data pagination
+    "Page",
+    "Slice",
+    "PageImpl",
+    // async
+    "CompletableFuture",
+    "Future",
+    "Callable",
+];
+
+fn is_generic_wrapper(name: &str) -> bool {
+    GENERIC_WRAPPERS.contains(&name)
+}
+
+/// For a `generic_type` node whose outer name is in `GENERIC_WRAPPERS`,
+/// return the inner type-argument node so callers can keep drilling
+/// toward the meaningful inner type. Returns `None` when the node
+/// isn't a recognised wrapper or has no type-argument child.
+fn unwrap_generic_wrapper<'a>(node: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
+    if node.kind() != "generic_type" {
+        return None;
+    }
+    let outer = simple_type_name(node, source)?;
+    if !is_generic_wrapper(&outer) {
+        return None;
+    }
+    let args = children(node)
+        .into_iter()
+        .find(|c| c.kind() == "type_arguments")?;
+    children(args).into_iter().find(|ta| {
+        let k = ta.kind();
+        k == "type_identifier"
+            || k == "scoped_type_identifier"
+            || k == "generic_type"
+            || k.ends_with("_type")
+    })
+}
+
+/// "Effective" simple type name for a type node, used by the suppressor
+/// path of `forbidden_field_type` / `forbidden_method_param` /
+/// `forbidden_return_type`. Unwraps recognised generic wrappers so
+/// `List<UserDto>` is tested as `UserDto`, matching the rubric's prose
+/// promise that "generic wrappers are stripped before the type is
+/// tested". Non-wrapped types pass through `simple_type_name`
+/// unchanged.
+fn effective_simple_type_name(node: Node, source: &[u8]) -> Option<String> {
+    if let Some(inner) = unwrap_generic_wrapper(node, source) {
+        return effective_simple_type_name(inner, source);
+    }
+    simple_type_name(node, source)
+}
+
 /// For `superclass` and similar wrappers: drill through to the `type_identifier`
 /// or `scoped_type_identifier` child and return its leaf name.
 fn simple_type_name(node: Node, source: &[u8]) -> Option<String> {
@@ -1306,6 +1378,9 @@ fn simple_type_name(node: Node, source: &[u8]) -> Option<String> {
 
 fn type_text_of_field(node: Node, source: &[u8]) -> Option<String> {
     // field_declaration: modifiers? type variable_declarator (',' variable_declarator)* ';'
+    // Returns the *effective* type name — generic wrappers like
+    // `List<UserDto>` / `Optional<UserDto>` are stripped so the inner
+    // type drives the rule decision.
     for c in children(node) {
         let k = c.kind();
         if k == "modifiers" {
@@ -1317,7 +1392,7 @@ fn type_text_of_field(node: Node, source: &[u8]) -> Option<String> {
             || k == "generic_type"
             || k == "array_type"
         {
-            return simple_type_name(c, source);
+            return effective_simple_type_name(c, source);
         }
     }
     None
@@ -1339,6 +1414,7 @@ fn formal_parameters(method_or_ctor: Node) -> Vec<Node> {
 
 fn type_text_of_param(node: Node, source: &[u8]) -> Option<String> {
     // formal_parameter: modifiers? type identifier dims?
+    // Same wrapper-stripping policy as `type_text_of_field`.
     for c in children(node) {
         let k = c.kind();
         if k == "modifiers" {
@@ -1350,7 +1426,7 @@ fn type_text_of_param(node: Node, source: &[u8]) -> Option<String> {
             || k == "generic_type"
             || k == "array_type"
         {
-            return simple_type_name(c, source);
+            return effective_simple_type_name(c, source);
         }
     }
     None
@@ -1360,7 +1436,8 @@ fn method_return_type(method: Node, source: &[u8]) -> Option<String> {
     // method_declaration: modifiers? type_parameters? type identifier formal_parameters ...
     // The return type is the first type-shaped child after `modifiers` /
     // `type_parameters`. `void_type` is excluded — there is no type name
-    // to match a blacklist against.
+    // to match a blacklist against. Same wrapper-stripping policy as
+    // `type_text_of_field`: `List<UserDto>` reports `UserDto`.
     for c in children(method) {
         let k = c.kind();
         if k == "modifiers" || k == "type_parameters" {
@@ -1375,7 +1452,7 @@ fn method_return_type(method: Node, source: &[u8]) -> Option<String> {
             || k == "generic_type"
             || k == "array_type"
         {
-            return simple_type_name(c, source);
+            return effective_simple_type_name(c, source);
         }
     }
     None
@@ -3125,5 +3202,119 @@ mod tests {
         "#;
         let v = check_java_file(&[r], "HomeService.java", "com.x.home", src.as_bytes());
         assert!(v.is_empty(), "non-ViewModel must not fire: {v:?}");
+    }
+
+    // ---------- generic-wrapper unwrapping ----------
+
+    #[test]
+    fn return_type_strips_list_wrapper_to_inner_dto_by_name() {
+        let r = rule(NON_DTO_RETURN_RULE);
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                public List<UserDto> get() { return null; }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(
+            v.is_empty(),
+            "List<UserDto> must unwrap and suppress by name: {v:?}"
+        );
+    }
+
+    #[test]
+    fn return_type_strips_optional_wrapper() {
+        let r = rule(NON_DTO_RETURN_RULE);
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                public Optional<UserResponse> get() { return null; }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(v.is_empty(), "Optional<UserResponse> must not fire: {v:?}");
+    }
+
+    #[test]
+    fn return_type_strips_nested_wrappers() {
+        let r = rule(NON_DTO_RETURN_RULE);
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                public ResponseEntity<List<UserDto>> get() { return null; }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(
+            v.is_empty(),
+            "ResponseEntity<List<UserDto>> must unwrap recursively: {v:?}"
+        );
+    }
+
+    #[test]
+    fn return_type_unwrap_still_fires_on_non_dto_inner() {
+        // The unwrap is not a blanket pass — `List<User>` from a
+        // domain package still exposes a non-DTO inner type.
+        let r = rule(NON_DTO_RETURN_RULE);
+        let src = r#"
+            package com.x.controller;
+            import com.example.app.domain.User;
+            @RestController
+            class C {
+                public List<User> list() { return null; }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert_eq!(
+            v.len(),
+            1,
+            "List<User> with domain import must still fire: {v:?}"
+        );
+    }
+
+    #[test]
+    fn return_type_unwrap_is_off_for_non_wrapper_outer() {
+        // `UserDto<Foo>` is not a recognised wrapper, so the outer
+        // (`UserDto`) is tested directly and matched by the name
+        // allowlist.
+        let r = rule(NON_DTO_RETURN_RULE);
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                public UserDto<Foo> get() { return null; }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(
+            v.is_empty(),
+            "outer-DTO-named generic must still be suppressed by name: {v:?}"
+        );
+    }
+
+    #[test]
+    fn forbidden_field_type_unwraps_list_for_repository_match() {
+        // The repository-field rule benefits too: a `List<UserRepository>`
+        // field on a controller is just as bad as a bare `UserRepository`.
+        let r = rule(
+            r#"
+            name = "controller-no-repo-field"
+            class_match.annotation = "RestController"
+            kind = "forbidden_field_type"
+            type_regex = ".*Repository$"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            public class C {
+                private List<UserRepository> repos;
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert_eq!(v.len(), 1, "List<UserRepository> field must fire: {v:?}");
     }
 }
