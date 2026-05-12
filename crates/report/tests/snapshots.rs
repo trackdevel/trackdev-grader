@@ -68,10 +68,10 @@ fn seed_task_and_pr(conn: &Connection) {
 fn seed_architecture_finding(conn: &Connection) {
     conn.execute(
         "INSERT INTO architecture_violations
-            (repo_full_name, file_path, rule_name, violation_kind, offending_import,
+            (repo_full_name, file_path, rule_name, offending_import,
              severity, start_line, end_line, rule_kind, explanation)
          VALUES ('udg-pds/spring-mini', 'src/main/java/Login.java', 'VALIDATION_IN_UI',
-                 'ast_forbidden_field_type', 'com.x.repo.UserRepo', 'WARNING',
+                 'com.x.repo.UserRepo', 'WARNING',
                  42, 99, 'ast_forbidden_field_type',
                  'Validation belongs in the service layer, not the controller.')",
         params![],
