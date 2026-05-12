@@ -105,50 +105,6 @@ must_not_match = [
 #   - parameter_annotation_requires_companion (`trigger_annotation`, `required_annotation_regex`)
 #   - field_count_with_type_pattern (`type_regex`, `max`)
 
-# --- Legacy AST rules (Wave A: deprecation surface) ---------------------
-#
-# These are the pre-v8 rules wired up in T-P3.1. They overlap with the
-# new SHOUTY_SNAKE_CASE rubric rules below — both fire on the same
-# offending code with conflicting severities. `deprecated = true` emits
-# a one-shot warning on load; the rule still fires so already-graded
-# repos don't lose their cache entries in `architecture_runs`. Wave B
-# will issue a DELETE migration that removes legacy rows from
-# `architecture_violations` keyed by these rule names; Wave C drops
-# the blocks from this file entirely.
-
-# Spring: controllers don't hold repositories.
-[[ast_rule]]
-name = "controller-no-repository-field"
-class_match.annotation = "RestController"
-kind = "forbidden_field_type"
-type_regex = ".*Repository$"
-severity = "WARNING"
-deprecated = true
-replaced_by = "CONTROLLER_USES_REPOSITORY"
-
-# Spring: same idea via constructor injection (catches DI-by-type).
-[[ast_rule]]
-name = "controller-no-repository-ctor-param"
-class_match.annotation = "RestController"
-kind = "forbidden_constructor_param"
-type_regex = ".*Repository$"
-severity = "WARNING"
-deprecated = true
-replaced_by = "CONTROLLER_USES_REPOSITORY"
-
-# Spring: keep controllers thin (>20 statements is almost certainly
-# business logic). The rubric peer FAT_CONTROLLER_METHOD raises the
-# threshold to 25; if the stricter 20 is still wanted, lower
-# FAT_CONTROLLER_METHOD's `max` rather than keeping this block alive.
-[[ast_rule]]
-name = "controller-method-not-fat"
-class_match.annotation = "RestController"
-kind = "max_method_statements"
-max = 20
-severity = "INFO"
-deprecated = true
-replaced_by = "FAT_CONTROLLER_METHOD"
-
 # --- Spring v8 rubric ---------------------------------------------------
 #
 # Verbatim rule IDs from `config/spring-boot-rubric.md` (v8). Severity
@@ -254,9 +210,9 @@ kind = "forbidden_import"
 import_regex = "^javax\\.(persistence|validation)\\."
 severity = "CRITICAL"
 
-# FAT_CONTROLLER_METHOD — body span > 25 top-level statements.
-# Aliases the legacy `controller-method-not-fat` rule with the rubric ID;
-# threshold raised to 25 to match the rubric prose.
+# FAT_CONTROLLER_METHOD — body span > 25 top-level statements. The
+# rubric prose ("Methods at or below 25 top-level statements MUST NOT
+# be flagged") drives this threshold.
 [[ast_rule]]
 name = "FAT_CONTROLLER_METHOD"
 class_match.annotation = "RestController"
@@ -323,53 +279,6 @@ class_match.annotation = "Entity"
 kind = "forbidden_field_type"
 type_regex = ".*(Service|Repository|Component)$"
 severity = "WARNING"
-
-# --- Legacy Android AST rules (Wave A: deprecation surface) -------------
-#
-# Pre-v1 rules. Functionally subsumed by the new SHOUTY_SNAKE_CASE
-# rubric rules below (FRAGMENT_BYPASSES_VIEWMODEL +
-# VIEWMODEL_BYPASSES_REPOSITORY). `deprecated = true` emits a warning
-# on load; Wave B's DELETE migration will remove their rows from
-# `architecture_violations`; Wave C drops the blocks themselves.
-
-# Android: Activities and Fragments must not hold a Retrofit/ApiService directly.
-[[ast_rule]]
-name = "activity-no-retrofit-field"
-class_match.extends = "Activity"
-kind = "forbidden_field_type"
-type_regex = "^(Retrofit|.*ApiService)$"
-severity = "WARNING"
-deprecated = true
-replaced_by = "FRAGMENT_BYPASSES_VIEWMODEL"
-
-[[ast_rule]]
-name = "fragment-no-retrofit-field"
-class_match.extends = "Fragment"
-kind = "forbidden_field_type"
-type_regex = "^(Retrofit|.*ApiService)$"
-severity = "WARNING"
-deprecated = true
-replaced_by = "FRAGMENT_BYPASSES_VIEWMODEL"
-
-# Android: ViewModels must not hold a Retrofit/ApiService directly — they
-# go through a repository.
-[[ast_rule]]
-name = "viewmodel-no-retrofit-field"
-class_match.extends = "ViewModel"
-kind = "forbidden_field_type"
-type_regex = "^(Retrofit|.*ApiService)$"
-severity = "WARNING"
-deprecated = true
-replaced_by = "VIEWMODEL_BYPASSES_REPOSITORY"
-
-[[ast_rule]]
-name = "viewmodel-no-retrofit-ctor-param"
-class_match.extends = "ViewModel"
-kind = "forbidden_constructor_param"
-type_regex = "^(Retrofit|.*ApiService)$"
-severity = "WARNING"
-deprecated = true
-replaced_by = "VIEWMODEL_BYPASSES_REPOSITORY"
 
 # --- Android v1 rubric --------------------------------------------------
 #
