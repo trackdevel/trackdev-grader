@@ -252,6 +252,9 @@ fn insert_violation(
     v: &Violation,
 ) -> rusqlite::Result<()> {
     let rule_kind = v.kind.as_str();
+    // Per-rule severity (AST path) takes priority; legacy paths leave it
+    // None and fall back to the file-level `[severity]` from the TOML.
+    let severity = v.severity.as_deref().unwrap_or(default_severity);
     conn.execute(
         "INSERT OR REPLACE INTO architecture_violations
             (repo_full_name, file_path, rule_name,
@@ -264,7 +267,7 @@ fn insert_violation(
             v.rule_name,
             rule_kind,
             v.offending_import,
-            default_severity,
+            severity,
             v.start_line.map(|n| n as i64),
             v.end_line.map(|n| n as i64),
             rule_kind,

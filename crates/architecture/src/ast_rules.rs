@@ -70,14 +70,15 @@ pub struct RawAstRule {
     pub kind: String,
     /// Used by `forbidden_field_type`, `forbidden_constructor_param`,
     /// `forbidden_return_type`, `forbidden_method_param`,
-    /// `must_null_in_lifecycle`.
+    /// `must_null_in_lifecycle`, `forbidden_constructor_call`,
+    /// `field_count_with_type_pattern`.
     #[serde(default)]
     pub type_regex: Option<String>,
     /// Used by `forbidden_method_call`. Matched against the *callee* string
     /// reconstructed from the AST (e.g. `userRepository.findAll`).
     #[serde(default)]
     pub call_regex: Option<String>,
-    /// Used by `max_method_statements`.
+    /// Used by `max_method_statements`, `field_count_with_type_pattern`.
     #[serde(default)]
     pub max: Option<usize>,
     /// Visibility filter for method-shaped rules
@@ -102,6 +103,47 @@ pub struct RawAstRule {
     /// only emit when the field carries that modifier.
     #[serde(default)]
     pub required_modifier: Option<String>,
+    /// Used by `class_has_forbidden_annotation` (W2.1) and
+    /// `method_annotation_visibility_mismatch` (W2.2). Matched against
+    /// the annotation's simple name (no `@`).
+    #[serde(default)]
+    pub annotation_regex: Option<String>,
+    /// `class_has_forbidden_annotation` (W2.1) scope. `"class"` matches
+    /// only class-level annotations; `"class_or_method"` also matches
+    /// annotations on method declarations. Default: `"class"`.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// `method_annotation_visibility_mismatch` (W2.2) — the visibility
+    /// that the annotated method MUST have. Fires when the method's
+    /// visibility doesn't match.
+    #[serde(default)]
+    pub required_visibility: Option<String>,
+    /// `forbidden_method_call` (W2.3) — when set, the call must have
+    /// exactly this many arguments to fire.
+    #[serde(default)]
+    pub arg_count: Option<usize>,
+    /// `forbidden_constructor_call` (W2.4) — when set, the constructor
+    /// call must pass at least this many arguments to fire.
+    #[serde(default)]
+    pub min_args: Option<usize>,
+    /// `parameter_annotation_requires_companion` (W2.5).
+    #[serde(default)]
+    pub trigger_annotation: Option<String>,
+    /// `parameter_annotation_requires_companion` (W2.5).
+    #[serde(default)]
+    pub required_annotation_regex: Option<String>,
+    /// 3-stage non-DTO gate (W2.x). Suppresses a field/param/return-type
+    /// finding when the offending type's simple name matches (e.g.
+    /// stdlib value types: `String`, `UUID`, ...).
+    #[serde(default)]
+    pub type_allowlist: Option<String>,
+    /// 3-stage non-DTO gate (W2.x). Suppresses a field/param/return-type
+    /// finding when the resolved package of the offending type matches
+    /// (e.g. `(?i)\.dto\.`). The package is resolved via the file's
+    /// imports; types referenced without an explicit import resolve to
+    /// the file's own package.
+    #[serde(default)]
+    pub type_package_allowlist: Option<String>,
     #[serde(default = "default_severity")]
     pub severity: String,
 }
@@ -157,6 +199,110 @@ impl DeclaredVisibility {
     }
 }
 
+/// `class_has_forbidden_annotation` (W2.1) scope. `Class` matches only
+/// class-level annotations; `ClassOrMethod` also walks method
+/// declarations and matches annotations on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassAnnotationScope {
+    Class,
+    ClassOrMethod,
+}
+
+impl ClassAnnotationScope {
+    fn parse(s: Option<&str>) -> anyhow::Result<Self> {
+        match s {
+            None | Some("class") => Ok(ClassAnnotationScope::Class),
+            Some("class_or_method") => Ok(ClassAnnotationScope::ClassOrMethod),
+            Some(other) => {
+                anyhow::bail!("unknown scope '{other}' — expected 'class' or 'class_or_method'")
+            }
+        }
+    }
+}
+
+/// Optional type-shape suppressors shared by field / param / return-type
+/// rules (W2.x non-DTO gate). Each suppressor is independent: if any one
+/// matches, the finding is dropped.
+///
+/// Note on regex flavour: Rust's `regex` crate doesn't support
+/// lookarounds. The plan's first sketch used `(?i)^(?!.*(dto|request|
+/// response)).+$` in `type_regex` to express "fire when the name is
+/// **not** DTO-shaped"; that pattern doesn't compile. The TOML design
+/// instead folds the "type-name suggests DTO" signal into
+/// `type_allowlist` (alongside stdlib value types), so it becomes one
+/// more positive suppressor. `type_regex` then stays a simple "match
+/// anything that looks like a type" filter.
+#[derive(Debug, Clone, Default)]
+pub struct TypeSuppressors {
+    /// Name-based suppressor (stages 2 + 3 from the plan, combined).
+    /// Suppresses when the offending type's simple name matches — DTO
+    /// shape (`(?i).*(dto|request|response).*`) and stdlib value types
+    /// (`^String$`, `^UUID$`, …) live here.
+    pub type_allowlist: Option<Regex>,
+    /// Package-name suppressor (stage 1). Suppresses when the resolved
+    /// source package of the offending type matches (e.g.
+    /// `(?i)(^|\.)(dto|dtos)(\.|$)`).
+    pub type_package_allowlist: Option<Regex>,
+}
+
+impl TypeSuppressors {
+    fn from_raw(raw: &RawAstRule) -> anyhow::Result<Self> {
+        Ok(TypeSuppressors {
+            type_allowlist: match raw.type_allowlist.as_deref() {
+                Some(s) => Some(Regex::new(s)?),
+                None => None,
+            },
+            type_package_allowlist: match raw.type_package_allowlist.as_deref() {
+                Some(s) => Some(Regex::new(s)?),
+                None => None,
+            },
+        })
+    }
+
+    /// Returns true when this finding should be suppressed (i.e. a
+    /// suppressor matches).
+    fn suppresses(
+        &self,
+        type_name: &str,
+        own_package: &str,
+        imports: &[(String, Node<'_>)],
+    ) -> bool {
+        if let Some(r) = &self.type_allowlist {
+            if r.is_match(type_name) {
+                return true;
+            }
+        }
+        if let Some(r) = &self.type_package_allowlist {
+            let pkg = resolve_type_package(type_name, own_package, imports);
+            if r.is_match(pkg) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Resolve the source package of a type referenced inside a file. Looks
+/// for an `import` line whose last identifier equals `type_name`; if
+/// found, returns the leading dotted prefix (`import com.x.dto.UserDto`
+/// → `com.x.dto`). When no matching import exists, the reference is
+/// same-package and the file's own package is returned.
+fn resolve_type_package<'a>(
+    type_name: &str,
+    own_package: &'a str,
+    imports: &'a [(String, Node<'_>)],
+) -> &'a str {
+    for (text, _node) in imports {
+        let stripped = text.strip_suffix(".*").unwrap_or(text);
+        if let Some((pkg, last)) = stripped.rsplit_once('.') {
+            if last == type_name {
+                return pkg;
+            }
+        }
+    }
+    own_package
+}
+
 #[derive(Debug, Clone)]
 pub struct ClassMatcher {
     pub annotation: Option<String>,
@@ -172,16 +318,19 @@ pub enum AstRuleKind {
     ForbiddenFieldType {
         type_regex: Regex,
         required_modifier: Option<String>,
+        suppressors: TypeSuppressors,
     },
     ForbiddenConstructorParam {
         type_regex: Regex,
     },
     ForbiddenMethodCall {
         call_regex: Regex,
+        arg_count: Option<usize>,
     },
     ForbiddenReturnType {
         type_regex: Regex,
         visibility: Visibility,
+        suppressors: TypeSuppressors,
     },
     MaxMethodStatements {
         max: usize,
@@ -189,6 +338,7 @@ pub enum AstRuleKind {
     ForbiddenMethodParam {
         type_regex: Regex,
         visibility: Visibility,
+        suppressors: TypeSuppressors,
     },
     ForbiddenImport {
         import_regex: Regex,
@@ -199,6 +349,36 @@ pub enum AstRuleKind {
     },
     ForbiddenCallSource {
         regex: Regex,
+    },
+    /// W2.1 — class (or class/method) carries a forbidden annotation.
+    ClassHasForbiddenAnnotation {
+        annotation_regex: Regex,
+        scope: ClassAnnotationScope,
+    },
+    /// W2.2 — method carries `annotation_regex` but its visibility does
+    /// not match `required_visibility` (e.g. `@Transactional` on a
+    /// non-`public` method).
+    MethodAnnotationVisibilityMismatch {
+        annotation_regex: Regex,
+        required_visibility: Visibility,
+    },
+    /// W2.4 — `new <Type>(...)` constructor calls matching `type_regex`,
+    /// optionally requiring at least `min_args` arguments.
+    ForbiddenConstructorCall {
+        type_regex: Regex,
+        min_args: Option<usize>,
+    },
+    /// W2.5 — parameter carries `trigger_annotation` but none of its
+    /// other annotations match `required_annotation_regex`.
+    ParameterAnnotationRequiresCompanion {
+        trigger_annotation: String,
+        required_annotation_regex: Regex,
+    },
+    /// W2.6 — the class declares more than `max` fields whose type
+    /// matches `type_regex`.
+    FieldCountWithTypePattern {
+        type_regex: Regex,
+        max: usize,
     },
 }
 
@@ -214,6 +394,15 @@ impl AstRuleKind {
             AstRuleKind::ForbiddenImport { .. } => "ast_forbidden_import",
             AstRuleKind::MustNullInLifecycle { .. } => "ast_must_null_in_lifecycle",
             AstRuleKind::ForbiddenCallSource { .. } => "ast_forbidden_call_source",
+            AstRuleKind::ClassHasForbiddenAnnotation { .. } => "ast_class_has_forbidden_annotation",
+            AstRuleKind::MethodAnnotationVisibilityMismatch { .. } => {
+                "ast_method_annotation_visibility_mismatch"
+            }
+            AstRuleKind::ForbiddenConstructorCall { .. } => "ast_forbidden_constructor_call",
+            AstRuleKind::ParameterAnnotationRequiresCompanion { .. } => {
+                "ast_parameter_annotation_requires_companion"
+            }
+            AstRuleKind::FieldCountWithTypePattern { .. } => "ast_field_count_with_type_pattern",
         }
     }
 }
@@ -228,33 +417,39 @@ pub struct AstRule {
 
 impl AstRule {
     pub fn from_raw(raw: RawAstRule) -> anyhow::Result<Self> {
+        // Compile cross-kind state before destructuring the RawClassMatch
+        // so the resulting borrow of `raw` is still whole.
+        let visibility = Visibility::parse(raw.visibility.as_deref())?;
+        let suppressors = TypeSuppressors::from_raw(&raw)?;
         let class_match = ClassMatcher {
-            annotation: raw.class_match.annotation,
-            extends: raw.class_match.extends,
-            implements: raw.class_match.implements,
+            annotation: raw.class_match.annotation.clone(),
+            extends: raw.class_match.extends.clone(),
+            implements: raw.class_match.implements.clone(),
             package_glob: raw
                 .class_match
                 .package_glob
                 .as_deref()
                 .map(PackagePattern::new),
-            name_suffix: raw.class_match.name_suffix,
-            not_extends: raw.class_match.not_extends,
+            name_suffix: raw.class_match.name_suffix.clone(),
+            not_extends: raw.class_match.not_extends.clone(),
         };
-        let visibility = Visibility::parse(raw.visibility.as_deref())?;
         let kind = match raw.kind.as_str() {
             "forbidden_field_type" => AstRuleKind::ForbiddenFieldType {
-                type_regex: compile_regex(raw.type_regex, "type_regex", &raw.name)?,
-                required_modifier: raw.required_modifier,
+                type_regex: compile_regex(raw.type_regex.clone(), "type_regex", &raw.name)?,
+                required_modifier: raw.required_modifier.clone(),
+                suppressors: suppressors.clone(),
             },
             "forbidden_constructor_param" => AstRuleKind::ForbiddenConstructorParam {
-                type_regex: compile_regex(raw.type_regex, "type_regex", &raw.name)?,
+                type_regex: compile_regex(raw.type_regex.clone(), "type_regex", &raw.name)?,
             },
             "forbidden_method_call" => AstRuleKind::ForbiddenMethodCall {
-                call_regex: compile_regex(raw.call_regex, "call_regex", &raw.name)?,
+                call_regex: compile_regex(raw.call_regex.clone(), "call_regex", &raw.name)?,
+                arg_count: raw.arg_count,
             },
             "forbidden_return_type" => AstRuleKind::ForbiddenReturnType {
-                type_regex: compile_regex(raw.type_regex, "type_regex", &raw.name)?,
+                type_regex: compile_regex(raw.type_regex.clone(), "type_regex", &raw.name)?,
                 visibility,
+                suppressors: suppressors.clone(),
             },
             "max_method_statements" => AstRuleKind::MaxMethodStatements {
                 max: raw.max.ok_or_else(|| {
@@ -265,15 +460,16 @@ impl AstRule {
                 })?,
             },
             "forbidden_method_param" => AstRuleKind::ForbiddenMethodParam {
-                type_regex: compile_regex(raw.type_regex, "type_regex", &raw.name)?,
+                type_regex: compile_regex(raw.type_regex.clone(), "type_regex", &raw.name)?,
                 visibility,
+                suppressors,
             },
             "forbidden_import" => AstRuleKind::ForbiddenImport {
-                import_regex: compile_regex(raw.import_regex, "import_regex", &raw.name)?,
+                import_regex: compile_regex(raw.import_regex.clone(), "import_regex", &raw.name)?,
             },
             "must_null_in_lifecycle" => AstRuleKind::MustNullInLifecycle {
-                type_regex: compile_regex(raw.type_regex, "type_regex", &raw.name)?,
-                method_name: raw.method_name.ok_or_else(|| {
+                type_regex: compile_regex(raw.type_regex.clone(), "type_regex", &raw.name)?,
+                method_name: raw.method_name.clone().ok_or_else(|| {
                     anyhow::anyhow!(
                         "ast_rule '{}' kind=must_null_in_lifecycle requires `method_name`",
                         raw.name
@@ -281,7 +477,54 @@ impl AstRule {
                 })?,
             },
             "forbidden_call_source" => AstRuleKind::ForbiddenCallSource {
-                regex: compile_regex(raw.source_regex, "source_regex", &raw.name)?,
+                regex: compile_regex(raw.source_regex.clone(), "source_regex", &raw.name)?,
+            },
+            "class_has_forbidden_annotation" => AstRuleKind::ClassHasForbiddenAnnotation {
+                annotation_regex: compile_regex(
+                    raw.annotation_regex.clone(),
+                    "annotation_regex",
+                    &raw.name,
+                )?,
+                scope: ClassAnnotationScope::parse(raw.scope.as_deref())?,
+            },
+            "method_annotation_visibility_mismatch" => {
+                AstRuleKind::MethodAnnotationVisibilityMismatch {
+                    annotation_regex: compile_regex(
+                        raw.annotation_regex.clone(),
+                        "annotation_regex",
+                        &raw.name,
+                    )?,
+                    required_visibility: Visibility::parse(raw.required_visibility.as_deref())?,
+                }
+            }
+            "forbidden_constructor_call" => AstRuleKind::ForbiddenConstructorCall {
+                type_regex: compile_regex(raw.type_regex.clone(), "type_regex", &raw.name)?,
+                min_args: raw.min_args,
+            },
+            "parameter_annotation_requires_companion" => {
+                AstRuleKind::ParameterAnnotationRequiresCompanion {
+                    trigger_annotation: raw.trigger_annotation.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "ast_rule '{}' kind=parameter_annotation_requires_companion \
+                             requires `trigger_annotation`",
+                            raw.name
+                        )
+                    })?,
+                    required_annotation_regex: compile_regex(
+                        raw.required_annotation_regex.clone(),
+                        "required_annotation_regex",
+                        &raw.name,
+                    )?,
+                }
+            }
+            "field_count_with_type_pattern" => AstRuleKind::FieldCountWithTypePattern {
+                type_regex: compile_regex(raw.type_regex.clone(), "type_regex", &raw.name)?,
+                max: raw.max.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ast_rule '{}' kind=field_count_with_type_pattern requires `max`",
+                        raw.name
+                    )
+                })?,
             },
             other => {
                 anyhow::bail!("ast_rule '{}' has unknown kind '{}'", raw.name, other)
@@ -511,6 +754,7 @@ fn apply_rule(
         AstRuleKind::ForbiddenFieldType {
             type_regex,
             required_modifier,
+            suppressors,
         } => {
             for member in children(body) {
                 if member.kind() != "field_declaration" {
@@ -523,14 +767,18 @@ fn apply_rule(
                 }
                 let ty = type_text_of_field(member, source);
                 if let Some(t) = ty {
-                    if type_regex.is_match(&t) {
-                        out.push(make_violation(
-                            rel_path,
-                            rule,
-                            &format!("{}::{}", info.name, t),
-                            member,
-                        ));
+                    if !type_regex.is_match(&t) {
+                        continue;
                     }
+                    if suppressors.suppresses(&t, file_ctx.package, &file_ctx.imports) {
+                        continue;
+                    }
+                    out.push(make_violation(
+                        rel_path,
+                        rule,
+                        &format!("{}::{}", info.name, t),
+                        member,
+                    ));
                 }
             }
         }
@@ -554,7 +802,10 @@ fn apply_rule(
                 }
             }
         }
-        AstRuleKind::ForbiddenMethodCall { call_regex } => {
+        AstRuleKind::ForbiddenMethodCall {
+            call_regex,
+            arg_count,
+        } => {
             for member in children(body) {
                 if member.kind() != "method_declaration"
                     && member.kind() != "constructor_declaration"
@@ -564,20 +815,27 @@ fn apply_rule(
                 let mut hits: Vec<(String, Node)> = Vec::new();
                 collect_method_invocations(member, source, &mut hits);
                 for (callee, n) in hits {
-                    if call_regex.is_match(&callee) {
-                        out.push(make_violation(
-                            rel_path,
-                            rule,
-                            &format!("{}::call({})", info.name, callee),
-                            n,
-                        ));
+                    if !call_regex.is_match(&callee) {
+                        continue;
                     }
+                    if let Some(want) = arg_count {
+                        if count_call_args(n) != *want {
+                            continue;
+                        }
+                    }
+                    out.push(make_violation(
+                        rel_path,
+                        rule,
+                        &format!("{}::call({})", info.name, callee),
+                        n,
+                    ));
                 }
             }
         }
         AstRuleKind::ForbiddenReturnType {
             type_regex,
             visibility,
+            suppressors,
         } => {
             for member in children(body) {
                 if member.kind() != "method_declaration" {
@@ -588,14 +846,18 @@ fn apply_rule(
                 }
                 let ty = method_return_type(member, source);
                 if let Some(t) = ty {
-                    if type_regex.is_match(&t) {
-                        out.push(make_violation(
-                            rel_path,
-                            rule,
-                            &format!("{}::return({})", info.name, t),
-                            member,
-                        ));
+                    if !type_regex.is_match(&t) {
+                        continue;
                     }
+                    if suppressors.suppresses(&t, file_ctx.package, &file_ctx.imports) {
+                        continue;
+                    }
+                    out.push(make_violation(
+                        rel_path,
+                        rule,
+                        &format!("{}::return({})", info.name, t),
+                        member,
+                    ));
                 }
             }
         }
@@ -619,6 +881,7 @@ fn apply_rule(
         AstRuleKind::ForbiddenMethodParam {
             type_regex,
             visibility,
+            suppressors,
         } => {
             for member in children(body) {
                 if member.kind() != "method_declaration" {
@@ -631,14 +894,18 @@ fn apply_rule(
                 for param in formal_parameters(member) {
                     let ty = type_text_of_param(param, source);
                     if let Some(t) = ty {
-                        if type_regex.is_match(&t) {
-                            out.push(make_violation(
-                                rel_path,
-                                rule,
-                                &format!("{}::{}::param({})", info.name, m_name, t),
-                                param,
-                            ));
+                        if !type_regex.is_match(&t) {
+                            continue;
                         }
+                        if suppressors.suppresses(&t, file_ctx.package, &file_ctx.imports) {
+                            continue;
+                        }
+                        out.push(make_violation(
+                            rel_path,
+                            rule,
+                            &format!("{}::{}::param({})", info.name, m_name, t),
+                            param,
+                        ));
                     }
                 }
             }
@@ -730,6 +997,164 @@ fn apply_rule(
                 }
             }
         }
+        AstRuleKind::ClassHasForbiddenAnnotation {
+            annotation_regex,
+            scope,
+        } => {
+            // Class-level annotations.
+            if info
+                .annotations
+                .iter()
+                .any(|a| annotation_regex.is_match(a))
+            {
+                let anchor = class_identifier(info.node).unwrap_or(info.node);
+                let line = anchor.start_position().row as u32 + 1;
+                out.push(make_violation(
+                    rel_path,
+                    rule,
+                    &format!("{}::class-annot@L{}", info.name, line),
+                    anchor,
+                ));
+            }
+            // Method-level annotations (when scope allows).
+            if matches!(scope, ClassAnnotationScope::ClassOrMethod) {
+                for member in children(body) {
+                    if member.kind() != "method_declaration" {
+                        continue;
+                    }
+                    let annots = method_annotations(member, source);
+                    let hit = annots.iter().any(|a| annotation_regex.is_match(a));
+                    if hit {
+                        let m_name = method_name(member, source).unwrap_or_else(|| "<anon>".into());
+                        let anchor = method_identifier(member).unwrap_or(member);
+                        let line = anchor.start_position().row as u32 + 1;
+                        out.push(make_violation(
+                            rel_path,
+                            rule,
+                            &format!("{}::{}::annot@L{}", info.name, m_name, line),
+                            anchor,
+                        ));
+                    }
+                }
+            }
+        }
+        AstRuleKind::MethodAnnotationVisibilityMismatch {
+            annotation_regex,
+            required_visibility,
+        } => {
+            for member in children(body) {
+                if member.kind() != "method_declaration" {
+                    continue;
+                }
+                let annots = method_annotations(member, source);
+                if !annots.iter().any(|a| annotation_regex.is_match(a)) {
+                    continue;
+                }
+                let actual = method_visibility(member, source);
+                if actual.matches_filter(*required_visibility) {
+                    continue;
+                }
+                let m_name = method_name(member, source).unwrap_or_else(|| "<anon>".into());
+                let anchor = method_identifier(member).unwrap_or(member);
+                out.push(make_violation(
+                    rel_path,
+                    rule,
+                    &format!("{}::{}::visibility-mismatch", info.name, m_name),
+                    anchor,
+                ));
+            }
+        }
+        AstRuleKind::ForbiddenConstructorCall {
+            type_regex,
+            min_args,
+        } => {
+            // Walk every method/constructor body for `object_creation_expression`
+            // nodes matching the type regex.
+            for member in children(body) {
+                if member.kind() != "method_declaration"
+                    && member.kind() != "constructor_declaration"
+                {
+                    continue;
+                }
+                let mut hits: Vec<Node> = Vec::new();
+                collect_object_creations(member, &mut hits);
+                for n in hits {
+                    let ty = object_creation_type_name(n, source);
+                    if let Some(t) = ty {
+                        if !type_regex.is_match(&t) {
+                            continue;
+                        }
+                        if let Some(min) = min_args {
+                            if count_object_creation_args(n) < *min {
+                                continue;
+                            }
+                        }
+                        out.push(make_violation(
+                            rel_path,
+                            rule,
+                            &format!("{}::new({})", info.name, t),
+                            n,
+                        ));
+                    }
+                }
+            }
+        }
+        AstRuleKind::ParameterAnnotationRequiresCompanion {
+            trigger_annotation,
+            required_annotation_regex,
+        } => {
+            for member in children(body) {
+                if member.kind() != "method_declaration"
+                    && member.kind() != "constructor_declaration"
+                {
+                    continue;
+                }
+                let m_name = method_name(member, source).unwrap_or_else(|| "<anon>".into());
+                for param in formal_parameters(member) {
+                    let annots = param_annotations(param, source);
+                    if !annots.iter().any(|a| a == trigger_annotation) {
+                        continue;
+                    }
+                    let has_companion =
+                        annots.iter().any(|a| required_annotation_regex.is_match(a));
+                    if has_companion {
+                        continue;
+                    }
+                    let pty = type_text_of_param(param, source).unwrap_or_else(|| "?".into());
+                    out.push(make_violation(
+                        rel_path,
+                        rule,
+                        &format!(
+                            "{}::{}::param({})::missing-{}-companion",
+                            info.name, m_name, pty, trigger_annotation
+                        ),
+                        param,
+                    ));
+                }
+            }
+        }
+        AstRuleKind::FieldCountWithTypePattern { type_regex, max } => {
+            let mut count = 0usize;
+            for member in children(body) {
+                if member.kind() != "field_declaration" {
+                    continue;
+                }
+                if let Some(t) = type_text_of_field(member, source) {
+                    if type_regex.is_match(&t) {
+                        count += 1;
+                    }
+                }
+            }
+            if count > *max {
+                let anchor = class_identifier(info.node).unwrap_or(info.node);
+                out.push(make_violation(
+                    rel_path,
+                    rule,
+                    &format!("{}::field-count::{}>{}", info.name, count, max),
+                    anchor,
+                ));
+            }
+        }
     }
 }
 
@@ -748,6 +1173,7 @@ fn make_violation(rel_path: &str, rule: &AstRule, descriptor: &str, anchor: Node
         offending_import: descriptor,
         start_line: Some(start),
         end_line: Some(end),
+        severity: Some(rule.severity.clone()),
     }
 }
 
@@ -1085,6 +1511,133 @@ fn visit_assignment_expressions<F: FnMut(Node)>(node: Node, cb: &mut F) {
     for c in children(node) {
         visit_assignment_expressions(c, cb);
     }
+}
+
+/// Collect annotation names declared directly on a `method_declaration`'s
+/// modifier list. Strips leading `@` and any package qualifier (returns
+/// the simple name only, e.g. `Transactional`).
+fn method_annotations(method: Node, source: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in children(method) {
+        if c.kind() != "modifiers" {
+            continue;
+        }
+        for m in children(c) {
+            if let Some(a) = annotation_name(m, source) {
+                out.push(a);
+            }
+        }
+    }
+    out
+}
+
+/// Collect annotation names declared directly on a `formal_parameter`'s
+/// modifier list.
+fn param_annotations(param: Node, source: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in children(param) {
+        if c.kind() != "modifiers" {
+            continue;
+        }
+        for m in children(c) {
+            if let Some(a) = annotation_name(m, source) {
+                out.push(a);
+            }
+        }
+    }
+    out
+}
+
+/// Number of *real* argument nodes (commas/parentheses excluded) inside
+/// a `method_invocation`'s `argument_list`.
+fn count_call_args(invocation: Node) -> usize {
+    children(invocation)
+        .into_iter()
+        .find(|c| c.kind() == "argument_list")
+        .map(count_argument_list_args)
+        .unwrap_or(0)
+}
+
+fn count_argument_list_args(arg_list: Node) -> usize {
+    children(arg_list)
+        .into_iter()
+        .filter(|c| {
+            let k = c.kind();
+            // tree-sitter-java keeps `(`, `,`, `)` as anonymous siblings;
+            // anything else is a real argument expression.
+            k != "(" && k != ")" && k != ","
+        })
+        .count()
+}
+
+/// Collect every `object_creation_expression` descendant of `node`.
+fn collect_object_creations<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+    if node.kind() == "object_creation_expression" {
+        out.push(node);
+    }
+    for c in children(node) {
+        collect_object_creations(c, out);
+    }
+}
+
+/// Pull the simple type name from an `object_creation_expression` —
+/// `new com.x.Foo<Bar>(...)` → `Foo`.
+fn object_creation_type_name(node: Node, source: &[u8]) -> Option<String> {
+    for c in children(node) {
+        let k = c.kind();
+        if k == "type_identifier"
+            || k == "scoped_type_identifier"
+            || k == "generic_type"
+            || k.ends_with("_type")
+        {
+            return simple_type_name(c, source);
+        }
+    }
+    None
+}
+
+fn count_object_creation_args(node: Node) -> usize {
+    children(node)
+        .into_iter()
+        .find(|c| c.kind() == "argument_list")
+        .map(count_argument_list_args)
+        .unwrap_or(0)
+}
+
+/// Find the class's identifier node (the `class_declaration` carries one
+/// direct `identifier` child for the class name).
+fn class_identifier(node: Node) -> Option<Node> {
+    children(node)
+        .into_iter()
+        .find(|c| c.kind() == "identifier")
+}
+
+/// Find the method's identifier node — same scan as `method_name` but
+/// returning the `Node` so callers can anchor a violation at the name
+/// rather than the whole method.
+fn method_identifier(method: Node) -> Option<Node> {
+    let mut saw_type = false;
+    for c in children(method) {
+        let k = c.kind();
+        if k == "modifiers" || k == "type_parameters" {
+            continue;
+        }
+        if !saw_type
+            && (k.ends_with("_type")
+                || k == "void_type"
+                || k == "type_identifier"
+                || k == "scoped_type_identifier"
+                || k == "generic_type"
+                || k == "array_type")
+        {
+            saw_type = true;
+            continue;
+        }
+        if k == "identifier" {
+            return Some(c);
+        }
+    }
+    None
 }
 
 fn assignment_targets_field_with_null(assign: Node, source: &[u8], field_name: &str) -> bool {
@@ -1773,6 +2326,647 @@ mod tests {
         assert!(
             check_java_file(&[r], "PostsViewModel.java", "com.x.home", src2.as_bytes()).is_empty(),
             "not_extends should suppress the rule"
+        );
+    }
+
+    // ---------- W2.1: class_has_forbidden_annotation ----------
+
+    #[test]
+    fn class_has_forbidden_annotation_class_level_fires_once() {
+        let r = rule(
+            r#"
+            name = "controller-no-transactional"
+            class_match.annotation = "RestController"
+            kind = "class_has_forbidden_annotation"
+            annotation_regex = "^Transactional$"
+            scope = "class_or_method"
+            severity = "CRITICAL"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            @Transactional
+            public class C {
+                public void f() {}
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind.as_str(), "ast_class_has_forbidden_annotation");
+        assert_eq!(v[0].severity.as_deref(), Some("CRITICAL"));
+    }
+
+    #[test]
+    fn class_has_forbidden_annotation_method_level_fires_only_with_class_or_method_scope() {
+        let r_method_scope = rule(
+            r#"
+            name = "controller-no-transactional-cm"
+            class_match.annotation = "RestController"
+            kind = "class_has_forbidden_annotation"
+            annotation_regex = "^Transactional$"
+            scope = "class_or_method"
+            "#,
+        );
+        let r_class_only = rule(
+            r#"
+            name = "controller-no-transactional-c"
+            class_match.annotation = "RestController"
+            kind = "class_has_forbidden_annotation"
+            annotation_regex = "^Transactional$"
+            scope = "class"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            public class C {
+                @Transactional
+                public void f() {}
+            }
+        "#;
+        let v1 = check_java_file(
+            &[r_method_scope],
+            "C.java",
+            "com.x.controller",
+            src.as_bytes(),
+        );
+        assert_eq!(
+            v1.len(),
+            1,
+            "class_or_method should pick up the @Transactional method"
+        );
+        let v2 = check_java_file(
+            &[r_class_only],
+            "C.java",
+            "com.x.controller",
+            src.as_bytes(),
+        );
+        assert!(v2.is_empty(), "class scope must ignore method annotations");
+    }
+
+    #[test]
+    fn class_has_forbidden_annotation_silent_when_no_match() {
+        let r = rule(
+            r#"
+            name = "controller-no-transactional-silent"
+            class_match.annotation = "RestController"
+            kind = "class_has_forbidden_annotation"
+            annotation_regex = "^Transactional$"
+            scope = "class_or_method"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            public class C {
+                public void f() {}
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(v.is_empty(), "no @Transactional → no fire: {v:?}");
+    }
+
+    #[test]
+    fn class_has_forbidden_annotation_entity_lombok_data_matches() {
+        let r = rule(
+            r#"
+            name = "entity-no-lombok-data"
+            class_match.annotation = "Entity"
+            kind = "class_has_forbidden_annotation"
+            annotation_regex = "^(Data|EqualsAndHashCode|ToString)$"
+            scope = "class"
+            "#,
+        );
+        let src = r#"
+            package com.x.entity;
+            @Entity
+            @Data
+            public class Post {}
+        "#;
+        let v = check_java_file(&[r], "Post.java", "com.x.entity", src.as_bytes());
+        assert_eq!(v.len(), 1);
+    }
+
+    // ---------- W2.2: method_annotation_visibility_mismatch ----------
+
+    #[test]
+    fn transactional_on_private_method_fires() {
+        let r = rule(
+            r#"
+            name = "transactional-must-be-public"
+            kind = "method_annotation_visibility_mismatch"
+            annotation_regex = "^Transactional$"
+            required_visibility = "public"
+            severity = "CRITICAL"
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            @Service
+            class S {
+                @Transactional
+                private void f() {}
+            }
+        "#;
+        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].severity.as_deref(), Some("CRITICAL"));
+    }
+
+    #[test]
+    fn transactional_on_package_private_method_fires() {
+        let r = rule(
+            r#"
+            name = "transactional-must-be-public"
+            kind = "method_annotation_visibility_mismatch"
+            annotation_regex = "^Transactional$"
+            required_visibility = "public"
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            class S {
+                @Transactional
+                void f() {}
+            }
+        "#;
+        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn transactional_on_public_method_does_not_fire() {
+        let r = rule(
+            r#"
+            name = "transactional-must-be-public"
+            kind = "method_annotation_visibility_mismatch"
+            annotation_regex = "^Transactional$"
+            required_visibility = "public"
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            class S {
+                @Transactional
+                public void f() {}
+            }
+        "#;
+        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn transactional_annotation_with_args_still_matches_by_simple_name() {
+        let r = rule(
+            r#"
+            name = "transactional-args"
+            kind = "method_annotation_visibility_mismatch"
+            annotation_regex = "^Transactional$"
+            required_visibility = "public"
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            class S {
+                @Transactional(readOnly = true)
+                void f() {}
+            }
+        "#;
+        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        assert_eq!(v.len(), 1, "annotation with arguments must still match");
+    }
+
+    // ---------- W2.3: forbidden_method_call arg_count ----------
+
+    #[test]
+    fn forbidden_method_call_arg_count_zero_filters_to_no_arg_calls() {
+        let r = rule(
+            r#"
+            name = "unbounded-findAll"
+            class_match.annotation = "Service"
+            kind = "forbidden_method_call"
+            call_regex = "\\.findAll$"
+            arg_count = 0
+            severity = "CRITICAL"
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            @Service
+            class S {
+                Object a() { return userRepository.findAll(); }
+                Object b() { return userRepository.findAll(pageable); }
+                Object c() { return userRepository.findAll(spec, pageable); }
+            }
+        "#;
+        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        assert_eq!(v.len(), 1, "only the zero-arg findAll should fire: {v:?}");
+        assert_eq!(v[0].severity.as_deref(), Some("CRITICAL"));
+    }
+
+    #[test]
+    fn forbidden_method_call_without_arg_count_keeps_existing_semantics() {
+        let r = rule(
+            r#"
+            name = "any-findAll"
+            class_match.annotation = "Service"
+            kind = "forbidden_method_call"
+            call_regex = "\\.findAll$"
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            @Service
+            class S {
+                Object a() { return userRepository.findAll(); }
+                Object b() { return userRepository.findAll(pageable); }
+            }
+        "#;
+        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        assert_eq!(v.len(), 2, "no arg_count → fires regardless of arity");
+    }
+
+    // ---------- W2.4: forbidden_constructor_call ----------
+
+    #[test]
+    fn forbidden_constructor_call_fires_on_new_response_with_two_args() {
+        let r = rule(
+            r#"
+            name = "manual-dto-mapping"
+            class_match.annotation = "RestController"
+            kind = "forbidden_constructor_call"
+            type_regex = "^\\w+(Dto|Response|Request)$"
+            min_args = 2
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                Object handle(User user) {
+                    return new UserResponse(user.getId(), user.getEmail());
+                }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert_eq!(v.len(), 1);
+        assert!(v[0].offending_import.contains("new(UserResponse)"));
+    }
+
+    #[test]
+    fn forbidden_constructor_call_silent_with_one_arg_when_min_two() {
+        let r = rule(
+            r#"
+            name = "manual-dto-mapping-min2"
+            class_match.annotation = "RestController"
+            kind = "forbidden_constructor_call"
+            type_regex = "^\\w+(Dto|Response|Request)$"
+            min_args = 2
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                Object handle(User user) {
+                    return new UserResponse(user);
+                }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(
+            v.is_empty(),
+            "single-arg copy constructor must not fire: {v:?}"
+        );
+    }
+
+    #[test]
+    fn forbidden_constructor_call_silent_when_mapper_used() {
+        let r = rule(
+            r#"
+            name = "manual-dto-mapping-mapper"
+            class_match.annotation = "RestController"
+            kind = "forbidden_constructor_call"
+            type_regex = "^\\w+(Dto|Response|Request)$"
+            min_args = 2
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                Object handle(User user) {
+                    return userMapper.toResponse(user);
+                }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(v.is_empty());
+    }
+
+    // ---------- W2.5: parameter_annotation_requires_companion ----------
+
+    #[test]
+    fn missing_valid_on_request_body_fires() {
+        let r = rule(
+            r#"
+            name = "missing-valid"
+            class_match.annotation = "RestController"
+            kind = "parameter_annotation_requires_companion"
+            trigger_annotation = "RequestBody"
+            required_annotation_regex = "^(Valid|Validated)$"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                public void create(@RequestBody CreateXRequest req) {}
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn valid_companion_on_request_body_suppresses() {
+        let r = rule(
+            r#"
+            name = "missing-valid-good"
+            class_match.annotation = "RestController"
+            kind = "parameter_annotation_requires_companion"
+            trigger_annotation = "RequestBody"
+            required_annotation_regex = "^(Valid|Validated)$"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                public void create(@Valid @RequestBody CreateXRequest req) {}
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn validated_companion_on_request_body_suppresses() {
+        let r = rule(
+            r#"
+            name = "missing-validated-good"
+            class_match.annotation = "RestController"
+            kind = "parameter_annotation_requires_companion"
+            trigger_annotation = "RequestBody"
+            required_annotation_regex = "^(Valid|Validated)$"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                public void create(@RequestBody @Validated CreateXRequest req) {}
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn parameter_without_trigger_annotation_does_not_fire() {
+        let r = rule(
+            r#"
+            name = "missing-valid-noop"
+            class_match.annotation = "RestController"
+            kind = "parameter_annotation_requires_companion"
+            trigger_annotation = "RequestBody"
+            required_annotation_regex = "^(Valid|Validated)$"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                public void noop(String s) {}
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(v.is_empty());
+    }
+
+    // ---------- W2.6: field_count_with_type_pattern ----------
+
+    #[test]
+    fn service_with_two_repositories_fires_once() {
+        let r = rule(
+            r#"
+            name = "service-multi-repo"
+            class_match.annotation = "Service"
+            kind = "field_count_with_type_pattern"
+            type_regex = ".*Repository$"
+            max = 1
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            @Service
+            class OrderService {
+                private final OrderRepository orderRepository;
+                private final UserRepository userRepository;
+            }
+        "#;
+        let v = check_java_file(&[r], "OrderService.java", "com.x.service", src.as_bytes());
+        assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn service_with_one_repository_silent() {
+        let r = rule(
+            r#"
+            name = "service-multi-repo"
+            class_match.annotation = "Service"
+            kind = "field_count_with_type_pattern"
+            type_regex = ".*Repository$"
+            max = 1
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            @Service
+            class OrderService {
+                private final OrderRepository orderRepository;
+            }
+        "#;
+        let v = check_java_file(&[r], "OrderService.java", "com.x.service", src.as_bytes());
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn service_with_three_repositories_still_one_violation() {
+        let r = rule(
+            r#"
+            name = "service-multi-repo"
+            class_match.annotation = "Service"
+            kind = "field_count_with_type_pattern"
+            type_regex = ".*Repository$"
+            max = 1
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            @Service
+            class OrderService {
+                private final OrderRepository a;
+                private final UserRepository b;
+                private final ItemRepository c;
+            }
+        "#;
+        let v = check_java_file(&[r], "OrderService.java", "com.x.service", src.as_bytes());
+        assert_eq!(
+            v.len(),
+            1,
+            "one class-level violation regardless of field count"
+        );
+    }
+
+    // ---------- W2.x non-DTO 3-stage gate ----------
+    //
+    // Rust's `regex` crate has no lookaround, so the plan's recommended
+    // `type_regex = "(?i)^(?!.*(dto|request|response)).+$"` does not
+    // compile. The working design folds the "type name is DTO-shaped"
+    // signal into `type_allowlist` alongside stdlib value types. The
+    // shared regex pair used in these tests:
+    //
+    //   type_regex             = ".+"   (match every return type)
+    //   type_allowlist         = "(?i).*(dto|request|response).*|^(Void|Boolean|Integer|Long|Float|Double|String|UUID|BigDecimal|LocalDate|LocalDateTime|Instant)$"
+    //   type_package_allowlist = "(?i)(^|\\.)(dto|dtos)(\\.|$)"
+
+    const NON_DTO_RETURN_RULE: &str = r#"
+        name = "controller-non-dto-return"
+        class_match.annotation = "RestController"
+        kind = "forbidden_return_type"
+        visibility = "public"
+        type_regex = ".+"
+        type_allowlist = "(?i).*(dto|request|response).*|^(Void|Boolean|Integer|Long|Float|Double|String|UUID|BigDecimal|LocalDate|LocalDateTime|Instant)$"
+        type_package_allowlist = "(?i)(^|\\.)(dto|dtos)(\\.|$)"
+    "#;
+
+    #[test]
+    fn return_type_suppressor_drops_dto_package_finding() {
+        let r = rule(NON_DTO_RETURN_RULE);
+        let src = r#"
+            package com.x.controller;
+            import com.example.app.dto.UserView;
+            @RestController
+            class C {
+                public UserView get() { return null; }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(v.is_empty(), "DTO package allowlist should suppress: {v:?}");
+    }
+
+    #[test]
+    fn return_type_suppressor_fires_on_domain_imported_type() {
+        let r = rule(NON_DTO_RETURN_RULE);
+        let src = r#"
+            package com.x.controller;
+            import com.example.app.domain.User;
+            @RestController
+            class C {
+                public User get() { return null; }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert_eq!(v.len(), 1, "domain-imported type should fire: {v:?}");
+    }
+
+    #[test]
+    fn return_type_suppressor_drops_dto_named_type_in_sloppy_package() {
+        let r = rule(NON_DTO_RETURN_RULE);
+        // Domain package but name contains "Dto" — name allowlist catches
+        // it (stage 2 in the plan, now folded into `type_allowlist`).
+        let src = r#"
+            package com.x.controller;
+            import com.example.app.domain.UserDto;
+            @RestController
+            class C {
+                public UserDto get() { return null; }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(
+            v.is_empty(),
+            "DTO-named type is suppressed by name allowlist: {v:?}"
+        );
+    }
+
+    #[test]
+    fn return_type_suppressor_drops_stdlib_value_type() {
+        let r = rule(NON_DTO_RETURN_RULE);
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C {
+                public Long getId() { return 1L; }
+                public String getName() { return ""; }
+                public UUID getUuid() { return null; }
+            }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert!(v.is_empty(), "stdlib types should be suppressed: {v:?}");
+    }
+
+    #[test]
+    fn method_param_suppressor_drops_dto_package_finding() {
+        let r = rule(
+            r#"
+            name = "service-non-dto-param"
+            class_match.annotation = "Service"
+            kind = "forbidden_method_param"
+            visibility = "public"
+            type_regex = ".+"
+            type_allowlist = "(?i).*(dto|request|response).*|^(Void|Boolean|Integer|Long|Float|Double|String|UUID|BigDecimal|LocalDate|LocalDateTime|Instant)$"
+            type_package_allowlist = "(?i)(^|\\.)(dto|dtos)(\\.|$)"
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            import com.example.app.dto.UserView;
+            @Service
+            class S {
+                public void create(UserView u) {}
+            }
+        "#;
+        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        assert!(v.is_empty(), "DTO-package param should not fire: {v:?}");
+    }
+
+    // ---------- Severity routing ----------
+
+    #[test]
+    fn ast_rule_severity_is_carried_on_the_violation() {
+        let r = rule(
+            r#"
+            name = "controller-no-repo"
+            class_match.annotation = "RestController"
+            kind = "forbidden_field_type"
+            type_regex = ".*Repository$"
+            severity = "CRITICAL"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            @RestController
+            class C { private UserRepository repo; }
+        "#;
+        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        assert_eq!(v.len(), 1);
+        assert_eq!(
+            v[0].severity.as_deref(),
+            Some("CRITICAL"),
+            "the rule's severity must travel on the Violation: {v:?}"
         );
     }
 }
