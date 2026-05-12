@@ -1,5 +1,19 @@
 //! LLM-judged architecture review with per-file caching (T-P3.3).
 //!
+//! ## DEPRECATED in Wave 4 of the AST-rubric migration
+//!
+//! The per-file LLM judge is no longer the default. Spring v8 and
+//! Android v1 rubrics are now evaluated deterministically by AST rules
+//! in `crates/architecture/src/ast_rules.rs`, configured in
+//! `config/architecture.toml` under `[[ast_rule]]` blocks. No
+//! production code path calls `run_llm_review_for_repo` under the
+//! default `course.toml`. The crate is retained for emergency rollback
+//! (set `[architecture] llm_review = true`) and as the cache-table
+//! substrate for the planned project-wide LLM explanation pass — see
+//! the `FUTURE:` comment block near the bottom of this file.
+//!
+//! ## Original behaviour (preserved while deprecated)
+//!
 //! Reads the per-stack rubric files (`config/architecture-spring.md`,
 //! `config/architecture-android.md`; loaded by
 //! `crates/architecture/src/rubric.rs`) and asks an LLM to grade each
@@ -90,6 +104,13 @@ pub use judge::{Judge, JudgeError, LlmJudge, LlmResponse, LlmViolation};
 /// per-file `elapsed_ms` + outcome; one per-repo summary at the end
 /// reports `judged_ok` / `judged_failed` / `cached` counts plus p50 /
 /// p95 wall-clock for the cache-miss calls.
+#[deprecated(
+    note = "The per-file LLM judge has been replaced by AST rules in `crates/architecture` \
+            (Wave 4 of the AST-rubric migration). No production code path calls this function \
+            under the default `course.toml`. Set `[architecture] llm_review = true` to \
+            re-engage. A project-wide LLM explanation pass is scaffolded as a `// FUTURE:` \
+            block at the bottom of this file."
+)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_llm_review_for_repo(
     conn: &Connection,
@@ -573,3 +594,23 @@ mod tests {
         );
     }
 }
+
+// FUTURE: project-wide explanation pass (Wave 6+ territory).
+//
+// Replace the per-file `run_llm_review_for_repo` with a per-project
+// `run_explanation_pass_for_project` that:
+//   1. Reads every (file_path, rule_id, start_line, end_line) row from
+//      `architecture_violations` for one `repo_full_name`.
+//   2. Reads the offending snippet (start_line - 2 .. end_line + 2)
+//      from the working tree for each finding.
+//   3. Sends one Anthropic call per project with all findings + their
+//      snippets + the rubric, asking for one explanation per finding.
+//   4. Writes `architecture_violations.explanation` for each finding.
+//
+// Cache by `(repo_full_name, head_sha, rubric_key, model_id)`. The
+// existing `architecture_llm_cache` table works as the substrate
+// (currently `(file_sha, rubric_version, model_id, response_json)` —
+// repurpose `file_sha` to hold `repo_full_name:head_sha`).
+//
+// Not in scope for the Wave 4 retirement; this block is the only
+// remaining reference to the LLM stage from PLAN.md.
