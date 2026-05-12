@@ -1249,6 +1249,59 @@ const KNOWN_RULE_DESCRIPTIONS: &[(&str, &str)] = &[
         "RELATIONSHIP_NOT_NESTED",
         "Nested resources should use the parent-path form `/<parent>/{parentId}/<child>`",
     ),
+    // Spring v8 rubric (AST rules — replaces the per-file LLM judge).
+    (
+        "CONTROLLER_RETURNS_NON_DTO",
+        "REST controllers must return DTOs — exposing JPA entities causes lazy-loading errors and leaks internal column shape to clients",
+    ),
+    (
+        "CONTROLLER_USES_REPOSITORY",
+        "Controllers must not hold or inject a Repository — repository access goes through a Service",
+    ),
+    (
+        "CONTROLLER_HAS_TRANSACTIONAL",
+        "`@Transactional` belongs on Service methods — declaring it on a controller widens the transaction boundary to the HTTP layer",
+    ),
+    (
+        "TRANSACTIONAL_ON_NON_PUBLIC_METHOD",
+        "`@Transactional` on a non-public method is silently ignored by Spring AOP — the transaction never starts",
+    ),
+    (
+        "UNBOUNDED_FIND_ALL",
+        "`repository.findAll()` with no pagination loads the entire table — use `findAll(Pageable)` or a filtered query",
+    ),
+    (
+        "ENTITY_USES_LOMBOK_DATA",
+        "`@Data` / `@EqualsAndHashCode` / `@ToString` on a JPA entity walks collections in equals/hashCode/toString and triggers lazy-loading recursion",
+    ),
+    (
+        "ENTITY_USES_JAVAX_IMPORT",
+        "Spring Boot 3 requires `jakarta.*` annotations — `javax.persistence` / `javax.validation` imports are silently ignored",
+    ),
+    (
+        "FAT_CONTROLLER_METHOD",
+        "Controller handler methods should be thin (≤25 top-level statements) — business logic belongs in a Service",
+    ),
+    (
+        "MANUAL_DTO_MAPPING_IN_CONTROLLER",
+        "Manual `new UserResponse(user.getId(), …)` mapping inside a controller belongs in a Mapper component (MapStruct or hand-rolled)",
+    ),
+    (
+        "MISSING_VALID_ON_REQUEST_BODY",
+        "`@RequestBody` parameters must carry `@Valid` (or `@Validated`) so Bean Validation runs on the deserialised payload",
+    ),
+    (
+        "SERVICE_PUBLIC_METHOD_USES_NON_DTO",
+        "Public Service methods must take and return DTOs — exposing entities at the service boundary couples consumers to the persistence model",
+    ),
+    (
+        "SERVICE_USES_MULTIPLE_REPOSITORIES",
+        "One Service should own one Repository — cross-aggregate access goes through another Service, not a second repository",
+    ),
+    (
+        "ENTITY_DEPENDS_ON_SPRING_BEAN",
+        "Entities are persistent POJOs — holding a Service / Repository / Component field mixes persistence with business logic",
+    ),
 ];
 
 /// Best-effort humanizer for unknown rule keys: replaces `-` and `_` with
@@ -4023,6 +4076,47 @@ mod tests {
             !s.contains('`'),
             "no backticks in student-facing prose: {s}"
         );
+    }
+
+    #[test]
+    fn humanize_rule_name_uses_known_description_for_spring_v8_rule_ids() {
+        // Each Spring v8 rule_id must render its prose description, not
+        // fall back to the humanizer (which would just title-case
+        // `CONTROLLER_RETURNS_NON_DTO` → "Controller returns non dto").
+        for rule_id in [
+            "CONTROLLER_RETURNS_NON_DTO",
+            "CONTROLLER_USES_REPOSITORY",
+            "CONTROLLER_HAS_TRANSACTIONAL",
+            "TRANSACTIONAL_ON_NON_PUBLIC_METHOD",
+            "UNBOUNDED_FIND_ALL",
+            "ENTITY_USES_LOMBOK_DATA",
+            "ENTITY_USES_JAVAX_IMPORT",
+            "FAT_CONTROLLER_METHOD",
+            "MANUAL_DTO_MAPPING_IN_CONTROLLER",
+            "MISSING_VALID_ON_REQUEST_BODY",
+            "SERVICE_PUBLIC_METHOD_USES_NON_DTO",
+            "SERVICE_USES_MULTIPLE_REPOSITORIES",
+            "ENTITY_DEPENDS_ON_SPRING_BEAN",
+        ] {
+            let s = humanize_rule_name(rule_id);
+            assert!(
+                !s.contains(rule_id),
+                "rule_id '{rule_id}' should not leak into prose: {s}"
+            );
+            // The fallback humanizer always title-cases the leading word
+            // by replacing `_` → space; a hand-written description starts
+            // with a non-template phrase. Smoke-check: the prose is
+            // substantive (>= 30 chars) and free of underscores from the
+            // rule_id.
+            assert!(
+                s.len() >= 30,
+                "rule_id '{rule_id}' has missing or stub prose: {s}"
+            );
+            assert!(
+                !s.contains('_'),
+                "rule_id '{rule_id}' prose still contains underscores from the key: {s}"
+            );
+        }
     }
 
     fn mk_conn() -> Connection {
