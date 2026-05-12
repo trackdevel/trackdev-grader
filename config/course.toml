@@ -182,8 +182,8 @@ jitter_pct = 0.05
 # Architecture LLM review (T-P3.3). When `llm_review = true` AND
 # `ANTHROPIC_API_KEY` is set, the pipeline asks an LLM to grade each
 # Java file against the per-stack markdown rubric. Spring repos are
-# graded against `architecture-spring.md`; repos whose folder name
-# starts with `android-` are graded against `architecture-android.md`.
+# graded against `spring-boot-rubric.md`; repos whose folder name
+# starts with `android-` are graded against `android-rubric.md`.
 # Each `(file_sha, rubric_version+body_hash, model_id)` triple is
 # cached in `architecture_llm_cache`, so re-runs only re-pay for files
 # whose content changed. Default off.
@@ -211,8 +211,8 @@ judge_workers = 10
 # Ignored by claude-cli / anthropic-api backends.
 # thinking = "enabled"
 max_tokens = 16000
-spring_rubric_path = "architecture-spring.md"
-android_rubric_path = "architecture-android.md"
+spring_rubric_path = "spring-boot-rubric.md"
+android_rubric_path = "android-rubric.md"
 # Concurrent per-file LLM calls. Default 10 across every backend
 # (claude-cli, anthropic-api, deepseek-api) — the Rayon fan-out is the
 # same code path regardless of judge, and `claude --print` handles
