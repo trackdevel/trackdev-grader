@@ -96,16 +96,20 @@ The orchestration crate exposes four top-level pipelines:
   watermark + GitHub ETag); per project, skips survival/compile/architecture
   when no new PRs/tasks were collected. No AI detection. Survival failure is
   fatal. *Does not* purge.
-- **`iterate`** — same as `run-all`, but skips the per-file LLM architecture
-  rubric. Use mid-sprint when you want fresh metrics and reports without
-  paying for the slow LLM judge.
+- **`iterate`** — same as `run-all`, plus a historical `--skip-arch-llm`
+  flag from before the AST migration. Since Wave 4 the per-file LLM
+  architecture rubric is off by default in `course.toml`, so this flag is
+  a no-op for any course that hasn't opted back in via
+  `[architecture] llm_review = true`.
 - **`go-quick`** — *always* purges before collecting, then re-collects from
   scratch. PR doc eval forced to heuristic (no Claude calls); static analysis
   skipped by default. AI detection on. Tolerates survival errors. Designed
   for mid-sprint iteration.
 - **`go`** — end-of-sprint full run. *Always* purges before collecting; LLM
-  PR doc eval (when `ANTHROPIC_API_KEY` is set), AI detection, and the LLM
-  architecture rubric (when configured). Tolerates survival errors.
+  PR doc eval (when `ANTHROPIC_API_KEY` is set) and AI detection.
+  Tolerates survival errors. Architecture conformance always runs but uses
+  the AST rules in `config/architecture.toml`; the deprecated per-file LLM
+  judge engages only when a course sets `llm_review = true`.
 
 `--projects <slug,…>` is a **scope reducer** on every command: it never
 changes what the command does, only how much of the DB it touches. For
@@ -344,9 +348,17 @@ types changed behaviour during the P0/P1 wave and warrant calling out:
   imports for matching files (e.g. keep Spring web annotations out of
   the domain layer). When `architecture.toml` is absent the scan is
   skipped silently. T-P3.1 added `[[ast_rule]]` blocks that look
-  inside class bodies via tree-sitter-java — five kinds:
-  `forbidden_field_type`, `forbidden_constructor_param`,
-  `forbidden_method_call`, `forbidden_return_type`,
+  inside class bodies via tree-sitter-java. After the AST-rubric
+  migration (Waves 1–5) the engine supports fourteen kinds covering the
+  Spring v8 and Android v1 rubrics: `forbidden_field_type`,
+  `forbidden_constructor_param`, `forbidden_method_call`,
+  `forbidden_return_type`, `forbidden_method_param`, `forbidden_import`,
+  `must_null_in_lifecycle`, `forbidden_call_source`,
+  `class_has_forbidden_annotation`,
+  `method_annotation_visibility_mismatch`,
+  `forbidden_constructor_call`,
+  `parameter_annotation_requires_companion`,
+  `field_count_with_type_pattern`, `class_requires_annotation`, plus
   `max_method_statements`. AST violations carry `(start_line, end_line)`
   so blame attribution can weight per-student responsibility (see
   `ARCHITECTURE_HOTSPOT`).
@@ -360,33 +372,30 @@ types changed behaviour during the P0/P1 wave and warrant calling out:
   method gets ~3 % weight rather than 50 %. The team-level
   `ARCHITECTURE_DRIFT` keeps the regression headline; this flag points
   at the people who actually wrote the offending code.
-- **Architecture rubric (`config/architecture-spring.md`,
-  `config/architecture-android.md`)** — one prose file per stack
-  describing the architectural intent the LLM judge will check
-  per-file (T-P3.2). The orchestrator picks `architecture-android.md`
-  for cloned repos whose folder name starts with `android-`, and
-  `architecture-spring.md` for everything else, so each LLM call
-  sees only the rubric relevant to that file's stack. YAML
-  frontmatter (`version: <N>`) lives in each file independently.
-  Inspect the resolved rubric for a stack with
-  `sprint-grader architecture-rubric --stack spring`. Editing the
-  prose changes the body hash; bumping `version` invalidates the
-  T-P3.3 LLM cache deliberately. Override the file paths in
-  `course.toml` via `[architecture] spring_rubric_path` /
-  `android_rubric_path`.
-- **LLM architecture judge (`[architecture] llm_review = true`)** —
-  T-P3.3. When enabled and `ANTHROPIC_API_KEY` is set, the pipeline
-  asks the configured model (default `claude-haiku-4-5-20251001`) to
-  grade each Java file against the rubric. Cached per `(file_sha,
-  rubric_version+body_hash, model_id)` in `architecture_llm_cache`, so
-  re-runs only re-pay for files whose content actually changed.
-  Violations land in `architecture_violations` with `rule_kind =
-  "llm"`, line ranges from the model's response, and an `explanation`
-  column populated from the model's reasoning. Blame attribution
-  (T-P3.1) and the `ARCHITECTURE_HOTSPOT` flag apply uniformly. Skip
-  patterns (`llm_skip_globs`) keep generated code out of the call —
-  default deny-list covers `build/`, `generated/`, `R.java`, and
-  anonymous-inner-class files matching `*$$*.java`.
+- **Architecture rubrics (`config/spring-boot-rubric.md`,
+  `config/android-rubric.md`)** — one human-readable spec per stack
+  documenting the AST rules wired into `config/architecture.toml`. Per
+  Wave 4 of the AST-rubric migration these files are **no longer fed to
+  an LLM**; the deterministic AST engine in
+  `crates/architecture/src/ast_rules.rs` is authoritative. The rubrics
+  remain the reference material for instructors and the golden source
+  for the integration fixtures
+  (`crates/architecture/tests/spring_v8_fixtures.rs`,
+  `crates/architecture/tests/android_v1_fixtures.rs`). YAML frontmatter
+  (`rubric_version: <N>`) lives in each file independently; bump it when
+  the policy changes. The legacy `architecture-spring.md` /
+  `architecture-android.md` files describe the layered model and remain
+  in the repo for reference.
+- **Architecture LLM judge (`[architecture] llm_review`, default `false`)** —
+  T-P3.3, **deprecated in Wave 4**. The per-file LLM judge has been
+  replaced by the AST rules above. The `architecture_llm` crate still
+  compiles for emergency rollback (set `llm_review = true` and pin
+  `model_id`); under the default config the pipeline logs
+  `[architecture] LLM judge disabled — AST rules in architecture.toml
+  are authoritative` and does not invoke any model. A future
+  project-wide LLM **explanation** pass — annotating AST findings with
+  prose, not detecting new ones — is scaffolded as a `// FUTURE:` block
+  at the bottom of `crates/architecture_llm/src/lib.rs`.
 - **`LOW_MUTATION_SCORE`** (per-PR, attributed to the PR author)
   surfaces PRs whose Pitest mutation score is below the configured
   thresholds: WARNING below `[mutation] warning_threshold` (default
@@ -426,7 +435,7 @@ Orchestration / utility:
 | Command | Purpose |
 |---|---|
 | `run-all [--skip-static-analysis]` | Additive full pipeline; no AI detection. Incremental collection (watermark + ETag); skips survival/compile/architecture per project when no new PRs/tasks. Static-analysis stage runs when `config/static_analysis.toml` exists; pass the flag to bypass. |
-| `iterate [--skip-static-analysis]` | Same as `run-all`, but skips the per-file LLM architecture rubric. AST-based architecture scan still runs. |
+| `iterate [--skip-static-analysis]` | Same as `run-all`. Carries a historical `--skip-arch-llm` flag from before Wave 4; with the LLM judge off by default it is now a no-op for any course that hasn't opted back in. AST-based architecture scan always runs. |
 | `go [--dry-run] [--require-clean-tree] [--skip-static-analysis]` | End-of-sprint: **always** purges then re-collects → full pipeline + AI detection. `--projects` only narrows the purge scope (without it, every project in the DB is wiped). `--dry-run` previews the cascade per-table row counts and exits before any pipeline stage runs. `--require-clean-tree` refuses to start if `git status --porcelain` reports a dirty working tree. |
 | `go-quick [--dry-run] [--require-clean-tree] [--run-static-analysis]` | Same purge/re-collect contract as `go`, but PR doc evaluation always runs heuristic-only (no Claude calls) and the static-analysis stage is skipped by default — pass `--run-static-analysis` to opt in. Same `--dry-run` / `--require-clean-tree` semantics as `go`. |
 | `sync-reports [--push]` | Regenerate `REPORT.md` for every sprint up to today; optionally commit + push to each team's `main`. |
