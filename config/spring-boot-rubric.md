@@ -1,6 +1,6 @@
 ---
-rubric_version: 8
-target_model: claude-haiku
+rubric_version: 9
+target_model: none
 target_stack: spring-boot-3.x / java-21
 scope: single-file analysis
 ---
@@ -48,7 +48,7 @@ You may emit ONLY these `rule_id` values. The `severity` is fixed by the `rule_i
 
 | rule_id | severity |
 |---|---|
-| `CONTROLLER_RETURNS_ENTITY` | CRITICAL |
+| `CONTROLLER_RETURNS_NON_DTO` | CRITICAL |
 | `CONTROLLER_USES_REPOSITORY` | CRITICAL |
 | `CONTROLLER_HAS_TRANSACTIONAL` | CRITICAL |
 | `TRANSACTIONAL_ON_NON_PUBLIC_METHOD` | CRITICAL |
@@ -58,7 +58,7 @@ You may emit ONLY these `rule_id` values. The `severity` is fixed by the `rule_i
 | `FAT_CONTROLLER_METHOD` | WARNING |
 | `MANUAL_DTO_MAPPING_IN_CONTROLLER` | WARNING |
 | `MISSING_VALID_ON_REQUEST_BODY` | WARNING |
-| `SERVICE_PUBLIC_METHOD_USES_ENTITY` | WARNING |
+| `SERVICE_PUBLIC_METHOD_USES_NON_DTO` | WARNING |
 | `SERVICE_USES_MULTIPLE_REPOSITORIES` | WARNING |
 | `ENTITY_DEPENDS_ON_SPRING_BEAN` | WARNING |
 
@@ -93,7 +93,7 @@ These constructs are part of the expected architecture. Emit no violation that r
 
 7. **`@RestControllerAdvice` / `@ControllerAdvice` classes** that catch exceptions via `try/catch` or `@ExceptionHandler`. Centralised exception handling is correct here.
 
-8. **MapStruct `@Mapper` interfaces** (annotated `@Mapper(componentModel = "spring")` or similar). These legitimately convert between `@Entity` and DTO; do not flag them under `MANUAL_DTO_MAPPING_IN_CONTROLLER` or `SERVICE_PUBLIC_METHOD_USES_ENTITY`.
+8. **MapStruct `@Mapper` interfaces** (annotated `@Mapper(componentModel = "spring")` or similar). These legitimately convert between `@Entity` and DTO; do not flag them under `MANUAL_DTO_MAPPING_IN_CONTROLLER` or `SERVICE_PUBLIC_METHOD_USES_NON_DTO`.
 
 9. **DTOs as Java `record` types**, including records with validation annotations on components. Records are the recommended DTO form.
 
@@ -103,27 +103,47 @@ For each rule: a trigger (deterministic detection criterion), one BAD example yo
 
 ---
 
-### `CONTROLLER_RETURNS_ENTITY` — CRITICAL
+### `CONTROLLER_RETURNS_NON_DTO` — CRITICAL
 
-**Trigger.** The file contains `@RestController` or `@Controller`. There exists a public method on that class whose return type text contains the name `T`, where `T` is either (a) a class declared in this file with the `@Entity` annotation, or (b) a type imported from a package whose path contains `.entity.`, `.entities.`, `.domain.`, or `.model.`. Generic wrappers (`ResponseEntity<T>`, `Optional<T>`, `List<T>`, `Page<T>`, `Mono<T>`, `Flux<T>`) do not protect the inner type.
+**Trigger.** A `public` method on a `@RestController` / `@Controller` class returns a type that is **none of** the following:
 
-**BAD (flag this):**
+(a) **DTO-shaped by location** (primary signal) — the type is imported from a package whose path contains a `.dto.` or `.dtos.` segment (case-insensitive). The folder convention is authoritative: every class under `dto/` is a DTO regardless of its name.
+(b) **DTO-shaped by name** (secondary signal, used when the folder check is inconclusive) — the simple type name contains `dto`, `request`, or `response` (case-insensitive). Catches DTOs in projects that haven't adopted the folder convention.
+(c) **A stdlib value type** — a primitive wrapper, `String`, `UUID`, `BigDecimal` / `BigInteger`, `URI` / `URL`, or any `java.time.*` type.
+
+Generic wrappers (`ResponseEntity<T>`, `Optional<T>`, `List<T>`, `Page<T>`, `Mono<T>`, `Flux<T>`) are stripped before the type is tested, so the inner type is what matters. The rule's name and intent both lead with "non-DTO" rather than "entity" deliberately — the architectural sin is exposing a non-DTO type at the controller boundary, regardless of whether that type is a JPA `@Entity`, a domain object, or a plain POJO.
+
+**BAD (fires):** controller returning `UserView`, imported as `com.example.app.domain.UserView`. Stage (a) negative — not under a `dto/` folder. Stage (b) negative — name doesn't contain `dto`, `request`, or `response`. Stage (c) negative — not a stdlib type. Violation.
 ```java
+import com.example.app.domain.UserView;
 @RestController
 class UserController {
     @GetMapping("/{id}")
-    public ResponseEntity<User> get(@PathVariable Long id) {   // User is @Entity
+    public ResponseEntity<UserView> get(@PathVariable Long id) {
         return ResponseEntity.ok(service.find(id));
     }
 }
 ```
 
-**GOOD (do not flag):**
+**GOOD (does not fire):** same controller, but the type is imported from `com.example.app.dto.UserView`. Stage (a) suppresses the finding.
 ```java
+import com.example.app.dto.UserView;
 @RestController
 class UserController {
     @GetMapping("/{id}")
-    public ResponseEntity<UserResponse> get(@PathVariable Long id) {
+    public ResponseEntity<UserView> get(@PathVariable Long id) {
+        return ResponseEntity.ok(service.find(id));
+    }
+}
+```
+
+**GOOD (does not fire):** controller returning `UserDto`, imported from `com.example.app.domain.UserDto` (sloppy package, correct naming). Stage (a) negative; stage (b) suppresses the finding.
+```java
+import com.example.app.domain.UserDto;
+@RestController
+class UserController {
+    @GetMapping("/{id}")
+    public ResponseEntity<UserDto> get(@PathVariable Long id) {
         return ResponseEntity.ok(service.find(id));
     }
 }
@@ -267,11 +287,11 @@ import jakarta.validation.constraints.NotNull;
 
 ### `FAT_CONTROLLER_METHOD` — WARNING
 
-**Trigger.** Inside a `@RestController` or `@Controller` class, a method annotated with `@GetMapping`, `@PostMapping`, `@PutMapping`, `@DeleteMapping`, `@PatchMapping`, or `@RequestMapping` has a method body whose closing `}` is **more than 25 lines** below its opening `{`. Methods whose body span is ≤ 25 lines MUST NOT be flagged regardless of perceived complexity.
+**Trigger.** Inside a `@RestController` or `@Controller` class, a method body contains **more than 25 top-level statements**. Statements are counted at the method's `block` level (the direct children of the method body that the AST classifies as `*_statement`, `local_variable_declaration`, or `expression_statement`); nested statements inside `if` / `for` / lambda bodies don't add to the count. Methods at or below 25 top-level statements MUST NOT be flagged regardless of perceived complexity.
 
-**BAD:** a `@PostMapping` method whose body opens at line 30 and closes at line 75 (45 lines).
+**BAD:** a `@PostMapping` method whose body lists 30 top-level statements (variable declarations + service calls + mapping logic + return).
 
-**GOOD:** any controller method whose body spans 25 lines or fewer, even if it looks dense.
+**GOOD:** any controller method whose body has 25 or fewer top-level statements — even if it spans many physical lines through formatting / chained calls. The threshold is a structural count, not a line count.
 
 ---
 
@@ -311,24 +331,41 @@ public X create(@Valid @RequestBody CreateXRequest req) { ... }
 
 ---
 
-### `SERVICE_PUBLIC_METHOD_USES_ENTITY` — WARNING
+### `SERVICE_PUBLIC_METHOD_USES_NON_DTO` — WARNING
 
-**Trigger.** A class annotated `@Service` has a method declared `public` whose return type or any parameter type names `T`, where `T` is (a) a class declared in this file with `@Entity`, or (b) a type imported from a package whose path contains `.entity.`, `.entities.`, `.domain.`, or `.model.`. Generic wrappers do not protect the inner type. Methods declared `private`, `protected`, or package-private (no modifier) are NOT flagged — they may legitimately exchange entities with collaborators.
+**Trigger.** A class annotated `@Service` has a `public` method whose return type or any parameter type is **none of** the following:
 
-**BAD:**
+(a) **DTO-shaped by location** (primary signal) — the type is imported from a package whose path contains a `.dto.` or `.dtos.` segment (case-insensitive). The folder convention is authoritative: every class under `dto/` is a DTO regardless of its name.
+(b) **DTO-shaped by name** (secondary signal, used when the folder check is inconclusive) — the simple type name contains `dto`, `request`, or `response` (case-insensitive). Catches DTOs in projects that haven't adopted the folder convention.
+(c) **A stdlib value type** — a primitive wrapper, `String`, `UUID`, `BigDecimal` / `BigInteger`, `URI` / `URL`, or any `java.time.*` type.
+
+Generic wrappers (`ResponseEntity<T>`, `Optional<T>`, `List<T>`, `Page<T>`, `Mono<T>`, `Flux<T>`) are stripped before the type is tested, so the inner type is what matters. Methods declared `private`, `protected`, or package-private (no modifier) are NOT flagged — they may legitimately exchange any type with same-package collaborators.
+
+**BAD (fires):** public service method exchanging a `User` imported from a domain package.
 ```java
+import com.example.app.domain.User;
 @Service
 class UserService {
-    public User create(User u) { ... }       // public + entity in signature
+    public User create(User u) { ... }    // stage (a) fails, (b) fails, (c) fails → fire
 }
 ```
 
-**GOOD:**
+**GOOD (does not fire):** DTOs at the public boundary; the package-private helper still exchanges the domain type.
 ```java
+import com.example.app.dto.CreateUserRequest;
+import com.example.app.dto.UserResponse;
 @Service
 class UserService {
-    public UserResponse create(CreateUserRequest r) { ... }
-    User loadInternal(Long id) { ... }       // package-private — allowed
+    public UserResponse create(CreateUserRequest r) { ... }   // stage (a) suppresses both
+    User loadInternal(Long id) { ... }                        // package-private — allowed
+}
+```
+
+**GOOD (does not fire):** stdlib value type at the boundary.
+```java
+@Service
+class UserCountService {
+    public Long count() { ... }    // stage (c) suppresses
 }
 ```
 
