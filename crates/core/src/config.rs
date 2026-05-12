@@ -1164,22 +1164,36 @@ impl Config {
             },
             architecture: {
                 let arch_defaults = ArchitectureConfig::default();
-                let arch_model_id = raw.architecture.model_id.ok_or_else(|| {
-                    Error::ConfigInvalid(
-                        "[architecture] model_id is required in course.toml — pin to a \
-                         specific id (e.g. \"claude-haiku-4-5-20251001\" for Anthropic, \
-                         or \"deepseek-chat\" for DeepSeek). There is no default to \
-                         prevent silently falling back to the user's Claude session \
-                         model (Opus on Max plans) or to a backend-default that \
-                         drifts under your feet."
-                            .to_string(),
-                    )
-                })?;
-                if arch_model_id.trim().is_empty() {
-                    return Err(Error::ConfigInvalid(
-                        "[architecture] model_id must not be empty".to_string(),
-                    ));
-                }
+                // W4.1 — model_id is only required when the LLM judge is
+                // actually going to run. Courses that opt out of the
+                // per-file LLM review (the default since Wave 4) can omit
+                // the entire `[architecture]` block or leave model_id
+                // unset / empty.
+                let arch_model_id = if raw.architecture.llm_review {
+                    let id = raw.architecture.model_id.ok_or_else(|| {
+                        Error::ConfigInvalid(
+                            "[architecture] model_id is required when llm_review = true — pin \
+                             to a specific id (e.g. \"claude-haiku-4-5-20251001\" for \
+                             Anthropic, or \"deepseek-chat\" for DeepSeek). There is no \
+                             default to prevent silently falling back to the user's \
+                             Claude session model (Opus on Max plans) or to a \
+                             backend-default that drifts under your feet."
+                                .to_string(),
+                        )
+                    })?;
+                    if id.trim().is_empty() {
+                        return Err(Error::ConfigInvalid(
+                            "[architecture] model_id must not be empty when llm_review = true"
+                                .to_string(),
+                        ));
+                    }
+                    id
+                } else {
+                    // LLM review disabled — model_id is informational
+                    // only. Accept whatever is set (or the empty
+                    // default).
+                    raw.architecture.model_id.unwrap_or_default()
+                };
                 let arch_thinking = parse_thinking_mode(raw.architecture.thinking, "architecture")?;
                 let arch_judge = raw.architecture.judge.unwrap_or(arch_defaults.judge);
                 ArchitectureConfig {
@@ -1396,16 +1410,52 @@ contribution_imbalance_stddev = 1.5
 "#;
 
     #[test]
-    fn missing_architecture_model_id_rejects_with_clear_message() {
+    fn missing_architecture_model_id_rejects_only_when_llm_review_enabled() {
+        // W4.1 — Wave 4 retired the per-file LLM judge, so model_id is
+        // only required when llm_review = true. Without the flag, the
+        // entire [architecture] block is optional and architecture.toml's
+        // AST rules are authoritative.
         let tmp = tempfile::tempdir().unwrap();
-        // Has [evaluate] model_id but no [architecture] block at all.
+
+        // No [architecture] block at all → loader accepts with
+        // llm_review = false (the new default).
         let body = format!("{MINIMAL_NO_LLM_BLOCKS}\n[evaluate]\nmodel_id = \"x\"\n");
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("missing [architecture] block must load");
+        assert!(
+            !cfg.architecture.llm_review,
+            "missing [architecture] block must default llm_review = false"
+        );
+
+        // llm_review = true but model_id missing → reject with a clear
+        // message that names both fields.
+        let body = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nllm_review = true\n[evaluate]\nmodel_id = \"x\"\n"
+        );
         write_config(tmp.path(), &body);
         let err = Config::load(tmp.path()).expect_err("must reject");
         let msg = err.to_string();
         assert!(
-            msg.contains("[architecture] model_id is required"),
+            msg.contains("[architecture] model_id is required when llm_review = true"),
             "error must name the missing field: {msg}"
+        );
+    }
+
+    #[test]
+    fn architecture_block_with_llm_review_false_does_not_require_model_id() {
+        // Explicit `llm_review = false` (or omitted) → model_id is
+        // informational only. Loader accepts missing or empty values.
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nllm_review = false\n[evaluate]\nmodel_id = \"x\"\n"
+        );
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("explicit llm_review = false must load");
+        assert!(!cfg.architecture.llm_review);
+        assert!(
+            cfg.architecture.model_id.is_empty(),
+            "model_id should be empty when omitted: {:?}",
+            cfg.architecture.model_id
         );
     }
 
@@ -1424,16 +1474,19 @@ contribution_imbalance_stddev = 1.5
     }
 
     #[test]
-    fn empty_architecture_model_id_rejects() {
+    fn empty_architecture_model_id_rejects_only_when_llm_review_enabled() {
+        // Same conditional as model_id-missing: empty string with
+        // llm_review = true is a configuration error; with llm_review =
+        // false it's permitted (the value is unused).
         let tmp = tempfile::tempdir().unwrap();
         let body = format!(
-            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nmodel_id = \"\"\n[evaluate]\nmodel_id = \"x\"\n"
+            "{MINIMAL_NO_LLM_BLOCKS}\n[architecture]\nllm_review = true\nmodel_id = \"\"\n[evaluate]\nmodel_id = \"x\"\n"
         );
         write_config(tmp.path(), &body);
         let err = Config::load(tmp.path()).expect_err("must reject empty");
         assert!(err
             .to_string()
-            .contains("[architecture] model_id must not be empty"));
+            .contains("[architecture] model_id must not be empty when llm_review = true"));
     }
 
     #[test]

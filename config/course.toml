@@ -179,52 +179,41 @@ architecture_hotspot_min_weighted = 2.0
 hidden_thresholds = false
 jitter_pct = 0.05
 
-# Architecture LLM review (T-P3.3). When `llm_review = true` AND
-# `ANTHROPIC_API_KEY` is set, the pipeline asks an LLM to grade each
-# Java file against the per-stack markdown rubric. Spring repos are
-# graded against `spring-boot-rubric.md`; repos whose folder name
-# starts with `android-` are graded against `android-rubric.md`.
-# Each `(file_sha, rubric_version+body_hash, model_id)` triple is
-# cached in `architecture_llm_cache`, so re-runs only re-pay for files
-# whose content changed. Default off.
+# Architecture review (T-P3.3 / Wave 4).
+#
+# The per-file LLM rubric judge was retired in Wave 4 of the AST-rubric
+# migration. AST rules live in `config/architecture.toml` under
+# `[[ast_rule]]` blocks — see `crates/architecture/src/ast_rules.rs` for
+# the supported `kind`s and the `config/architecture.toml` header
+# comment for the rubric ID inventory. The `architecture_llm` crate
+# is retained but marked `#[deprecated]`; no production code path
+# invokes it under the default config.
+#
+# A future wave will add a project-wide LLM explanation pass that
+# annotates AST findings with prose — that pass will live in
+# `architecture_llm` (reusing the cache table substrate) and is
+# scaffolded as a `// FUTURE:` comment block at the top of that crate.
+#
+# For emergency rollback, set `llm_review = true` and add a `model_id`
+# pin. The pipeline will re-engage the (now-deprecated) per-file path.
 [architecture]
-llm_review = true
-# judge = "deepseek-api"
-# model_id = "deepseek-v4-pro"
-judge = "claude-cli"
-model_id = "claude-haiku-4-5-20251001"
-thinking = "enabled"
-judge_workers = 10
-# REQUIRED. No default — empty/missing causes Config::load to fail. This
-# is a deliberate guard: the CLI judge would otherwise silently fall
-# back to whatever model the user's Claude session points at (Opus on
-# Max plans), draining quota.
-# DeepSeek V4 names: "deepseek-v4-flash" (cheap, fast) or
-# "deepseek-v4-pro" (slower, stronger). The legacy names
-# "deepseek-chat" / "deepseek-reasoner" alias to V4-flash
-# non-thinking / thinking and are deprecated 2026-07-24.
+llm_review = false
+# Fields below are only consulted when `llm_review = true`. Left here as
+# reference comments so a future operator can flip the rollback switch
+# without remembering the full schema.
+# judge = "claude-cli"
 # model_id = "claude-haiku-4-5-20251001"
-# DeepSeek V4 thinking mode. Optional; one of "enabled" or "disabled".
-# Omit to let the server pick its default (currently "enabled").
-# Set to "disabled" on cheap rubrics (PR-doc / task heuristics) to skip
-# reasoning tokens; leave on "enabled" for architecture review.
-# Ignored by claude-cli / anthropic-api backends.
 # thinking = "enabled"
-max_tokens = 16000
-spring_rubric_path = "spring-boot-rubric.md"
-android_rubric_path = "android-rubric.md"
-# Concurrent per-file LLM calls. Default 10 across every backend
-# (claude-cli, anthropic-api, deepseek-api) — the Rayon fan-out is the
-# same code path regardless of judge, and `claude --print` handles
-# concurrent stateless invocations cleanly. Override here to throttle
-# for subscription quota / API rate limits or to crank higher.
 # judge_workers = 10
-llm_skip_globs = [
-    "**/build/**",
-    "**/generated/**",
-    "**/R.java",
-    "**/*$$*.java",
-]
+# max_tokens = 16000
+# spring_rubric_path = "spring-boot-rubric.md"
+# android_rubric_path = "android-rubric.md"
+# llm_skip_globs = [
+#     "**/build/**",
+#     "**/generated/**",
+#     "**/R.java",
+#     "**/*$$*.java",
+# ]
 
 # PR / task documentation evaluation. `model_id` is REQUIRED for the
 # same reason as [architecture] — there is no default; missing/empty

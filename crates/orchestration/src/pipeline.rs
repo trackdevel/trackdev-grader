@@ -1214,6 +1214,16 @@ pub fn run_pipeline(
     //     binary on `$PATH` (or via `claude_cli_path`). No API key.
     //   - `judge = "anthropic-api"` requires `ANTHROPIC_API_KEY`.
     // Either way, missing prerequisite → silent skip; never hard-fail.
+    //
+    // Wave 4 default: `llm_review = false`. The AST rules in
+    // `config/architecture.toml` are authoritative; this branch only
+    // runs when a course explicitly opts back in.
+    if !config.architecture.llm_review {
+        info!(
+            "[architecture] LLM judge disabled — AST rules in architecture.toml are authoritative \
+             (set [architecture] llm_review = true to re-engage the deprecated per-file path)"
+        );
+    }
     if config.architecture.llm_review && opts.skip_arch_llm {
         info!("[architecture] LLM rubric skipped via --skip-arch-llm");
     }
@@ -1362,7 +1372,14 @@ pub fn run_pipeline(
                             );
                             continue;
                         };
-                        if let Err(e) = sprint_grader_architecture_llm::run_llm_review_for_repo(
+                        // W4.4 — deprecated rollback path. The default
+                        // build never reaches this call (llm_review =
+                        // false), but the call site exists for the
+                        // emergency-rollback flag. Silence the
+                        // deprecation warning locally so the workspace
+                        // build stays clean.
+                        #[allow(deprecated)]
+                        let llm_result = sprint_grader_architecture_llm::run_llm_review_for_repo(
                             &db.conn,
                             &repo_path,
                             &repo_full_name,
@@ -1370,7 +1387,8 @@ pub fn run_pipeline(
                             judge.as_ref(),
                             &config.architecture.llm_skip_globs,
                             workers,
-                        ) {
+                        );
+                        if let Err(e) = llm_result {
                             warn!(repo = %repo_full_name, error = %e, "LLM architecture review failed");
                         }
                     }
