@@ -442,10 +442,10 @@ mod tests {
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO architecture_violations
-                (repo_full_name, file_path, rule_name, violation_kind,
+                (repo_full_name, file_path, rule_name,
                  offending_import, severity, start_line, end_line, rule_kind, explanation)
              VALUES
-                ('o/r', 'A.java', 'VALIDATION_IN_UI', 'ast_forbidden_method_call',
+                ('o/r', 'A.java', 'VALIDATION_IN_UI',
                  'A::validate', 'WARNING', 42, 99, 'ast_forbidden_method_call',
                  'Validation belongs in service.');
              INSERT INTO architecture_violation_attribution
@@ -519,10 +519,10 @@ mod tests {
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO architecture_violations
-                (repo_full_name, file_path, rule_name, violation_kind,
+                (repo_full_name, file_path, rule_name,
                  offending_import, severity, start_line, end_line, rule_kind)
              VALUES
-                ('o/r', 'Gen.java', 'r', 'layer_dependency', 'com.x', 'INFO', 1, 1,
+                ('o/r', 'Gen.java', 'r', 'com.x', 'INFO', 1, 1,
                  'layer_dependency');",
         )
         .unwrap();
@@ -539,10 +539,10 @@ mod tests {
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO architecture_violations
-                (repo_full_name, file_path, rule_name, violation_kind,
+                (repo_full_name, file_path, rule_name,
                  offending_import, severity, start_line, end_line, rule_kind)
              VALUES
-                ('o/r', 'A.java', 'r', 'layer_dependency', 'com.x', 'WARNING', 1, 30,
+                ('o/r', 'A.java', 'r', 'com.x', 'WARNING', 1, 30,
                  'layer_dependency');
              INSERT INTO architecture_violation_attribution
                 (violation_rowid, student_id, lines_authored, total_lines, weight)
@@ -564,12 +564,12 @@ mod tests {
         let conn = mk_conn();
         conn.execute_batch(
             "INSERT INTO architecture_violations
-                (repo_full_name, file_path, rule_name, violation_kind,
+                (repo_full_name, file_path, rule_name,
                  offending_import, severity, start_line, end_line, rule_kind)
              VALUES
-                ('o/r', 'A.java', 'r', 'layer_dependency', 'com.x', 'WARNING', 1, 1,
+                ('o/r', 'A.java', 'r', 'com.x', 'WARNING', 1, 1,
                  'layer_dependency'),
-                ('o/other', 'A.java', 'r', 'layer_dependency', 'com.x', 'WARNING', 1, 1,
+                ('o/other', 'A.java', 'r', 'com.x', 'WARNING', 1, 1,
                  'layer_dependency');",
         )
         .unwrap();
