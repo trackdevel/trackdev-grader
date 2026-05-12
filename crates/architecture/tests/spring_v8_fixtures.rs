@@ -516,6 +516,179 @@ fn bad_case_entity_depends_on_spring_bean() {
     );
 }
 
+// ---------- generic-wrapper unwrapping for the non-DTO gate ----------
+//
+// The rubric prose promises "Generic wrappers (`ResponseEntity<T>`,
+// `Optional<T>`, `List<T>`, `Page<T>`, `Mono<T>`, `Flux<T>`) are
+// stripped before the type is tested, so the inner type is what
+// matters." These tests pin that behaviour down end-to-end.
+
+#[test]
+fn good_case_controller_returns_list_of_dto_by_package() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/controller/UserController.java",
+        "package com.x.controller;\n\
+         import java.util.List;\n\
+         import com.x.dto.UserView;\n\
+         import org.springframework.web.bind.annotation.RestController;\n\
+         @RestController\n\
+         public class UserController {\n\
+             public List<UserView> list() { return null; }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        !hits.contains("CONTROLLER_RETURNS_NON_DTO"),
+        "List<UserView> (UserView imported from a dto. package) must not fire: {hits:?}"
+    );
+}
+
+#[test]
+fn good_case_controller_returns_collection_of_dto_by_name() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/controller/UserController.java",
+        "package com.x.controller;\n\
+         import java.util.Collection;\n\
+         import com.x.domain.UserResponse;\n\
+         import org.springframework.web.bind.annotation.RestController;\n\
+         @RestController\n\
+         public class UserController {\n\
+             public Collection<UserResponse> list() { return null; }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        !hits.contains("CONTROLLER_RETURNS_NON_DTO"),
+        "Collection<UserResponse> (DTO by name) must not fire: {hits:?}"
+    );
+}
+
+#[test]
+fn good_case_controller_returns_optional_of_dto() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/controller/UserController.java",
+        "package com.x.controller;\n\
+         import java.util.Optional;\n\
+         import com.x.dto.UserView;\n\
+         import org.springframework.web.bind.annotation.RestController;\n\
+         @RestController\n\
+         public class UserController {\n\
+             public Optional<UserView> get() { return null; }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        !hits.contains("CONTROLLER_RETURNS_NON_DTO"),
+        "Optional<UserView> must not fire: {hits:?}"
+    );
+}
+
+#[test]
+fn good_case_controller_returns_responseentity_of_list_of_dto_nested() {
+    // Two layers of wrappers — `ResponseEntity<List<UserView>>` —
+    // unwrap recurses until it hits the meaningful inner type.
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/controller/UserController.java",
+        "package com.x.controller;\n\
+         import java.util.List;\n\
+         import com.x.dto.UserView;\n\
+         import org.springframework.http.ResponseEntity;\n\
+         import org.springframework.web.bind.annotation.RestController;\n\
+         @RestController\n\
+         public class UserController {\n\
+             public ResponseEntity<List<UserView>> list() { return null; }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        !hits.contains("CONTROLLER_RETURNS_NON_DTO"),
+        "ResponseEntity<List<UserView>> must not fire: {hits:?}"
+    );
+}
+
+#[test]
+fn good_case_controller_returns_list_of_stdlib_value() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/controller/UserController.java",
+        "package com.x.controller;\n\
+         import java.util.List;\n\
+         import org.springframework.web.bind.annotation.RestController;\n\
+         @RestController\n\
+         public class UserController {\n\
+             public List<Long> ids() { return null; }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        !hits.contains("CONTROLLER_RETURNS_NON_DTO"),
+        "List<Long> must not fire (stdlib inner): {hits:?}"
+    );
+}
+
+#[test]
+fn bad_case_controller_returns_list_of_entity() {
+    // Counter-example: the wrapper-stripping must not become a blanket
+    // pass. `List<User>` from a domain package still exposes a non-DTO.
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/controller/UserController.java",
+        "package com.x.controller;\n\
+         import java.util.List;\n\
+         import com.x.domain.User;\n\
+         import org.springframework.web.bind.annotation.RestController;\n\
+         @RestController\n\
+         public class UserController {\n\
+             public List<User> list() { return null; }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("CONTROLLER_RETURNS_NON_DTO"),
+        "List<User> (non-DTO inner) must still fire: {hits:?}"
+    );
+}
+
+#[test]
+fn good_case_service_takes_list_of_dto_param() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/service/UserService.java",
+        "package com.x.service;\n\
+         import java.util.List;\n\
+         import com.x.dto.CreateUserRequest;\n\
+         import com.x.dto.UserResponse;\n\
+         import org.springframework.stereotype.Service;\n\
+         @Service\n\
+         public class UserService {\n\
+             public UserResponse createAll(List<CreateUserRequest> reqs) { return null; }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        !hits.contains("SERVICE_PUBLIC_METHOD_USES_NON_DTO"),
+        "List<CreateUserRequest> param must not fire: {hits:?}"
+    );
+}
+
 /// One GOOD fixture per rule, all stuffed into one project — together
 /// they must produce zero Spring v8 violations.
 #[test]
