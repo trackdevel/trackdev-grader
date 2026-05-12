@@ -35,15 +35,13 @@
 //! locally imported `Activity`). This is intentional — qualified-name
 //! resolution would require a full classpath, which isn't available.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
 
 use crate::checker::{Violation, ViolationKind};
 use crate::glob::PackagePattern;
-
-static JAVA_LANG: Lazy<tree_sitter::Language> = Lazy::new(|| tree_sitter_java::LANGUAGE.into());
+use crate::scanner::{ImportLine, ScannedFile};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -271,12 +269,7 @@ impl TypeSuppressors {
 
     /// Returns true when this finding should be suppressed (i.e. a
     /// suppressor matches).
-    fn suppresses(
-        &self,
-        type_name: &str,
-        own_package: &str,
-        imports: &[(String, Node<'_>)],
-    ) -> bool {
+    fn suppresses(&self, type_name: &str, own_package: &str, imports: &[ImportLine]) -> bool {
         if let Some(r) = &self.type_allowlist {
             if r.is_match(type_name) {
                 return true;
@@ -300,10 +293,10 @@ impl TypeSuppressors {
 fn resolve_type_package<'a>(
     type_name: &str,
     own_package: &'a str,
-    imports: &'a [(String, Node<'_>)],
+    imports: &'a [ImportLine],
 ) -> &'a str {
-    for (text, _node) in imports {
-        let stripped = text.strip_suffix(".*").unwrap_or(text);
+    for imp in imports {
+        let stripped = imp.text.strip_suffix(".*").unwrap_or(imp.text.as_str());
         if let Some((pkg, last)) = stripped.rsplit_once('.') {
             if last == type_name {
                 return pkg;
@@ -582,80 +575,23 @@ fn compile_regex(value: Option<String>, field: &str, rule_name: &str) -> anyhow:
     Ok(Regex::new(&s)?)
 }
 
-/// File-scope context shared by every rule application within one file.
-/// Collected once at the top of `check_java_file` so the visitor doesn't
-/// re-parse imports per rule.
-struct FileContext<'a> {
-    #[allow(dead_code)]
-    package: &'a str,
-    /// `(import-text, import-declaration node)` pairs. Import text is
-    /// stripped of the `import` keyword and trailing semicolon.
-    imports: Vec<(String, Node<'a>)>,
-}
-
-/// Walk the top of the parse tree once to gather `import_declaration`
-/// children. tree-sitter-java emits these as direct children of the
-/// program root (before the first class).
-fn collect_imports<'a>(root: Node<'a>, source: &'a [u8]) -> Vec<(String, Node<'a>)> {
-    let mut out = Vec::new();
-    for c in children(root) {
-        if c.kind() != "import_declaration" {
-            continue;
-        }
-        // `import_declaration` text is e.g. `import com.x.Foo;` — strip
-        // the keyword and trailing semicolon to mirror what
-        // `scanner::parse_java` returns elsewhere in the architecture
-        // crate.
-        let raw = node_text(c, source);
-        let trimmed = raw
-            .trim()
-            .strip_prefix("import")
-            .unwrap_or(raw.trim())
-            .trim();
-        let cleaned = trimmed.trim_end_matches(';').trim();
-        let cleaned = cleaned.strip_prefix("static ").unwrap_or(cleaned).trim();
-        if !cleaned.is_empty() {
-            out.push((cleaned.to_string(), c));
-        }
-    }
-    out
-}
-
-/// Top-level entry: parse one Java file, evaluate every rule, return
-/// violations. `package_name` is the file's declared package (used by
-/// `package_glob` matchers); `rel_path` is recorded on each violation row.
-pub fn check_java_file(
-    rules: &[AstRule],
-    rel_path: &str,
-    package_name: &str,
-    source: &[u8],
-) -> Vec<Violation> {
+/// Top-level entry: evaluate every AST rule against the pre-scanned
+/// Java file, return violations. The caller owns the tree-sitter parse
+/// (see [`crate::scanner::ScannedFile`]) so each file is parsed exactly
+/// once per scan regardless of how many engines consume it.
+pub fn check_java_file(rules: &[AstRule], file: &ScannedFile) -> Vec<Violation> {
     if rules.is_empty() {
         return Vec::new();
     }
-    let mut parser = Parser::new();
-    if parser.set_language(&JAVA_LANG).is_err() {
-        return Vec::new();
-    }
-    let tree = match parser.parse(source, None) {
-        Some(t) => t,
-        None => return Vec::new(),
-    };
-
-    let root = tree.root_node();
-    let file_ctx = FileContext {
-        package: package_name,
-        imports: collect_imports(root, source),
-    };
-
+    let source = file.source();
     let mut out = Vec::new();
-    visit_classes(root, source, &mut |class_node| {
+    visit_classes(file.root(), source, &mut |class_node| {
         let info = ClassInfo::new(class_node, source);
         for rule in rules {
-            if !class_matches(&rule.class_match, &info, package_name) {
+            if !class_matches(&rule.class_match, &info, &file.package) {
                 continue;
             }
-            apply_rule(rule, &info, &file_ctx, source, rel_path, &mut out);
+            apply_rule(rule, &info, file, &mut out);
         }
     });
     out
@@ -774,14 +710,9 @@ fn class_matches(matcher: &ClassMatcher, info: &ClassInfo, package_name: &str) -
     true
 }
 
-fn apply_rule(
-    rule: &AstRule,
-    info: &ClassInfo,
-    file_ctx: &FileContext,
-    source: &[u8],
-    rel_path: &str,
-    out: &mut Vec<Violation>,
-) {
+fn apply_rule(rule: &AstRule, info: &ClassInfo, file: &ScannedFile, out: &mut Vec<Violation>) {
+    let source = file.source();
+    let rel_path = file.rel_path.as_str();
     let body = match info.class_body() {
         Some(b) => b,
         None => return,
@@ -806,7 +737,7 @@ fn apply_rule(
                     if !type_regex.is_match(&t) {
                         continue;
                     }
-                    if suppressors.suppresses(&t, file_ctx.package, &file_ctx.imports) {
+                    if suppressors.suppresses(&t, &file.package, &file.imports) {
                         continue;
                     }
                     out.push(make_violation(
@@ -885,7 +816,7 @@ fn apply_rule(
                     if !type_regex.is_match(&t) {
                         continue;
                     }
-                    if suppressors.suppresses(&t, file_ctx.package, &file_ctx.imports) {
+                    if suppressors.suppresses(&t, &file.package, &file.imports) {
                         continue;
                     }
                     out.push(make_violation(
@@ -933,7 +864,7 @@ fn apply_rule(
                         if !type_regex.is_match(&t) {
                             continue;
                         }
-                        if suppressors.suppresses(&t, file_ctx.package, &file_ctx.imports) {
+                        if suppressors.suppresses(&t, &file.package, &file.imports) {
                             continue;
                         }
                         out.push(make_violation(
@@ -951,11 +882,17 @@ fn apply_rule(
             // already filtered us to a matching class). If multiple
             // matched classes share the file, the inserted rows collide
             // on the violations PK (which includes `offending_import` +
-            // `start_line` set from the import node), so `INSERT OR
-            // REPLACE` collapses duplicates downstream.
-            for (text, node) in &file_ctx.imports {
-                if import_regex.is_match(text) {
-                    out.push(make_violation(rel_path, rule, text, *node));
+            // `start_line` from the import line), so `INSERT OR REPLACE`
+            // collapses duplicates downstream.
+            for imp in &file.imports {
+                if import_regex.is_match(&imp.text) {
+                    out.push(make_violation_at(
+                        rel_path,
+                        rule,
+                        &imp.text,
+                        imp.start_line,
+                        imp.end_line,
+                    ));
                 }
             }
         }
@@ -1224,10 +1161,24 @@ fn apply_rule(
 fn make_violation(rel_path: &str, rule: &AstRule, descriptor: &str, anchor: Node) -> Violation {
     let start = anchor.start_position().row as u32 + 1;
     let end = anchor.end_position().row as u32 + 1;
+    make_violation_at(rel_path, rule, descriptor, start, end)
+}
+
+/// Build a violation whose line range is already known from a
+/// non-Node source (e.g. an [`ImportLine`] captured by the scanner).
+/// Saves a round-trip through tree-sitter when the caller already has
+/// the (start, end) it wants to record.
+fn make_violation_at(
+    rel_path: &str,
+    rule: &AstRule,
+    descriptor: &str,
+    start: u32,
+    end: u32,
+) -> Violation {
     // Suffix the descriptor with the start line so two structurally
-    // identical occurrences in the same file (e.g. the same forbidden call
-    // in two methods) don't collide on the composite PK
-    // `(repo, sprint, file, rule_name, offending_import)`.
+    // identical occurrences in the same file (e.g. the same forbidden
+    // call in two methods) don't collide on the composite PK
+    // `(repo, file, rule_name, offending_import, start_line)`.
     let descriptor = format!("{descriptor}@L{start}");
     Violation {
         file_path: rel_path.to_string(),
@@ -1810,6 +1761,16 @@ mod tests {
         AstRule::from_raw(raw).unwrap()
     }
 
+    /// Test convenience: parse `src` inline and dispatch through the
+    /// shared AST entry point. The inline source MUST declare its
+    /// `package` — the scanner reads it from the source, not from any
+    /// auxiliary argument.
+    fn check_inline(rules: &[AstRule], rel: &str, src: &str) -> Vec<Violation> {
+        let file = ScannedFile::from_inline(rel, src.as_bytes())
+            .expect("inline test source must declare a `package`");
+        check_java_file(rules, &file)
+    }
+
     #[test]
     fn forbidden_field_type_fires_on_repository_in_controller() {
         let r = rule(
@@ -1831,7 +1792,7 @@ mod tests {
                 public Object listAll() { return repo.findAll(); }
             }
         "#;
-        let v = check_java_file(&[r], "User.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "User.java", src);
         assert!(v.iter().any(|x| x.rule_name == "controller-no-repo-field"
             && x.start_line.is_some()
             && x.end_line.is_some()));
@@ -1854,7 +1815,7 @@ mod tests {
                 public C(UserRepository r) {}
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].kind.as_str(), "ast_forbidden_constructor_param");
     }
@@ -1877,7 +1838,7 @@ mod tests {
                 public Object all() { return userRepository.findAll(); }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(v.iter().any(|x| x.rule_name == "controller-no-repo-call"));
     }
 
@@ -1898,7 +1859,7 @@ mod tests {
                 public User getUser() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].kind.as_str(), "ast_forbidden_return_type");
     }
@@ -1926,7 +1887,7 @@ mod tests {
                 }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1);
         assert!(v[0].offending_import.contains("fat"));
     }
@@ -1947,7 +1908,7 @@ mod tests {
                 private Retrofit retrofit;
             }
         "#;
-        let v = check_java_file(&[r], "MainActivity.java", "com.x.ui", src.as_bytes());
+        let v = check_inline(&[r], "MainActivity.java", src);
         assert_eq!(v.len(), 1);
     }
 
@@ -1968,7 +1929,7 @@ mod tests {
                 private final UserRepository repo;
             }
         "#;
-        let v = check_java_file(&[r], "UserService.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "UserService.java", src);
         assert!(v.is_empty(), "service classes are not @RestController");
     }
 
@@ -1994,7 +1955,7 @@ mod tests {
                 private User helper(User u) { return u; }
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert_eq!(
             v.len(),
             1,
@@ -2023,7 +1984,7 @@ mod tests {
                 private User helper(User u) { return u; }
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert_eq!(
             v.len(),
             3,
@@ -2049,7 +2010,7 @@ mod tests {
                 public void b(User u) {}
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert_eq!(v.len(), 2);
         // PK uniqueness: descriptors carry the method name.
         let descriptors: Vec<&str> = v.iter().map(|x| x.offending_import.as_str()).collect();
@@ -2079,7 +2040,7 @@ mod tests {
                 private User helper() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert_eq!(v.len(), 1, "only the public method should fire: {v:?}");
         assert!(v[0].offending_import.contains("return(User)"));
     }
@@ -2104,7 +2065,7 @@ mod tests {
                 User b() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 2);
     }
 
@@ -2128,12 +2089,7 @@ mod tests {
             @Entity
             public class Post {}
         "#;
-        let v = check_java_file(
-            std::slice::from_ref(&r),
-            "Post.java",
-            "com.x.model",
-            src_bad.as_bytes(),
-        );
+        let v = check_inline(std::slice::from_ref(&r), "Post.java", src_bad);
         assert_eq!(v.len(), 2, "two offending imports → two rows: {v:?}");
         assert!(v
             .iter()
@@ -2148,7 +2104,7 @@ mod tests {
             import javax.persistence.Entity;
             public class Post {}
         "#;
-        let v2 = check_java_file(&[r], "Post.java", "com.x.model", src_good.as_bytes());
+        let v2 = check_inline(&[r], "Post.java", src_good);
         assert!(
             v2.is_empty(),
             "class-shape gate must block the rule: {v2:?}"
@@ -2170,7 +2126,7 @@ mod tests {
                    import javax.validation.constraints.NotNull;\n\
                    @Entity\n\
                    public class Post {}\n";
-        let v = check_java_file(&[r], "Post.java", "com.x.model", src.as_bytes());
+        let v = check_inline(&[r], "Post.java", src);
         assert_eq!(v.len(), 2);
         let lines: Vec<u32> = v.iter().filter_map(|x| x.start_line).collect();
         assert!(lines.contains(&2));
@@ -2196,7 +2152,7 @@ mod tests {
                 private FragmentHomeBinding binding;
             }
         "#;
-        let v = check_java_file(&[r], "HomeFragment.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeFragment.java", src);
         assert_eq!(v.len(), 1);
         assert!(v[0].offending_import.contains("binding"));
         assert!(v[0].offending_import.contains("no-onDestroyView"));
@@ -2223,7 +2179,7 @@ mod tests {
                 }
             }
         "#;
-        let v = check_java_file(&[r], "HomeFragment.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeFragment.java", src);
         assert_eq!(v.len(), 1);
         assert!(v[0].offending_import.contains("not-nulled"));
     }
@@ -2250,7 +2206,7 @@ mod tests {
                 }
             }
         "#;
-        let v = check_java_file(&[r], "HomeFragment.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeFragment.java", src);
         assert!(
             v.is_empty(),
             "binding=null in onDestroyView is the fix: {v:?}"
@@ -2274,7 +2230,7 @@ mod tests {
                 private String unrelated;
             }
         "#;
-        let v = check_java_file(&[r], "HomeFragment.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeFragment.java", src);
         assert!(
             v.is_empty(),
             "no binding field → vacuously satisfied: {v:?}"
@@ -2301,7 +2257,7 @@ mod tests {
                 }
             }
         "#;
-        let v = check_java_file(&[r], "HomeFragment.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeFragment.java", src);
         assert!(!v.is_empty(), "observe(this, …) should fire: {v:?}");
     }
 
@@ -2323,7 +2279,7 @@ mod tests {
                 }
             }
         "#;
-        let v = check_java_file(&[r], "HomeFragment.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeFragment.java", src);
         assert!(v.is_empty(), "getViewLifecycleOwner() is correct: {v:?}");
     }
 
@@ -2344,7 +2300,7 @@ mod tests {
                            b.observe(this, x -> {});\n\
                        }\n\
                    }\n";
-        let v = check_java_file(&[r], "HomeFragment.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeFragment.java", src);
         assert_eq!(v.len(), 2);
         let descriptors: Vec<&str> = v.iter().map(|x| x.offending_import.as_str()).collect();
         // Descriptors must be distinct so the PK doesn't collapse them.
@@ -2371,7 +2327,7 @@ mod tests {
                 private static final String NAME = "x";
             }
         "#;
-        let v = check_java_file(&[r], "Holder.java", "com.x.holder", src.as_bytes());
+        let v = check_inline(&[r], "Holder.java", src);
         assert_eq!(
             v.len(),
             1,
@@ -2399,7 +2355,7 @@ mod tests {
                 private UserRepository repo;
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1);
     }
 
@@ -2421,7 +2377,7 @@ mod tests {
                 private Context context;
             }
         "#;
-        let v = check_java_file(&[r], "PostsViewModel.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "PostsViewModel.java", src);
         assert_eq!(v.len(), 1, "suffix-only class match should fire: {v:?}");
     }
 
@@ -2447,13 +2403,7 @@ mod tests {
             }
         "#;
         assert_eq!(
-            check_java_file(
-                std::slice::from_ref(&r),
-                "PostsViewModel.java",
-                "com.x.home",
-                src1.as_bytes(),
-            )
-            .len(),
+            check_inline(std::slice::from_ref(&r), "PostsViewModel.java", src1).len(),
             1
         );
         // Name still matches, but `not_extends` excludes it.
@@ -2464,7 +2414,7 @@ mod tests {
             }
         "#;
         assert!(
-            check_java_file(&[r], "PostsViewModel.java", "com.x.home", src2.as_bytes()).is_empty(),
+            check_inline(&[r], "PostsViewModel.java", src2).is_empty(),
             "not_extends should suppress the rule"
         );
     }
@@ -2491,7 +2441,7 @@ mod tests {
                 public void f() {}
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].kind.as_str(), "ast_class_has_forbidden_annotation");
         assert_eq!(v[0].severity.as_deref(), Some("CRITICAL"));
@@ -2525,23 +2475,13 @@ mod tests {
                 public void f() {}
             }
         "#;
-        let v1 = check_java_file(
-            &[r_method_scope],
-            "C.java",
-            "com.x.controller",
-            src.as_bytes(),
-        );
+        let v1 = check_inline(&[r_method_scope], "C.java", src);
         assert_eq!(
             v1.len(),
             1,
             "class_or_method should pick up the @Transactional method"
         );
-        let v2 = check_java_file(
-            &[r_class_only],
-            "C.java",
-            "com.x.controller",
-            src.as_bytes(),
-        );
+        let v2 = check_inline(&[r_class_only], "C.java", src);
         assert!(v2.is_empty(), "class scope must ignore method annotations");
     }
 
@@ -2563,7 +2503,7 @@ mod tests {
                 public void f() {}
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(v.is_empty(), "no @Transactional → no fire: {v:?}");
     }
 
@@ -2584,7 +2524,7 @@ mod tests {
             @Data
             public class Post {}
         "#;
-        let v = check_java_file(&[r], "Post.java", "com.x.entity", src.as_bytes());
+        let v = check_inline(&[r], "Post.java", src);
         assert_eq!(v.len(), 1);
     }
 
@@ -2609,7 +2549,7 @@ mod tests {
                 private void f() {}
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].severity.as_deref(), Some("CRITICAL"));
     }
@@ -2631,7 +2571,7 @@ mod tests {
                 void f() {}
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert_eq!(v.len(), 1);
     }
 
@@ -2652,7 +2592,7 @@ mod tests {
                 public void f() {}
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert!(v.is_empty());
     }
 
@@ -2673,7 +2613,7 @@ mod tests {
                 void f() {}
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert_eq!(v.len(), 1, "annotation with arguments must still match");
     }
 
@@ -2700,7 +2640,7 @@ mod tests {
                 Object c() { return userRepository.findAll(spec, pageable); }
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert_eq!(v.len(), 1, "only the zero-arg findAll should fire: {v:?}");
         assert_eq!(v[0].severity.as_deref(), Some("CRITICAL"));
     }
@@ -2723,7 +2663,7 @@ mod tests {
                 Object b() { return userRepository.findAll(pageable); }
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert_eq!(v.len(), 2, "no arg_count → fires regardless of arity");
     }
 
@@ -2749,7 +2689,7 @@ mod tests {
                 }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1);
         assert!(v[0].offending_import.contains("new(UserResponse)"));
     }
@@ -2774,7 +2714,7 @@ mod tests {
                 }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(
             v.is_empty(),
             "single-arg copy constructor must not fire: {v:?}"
@@ -2801,7 +2741,7 @@ mod tests {
                 }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(v.is_empty());
     }
 
@@ -2825,7 +2765,7 @@ mod tests {
                 public void create(@RequestBody CreateXRequest req) {}
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1);
     }
 
@@ -2847,7 +2787,7 @@ mod tests {
                 public void create(@Valid @RequestBody CreateXRequest req) {}
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(v.is_empty());
     }
 
@@ -2869,7 +2809,7 @@ mod tests {
                 public void create(@RequestBody @Validated CreateXRequest req) {}
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(v.is_empty());
     }
 
@@ -2891,7 +2831,7 @@ mod tests {
                 public void noop(String s) {}
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(v.is_empty());
     }
 
@@ -2916,7 +2856,7 @@ mod tests {
                 private final UserRepository userRepository;
             }
         "#;
-        let v = check_java_file(&[r], "OrderService.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "OrderService.java", src);
         assert_eq!(v.len(), 1);
     }
 
@@ -2938,7 +2878,7 @@ mod tests {
                 private final OrderRepository orderRepository;
             }
         "#;
-        let v = check_java_file(&[r], "OrderService.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "OrderService.java", src);
         assert!(v.is_empty());
     }
 
@@ -2962,7 +2902,7 @@ mod tests {
                 private final ItemRepository c;
             }
         "#;
-        let v = check_java_file(&[r], "OrderService.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "OrderService.java", src);
         assert_eq!(
             v.len(),
             1,
@@ -3003,7 +2943,7 @@ mod tests {
                 public UserView get() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(v.is_empty(), "DTO package allowlist should suppress: {v:?}");
     }
 
@@ -3018,7 +2958,7 @@ mod tests {
                 public User get() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1, "domain-imported type should fire: {v:?}");
     }
 
@@ -3035,7 +2975,7 @@ mod tests {
                 public UserDto get() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(
             v.is_empty(),
             "DTO-named type is suppressed by name allowlist: {v:?}"
@@ -3054,7 +2994,7 @@ mod tests {
                 public UUID getUuid() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(v.is_empty(), "stdlib types should be suppressed: {v:?}");
     }
 
@@ -3079,7 +3019,7 @@ mod tests {
                 public void create(UserView u) {}
             }
         "#;
-        let v = check_java_file(&[r], "S.java", "com.x.service", src.as_bytes());
+        let v = check_inline(&[r], "S.java", src);
         assert!(v.is_empty(), "DTO-package param should not fire: {v:?}");
     }
 
@@ -3101,7 +3041,7 @@ mod tests {
             @RestController
             class C { private UserRepository repo; }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1);
         assert_eq!(
             v[0].severity.as_deref(),
@@ -3130,7 +3070,7 @@ mod tests {
                 @Inject HomeViewModel(UserRepository repo) {}
             }
         "#;
-        let v = check_java_file(&[r], "HomeViewModel.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeViewModel.java", src);
         assert_eq!(v.len(), 1, "missing @HiltViewModel should fire: {v:?}");
         assert!(v[0].offending_import.contains("missing-@HiltViewModel"));
         assert_eq!(v[0].severity.as_deref(), Some("WARNING"));
@@ -3154,7 +3094,7 @@ mod tests {
                 @Inject HomeViewModel(UserRepository repo) {}
             }
         "#;
-        let v = check_java_file(&[r], "HomeViewModel.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeViewModel.java", src);
         assert!(v.is_empty(), "@HiltViewModel present → no fire: {v:?}");
     }
 
@@ -3177,7 +3117,7 @@ mod tests {
                 HomeViewModel() {}
             }
         "#;
-        let v = check_java_file(&[r], "HomeViewModel.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeViewModel.java", src);
         assert!(v.is_empty(), "no @Inject trigger → no fire: {v:?}");
     }
 
@@ -3200,7 +3140,7 @@ mod tests {
                 @Inject HomeService() {}
             }
         "#;
-        let v = check_java_file(&[r], "HomeService.java", "com.x.home", src.as_bytes());
+        let v = check_inline(&[r], "HomeService.java", src);
         assert!(v.is_empty(), "non-ViewModel must not fire: {v:?}");
     }
 
@@ -3216,7 +3156,7 @@ mod tests {
                 public List<UserDto> get() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(
             v.is_empty(),
             "List<UserDto> must unwrap and suppress by name: {v:?}"
@@ -3233,7 +3173,7 @@ mod tests {
                 public Optional<UserResponse> get() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(v.is_empty(), "Optional<UserResponse> must not fire: {v:?}");
     }
 
@@ -3247,7 +3187,7 @@ mod tests {
                 public ResponseEntity<List<UserDto>> get() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(
             v.is_empty(),
             "ResponseEntity<List<UserDto>> must unwrap recursively: {v:?}"
@@ -3267,7 +3207,7 @@ mod tests {
                 public List<User> list() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(
             v.len(),
             1,
@@ -3288,7 +3228,7 @@ mod tests {
                 public UserDto<Foo> get() { return null; }
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert!(
             v.is_empty(),
             "outer-DTO-named generic must still be suppressed by name: {v:?}"
@@ -3314,7 +3254,7 @@ mod tests {
                 private List<UserRepository> repos;
             }
         "#;
-        let v = check_java_file(&[r], "C.java", "com.x.controller", src.as_bytes());
+        let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1, "List<UserRepository> field must fire: {v:?}");
     }
 }

@@ -1,14 +1,27 @@
-//! Java file → (package, imports) extraction (T-P2.2).
+//! Java source scanner backed by tree-sitter-java.
 //!
-//! tree-sitter-java would work but is overkill for the two declarations
-//! we need: `package com.foo.bar;` and `import com.foo.Bar;` (or
-//! `import static`, or `import com.foo.*`). Both follow strict syntax
-//! and appear at the top of the file before any class body. A line-based
-//! parser handles every case the course's Java code produces.
+//! Produces one [`ScannedFile`] per `.java` file in the repo, carrying
+//! the file's declared `package`, its `import` declarations, the
+//! original source bytes, and the parsed tree. Consumers — the legacy
+//! layered / forbidden-import engine in [`crate::checker`] and the
+//! AST-driven engine in [`crate::ast_rules`] — both read from the same
+//! `ScannedFile`, so each file is read off disk and parsed exactly
+//! once per scan.
+//!
+//! The previous line-based parser missed common Java declarations that
+//! don't start with `class` / `public class` / `interface` (e.g.
+//! `abstract class`, `final class`, `sealed class`, `record`, `enum`)
+//! and didn't handle multi-line `import` declarations. tree-sitter
+//! parses all of them correctly, and the resulting tree is reused by
+//! the AST-rule pass so there's no second parse.
 
 use std::path::Path;
 
+use once_cell::sync::Lazy;
+use tree_sitter::{Node, Parser, Tree};
 use walkdir::WalkDir;
+
+static JAVA_LANG: Lazy<tree_sitter::Language> = Lazy::new(|| tree_sitter_java::LANGUAGE.into());
 
 const SKIP_DIRS: &[&str] = &[
     "target",
@@ -21,29 +34,79 @@ const SKIP_DIRS: &[&str] = &[
     "out",
 ];
 
-/// One captured `import` declaration with the 1-based line number where it
-/// appeared. Line numbers feed `architecture_violations.start_line` so the
-/// attribution stage can blame the offending import line specifically — not
-/// the whole file.
+/// One captured `import` declaration with its 1-based line range.
+/// Multi-line imports preserve the full span; single-line imports
+/// report `start_line == end_line`. The text is the canonical
+/// `<package>.<name>` (or `<package>.*`) form, stripped of the
+/// `import` keyword, the optional `static` modifier, the trailing
+/// `;`, and intra-statement whitespace (which keeps multi-line
+/// imports from leaking line breaks into the captured text).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportLine {
     pub text: String,
-    pub line: Option<u32>,
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JavaFileFacts {
+/// A parsed Java source file. Owns its source bytes and tree-sitter
+/// `Tree`; consumers extract `Node`s on-demand via [`ScannedFile::root`].
+pub struct ScannedFile {
     /// Path relative to the repo root, in the original separator form.
     pub rel_path: String,
+    /// Declared package, e.g. `com.example.domain.user`. `ScannedFile`
+    /// is not constructed for files without a `package` declaration —
+    /// they belong to the default package and have no home in the
+    /// layered model.
     pub package: String,
+    /// All `import` declarations in declaration order.
     pub imports: Vec<ImportLine>,
+    source: Vec<u8>,
+    tree: Tree,
 }
 
-/// Walk a repo and return one row per `.java` file. Files in build,
-/// dependency, or VCS directories are skipped via [`SKIP_DIRS`]. Files
-/// that fail to read or have no `package` declaration are dropped (they
-/// belong to the default package which the layered rules can't claim).
-pub fn scan_repo(repo_path: &Path) -> Vec<JavaFileFacts> {
+impl ScannedFile {
+    /// Parse an in-memory file. Returns `None` when the source has no
+    /// `package` declaration (default-package files are excluded from
+    /// the layered model). Used by unit tests to fabricate a file
+    /// without touching the filesystem; the production scanning path
+    /// goes through [`scan_repo`].
+    pub fn from_inline(rel_path: &str, source: &[u8]) -> Option<Self> {
+        let mut parser = Parser::new();
+        parser.set_language(&JAVA_LANG).ok()?;
+        let tree = parser.parse(source, None)?;
+        let root = tree.root_node();
+        let package = extract_package(root, source)?;
+        let imports = extract_imports(root, source);
+        Some(Self {
+            rel_path: rel_path.to_string(),
+            package,
+            imports,
+            source: source.to_vec(),
+            tree,
+        })
+    }
+
+    /// Root of the parsed tree; lifetime is tied to `&self`.
+    pub fn root(&self) -> Node<'_> {
+        self.tree.root_node()
+    }
+
+    /// Raw source bytes (UTF-8) backing the parse.
+    pub fn source(&self) -> &[u8] {
+        &self.source
+    }
+}
+
+/// Walk a repo and return one [`ScannedFile`] per `.java` file with a
+/// declared `package`. Files in build/dependency/VCS directories are
+/// skipped via [`SKIP_DIRS`]. Files that fail to read or parse are
+/// dropped silently (tree-sitter does error recovery, so a parse
+/// failure on a real Java file is extraordinary).
+pub fn scan_repo(repo_path: &Path) -> Vec<ScannedFile> {
+    let mut parser = Parser::new();
+    if parser.set_language(&JAVA_LANG).is_err() {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for entry in WalkDir::new(repo_path).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
@@ -63,97 +126,92 @@ pub fn scan_repo(repo_path: &Path) -> Vec<JavaFileFacts> {
         {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(path) else {
+        let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        let Some((package, imports)) = parse_java(&text) else {
+        let Some(tree) = parser.parse(&bytes, None) else {
             continue;
         };
-        out.push(JavaFileFacts {
+        let root = tree.root_node();
+        let Some(package) = extract_package(root, &bytes) else {
+            // Default-package file — not addressable by the layered rules.
+            continue;
+        };
+        let imports = extract_imports(root, &bytes);
+        out.push(ScannedFile {
             rel_path: rel.to_string_lossy().into_owned(),
             package,
             imports,
+            source: bytes,
+            tree,
         });
     }
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     out
 }
 
-/// Extract `(package, imports)` from a Java source string. `None` when
-/// no `package` declaration is present (default-package files have no
-/// home in the layered model). Each import carries its 1-based source line
-/// so the attribution stage can blame the offending import directly.
-pub fn parse_java(text: &str) -> Option<(String, Vec<ImportLine>)> {
-    let mut package: Option<String> = None;
-    let mut imports: Vec<ImportLine> = Vec::new();
-    let mut in_block_comment = false;
-    for (idx, raw) in text.lines().enumerate() {
-        let line_no = (idx as u32) + 1;
-        let line = strip_comments(raw, &mut in_block_comment);
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+/// Extract the file's `package` declaration. Returns `None` for
+/// default-package files. Annotations on the package (`package-info.java`'s
+/// `@Deprecated package …`) are ignored; only the dotted name component
+/// is captured.
+pub fn extract_package(root: Node, source: &[u8]) -> Option<String> {
+    let mut cursor = root.walk();
+    for c in root.children(&mut cursor) {
+        if c.kind() != "package_declaration" {
             continue;
         }
-        // Stop at the class/interface/record body — both declarations
-        // we need always appear before that.
-        if trimmed.starts_with("class ")
-            || trimmed.starts_with("public class ")
-            || trimmed.starts_with("interface ")
-            || trimmed.starts_with("public interface ")
-            || trimmed.starts_with("@")
-        {
-            // The annotation line might be a class-level annotation; if
-            // so, we've already passed `package` + `import`. Bail.
-            if package.is_some() {
-                break;
-            }
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("package ") {
-            package = Some(rest.trim_end_matches(';').trim().to_string());
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("import ") {
-            let cleaned = rest.trim_end_matches(';').trim();
-            // `import static foo.Bar.baz;` → keep `foo.Bar.baz`
-            let cleaned = cleaned.strip_prefix("static ").unwrap_or(cleaned).trim();
-            if !cleaned.is_empty() {
-                imports.push(ImportLine {
-                    text: cleaned.to_string(),
-                    line: Some(line_no),
-                });
+        let mut inner = c.walk();
+        for sub in c.children(&mut inner) {
+            match sub.kind() {
+                "identifier" | "scoped_identifier" => {
+                    return Some(collapse_whitespace(&node_text(sub, source)));
+                }
+                _ => {}
             }
         }
     }
-    package.map(|p| (p, imports))
+    None
 }
 
-fn strip_comments(line: &str, in_block: &mut bool) -> String {
-    let mut out = String::with_capacity(line.len());
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if *in_block {
-            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                *in_block = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
+/// Extract all `import` declarations in declaration order.
+pub fn extract_imports(root: Node, source: &[u8]) -> Vec<ImportLine> {
+    let mut out = Vec::new();
+    let mut cursor = root.walk();
+    for c in root.children(&mut cursor) {
+        if c.kind() != "import_declaration" {
             continue;
         }
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            break; // rest of line is a line comment
-        }
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            *in_block = true;
-            i += 2;
+        let raw = node_text(c, source);
+        let trimmed = raw
+            .trim()
+            .strip_prefix("import")
+            .unwrap_or(raw.trim())
+            .trim();
+        let cleaned = trimmed.trim_end_matches(';').trim();
+        let cleaned = cleaned.strip_prefix("static ").unwrap_or(cleaned).trim();
+        let text = collapse_whitespace(cleaned);
+        if text.is_empty() {
             continue;
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        let start_line = c.start_position().row as u32 + 1;
+        let end_line = c.end_position().row as u32 + 1;
+        out.push(ImportLine {
+            text,
+            start_line,
+            end_line,
+        });
     }
     out
+}
+
+fn node_text(node: Node, source: &[u8]) -> String {
+    let start = node.start_byte();
+    let end = node.end_byte().min(source.len());
+    String::from_utf8_lossy(&source[start..end]).into_owned()
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join("")
 }
 
 #[cfg(test)]
@@ -170,44 +228,105 @@ mod tests {
                    import java.util.List;\n\
                    import static org.junit.Assert.*;\n\
                    public class Foo {}\n";
-        let (pkg, imports) = parse_java(src).unwrap();
-        assert_eq!(pkg, "com.example.app");
+        let f = ScannedFile::from_inline("Foo.java", src.as_bytes()).unwrap();
+        assert_eq!(f.package, "com.example.app");
         assert_eq!(
-            import_texts(&imports),
+            import_texts(&f.imports),
             vec!["java.util.List", "org.junit.Assert.*"]
         );
-        assert_eq!(imports[0].line, Some(2));
-        assert_eq!(imports[1].line, Some(3));
+        assert_eq!(f.imports[0].start_line, 2);
+        assert_eq!(f.imports[1].start_line, 3);
     }
 
     #[test]
-    fn ignores_block_comment_imports() {
+    fn block_comment_imports_are_ignored_by_tree_sitter() {
         let src = "package com.x;\n\
                    /* import java.io.File; */\n\
                    import java.util.List;\n\
                    public class A {}";
-        let (pkg, imports) = parse_java(src).unwrap();
-        assert_eq!(pkg, "com.x");
-        assert_eq!(import_texts(&imports), vec!["java.util.List"]);
-        assert_eq!(imports[0].line, Some(3));
+        let f = ScannedFile::from_inline("A.java", src.as_bytes()).unwrap();
+        assert_eq!(import_texts(&f.imports), vec!["java.util.List"]);
+        assert_eq!(f.imports[0].start_line, 3);
     }
 
     #[test]
     fn no_package_returns_none() {
         let src = "import java.util.List;\npublic class A {}";
-        assert!(parse_java(src).is_none());
+        assert!(ScannedFile::from_inline("A.java", src.as_bytes()).is_none());
     }
 
     #[test]
-    fn class_level_annotation_stops_scan() {
+    fn multiline_import_is_collapsed_and_spans_full_range() {
+        let src = "package com.x;\n\
+                   import\n\
+                       com.example\n\
+                       .Foo;\n\
+                   public class A {}";
+        let f = ScannedFile::from_inline("A.java", src.as_bytes()).unwrap();
+        assert_eq!(import_texts(&f.imports), vec!["com.example.Foo"]);
+        assert_eq!(f.imports[0].start_line, 2);
+        assert_eq!(f.imports[0].end_line, 4);
+    }
+
+    #[test]
+    fn record_declaration_does_not_swallow_following_imports() {
+        // The pre-tree-sitter scanner's keyword list missed `record`;
+        // tree-sitter recognises it natively.
         let src = "package com.x;\n\
                    import java.util.List;\n\
-                   @Service\n\
-                   public class A {\n\
-                     // import nothing.Sneaky;\n\
-                   }";
-        let (pkg, imports) = parse_java(src).unwrap();
-        assert_eq!(pkg, "com.x");
-        assert_eq!(import_texts(&imports), vec!["java.util.List"]);
+                   public record User(String name) {}\n";
+        let f = ScannedFile::from_inline("User.java", src.as_bytes()).unwrap();
+        assert_eq!(import_texts(&f.imports), vec!["java.util.List"]);
+    }
+
+    #[test]
+    fn enum_declaration_does_not_swallow_following_imports() {
+        let src = "package com.x;\n\
+                   import java.util.List;\n\
+                   public enum Color { RED, GREEN }\n";
+        let f = ScannedFile::from_inline("Color.java", src.as_bytes()).unwrap();
+        assert_eq!(import_texts(&f.imports), vec!["java.util.List"]);
+    }
+
+    #[test]
+    fn abstract_or_sealed_class_keywords_are_handled() {
+        // Pre-tree-sitter, `abstract class` / `sealed class` weren't in
+        // the keyword list that halted the scan. They're now structural
+        // — tree-sitter parses them as `class_declaration`.
+        let src = "package com.x;\n\
+                   import java.util.List;\n\
+                   public abstract sealed class Base permits Sub {}\n";
+        let f = ScannedFile::from_inline("Base.java", src.as_bytes()).unwrap();
+        assert_eq!(import_texts(&f.imports), vec!["java.util.List"]);
+    }
+
+    #[test]
+    fn scan_repo_walks_filesystem_and_drops_default_package_files() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src/main/java/com/x")).unwrap();
+        std::fs::write(
+            root.join("src/main/java/com/x/A.java"),
+            "package com.x;\nimport java.util.List;\npublic class A {}",
+        )
+        .unwrap();
+        // Default-package file — dropped.
+        std::fs::write(
+            root.join("src/main/java/Default.java"),
+            "import java.util.List;\npublic class Default {}",
+        )
+        .unwrap();
+        // Build dir — dropped.
+        std::fs::create_dir_all(root.join("build/generated")).unwrap();
+        std::fs::write(
+            root.join("build/generated/G.java"),
+            "package com.gen;\nimport java.util.List;\npublic class G {}",
+        )
+        .unwrap();
+
+        let files = scan_repo(root);
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert_eq!(names, vec!["src/main/java/com/x/A.java"]);
     }
 }
