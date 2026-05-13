@@ -579,7 +579,17 @@ fn compile_regex(value: Option<String>, field: &str, rule_name: &str) -> anyhow:
 /// Java file, return violations. The caller owns the tree-sitter parse
 /// (see [`crate::scanner::ScannedFile`]) so each file is parsed exactly
 /// once per scan regardless of how many engines consume it.
-pub fn check_java_file(rules: &[AstRule], file: &ScannedFile) -> Vec<Violation> {
+///
+/// `generic_wrappers` is the union of built-in defaults and any TOML
+/// extras (see [`crate::rules::default_generic_wrappers`] and
+/// [`crate::ArchitectureRules::generic_wrappers`]); helpers consult it
+/// to strip wrappers like `List<UserDto>` down to `UserDto` before the
+/// suppressor regexes run.
+pub fn check_java_file(
+    rules: &[AstRule],
+    file: &ScannedFile,
+    generic_wrappers: &[String],
+) -> Vec<Violation> {
     if rules.is_empty() {
         return Vec::new();
     }
@@ -591,7 +601,7 @@ pub fn check_java_file(rules: &[AstRule], file: &ScannedFile) -> Vec<Violation> 
             if !class_matches(&rule.class_match, &info, &file.package) {
                 continue;
             }
-            apply_rule(rule, &info, file, &mut out);
+            apply_rule(rule, &info, file, generic_wrappers, &mut out);
         }
     });
     out
@@ -602,6 +612,20 @@ fn visit_classes<F: FnMut(Node)>(node: Node, _source: &[u8], cb: &mut F) {
     if kind == "class_declaration" || kind == "interface_declaration" || kind == "enum_declaration"
     {
         cb(node);
+    } else if kind == "object_creation_expression" {
+        // Anonymous class: `new <Type>([args]) { … }`. tree-sitter-java
+        // represents these as `object_creation_expression` with a
+        // `class_body` direct child (vs. `object_creation_expression`
+        // without one for a plain `new Foo(args)` call). Treat them as
+        // visitable class shapes so rules without a class_match (e.g.
+        // TRANSACTIONAL_ON_NON_PUBLIC_METHOD) AND rules whose match keys
+        // off the constructed type (e.g. `class_match.extends =
+        // "ViewModel"` on `new ViewModel() { … }`) reach methods declared
+        // inside.
+        let mut cursor = node.walk();
+        if node.children(&mut cursor).any(|c| c.kind() == "class_body") {
+            cb(node);
+        }
     }
     for child in children(node) {
         visit_classes(child, _source, cb);
@@ -619,6 +643,14 @@ struct ClassInfo<'a> {
 
 impl<'a> ClassInfo<'a> {
     fn new(node: Node<'a>, source: &[u8]) -> Self {
+        match node.kind() {
+            "object_creation_expression" => Self::from_anonymous(node, source),
+            _ => Self::from_named(node, source),
+        }
+    }
+
+    /// Build `ClassInfo` for a named class / interface / enum declaration.
+    fn from_named(node: Node<'a>, source: &[u8]) -> Self {
         let mut name = String::from("<anonymous>");
         let mut annotations: Vec<String> = Vec::new();
         let mut extends: Option<String> = None;
@@ -668,6 +700,32 @@ impl<'a> ClassInfo<'a> {
         }
     }
 
+    /// Build `ClassInfo` for an anonymous class shape — i.e. the
+    /// `object_creation_expression` carries a `class_body` direct child.
+    /// The constructed type is exposed as the implicit `extends`; Java
+    /// syntax doesn't distinguish "extends abstract class" from
+    /// "implements interface" at the call site without a classpath, so
+    /// the rubric's `class_match.extends` keys handle both. Annotations
+    /// can't appear on an anonymous class itself (the language doesn't
+    /// permit it), so `annotations` stays empty.
+    fn from_anonymous(node: Node<'a>, source: &[u8]) -> Self {
+        let mut extends: Option<String> = None;
+        for c in children(node) {
+            let k = c.kind();
+            if k == "type_identifier" || k == "scoped_type_identifier" || k == "generic_type" {
+                extends = simple_type_name(c, source);
+                break;
+            }
+        }
+        ClassInfo {
+            node,
+            name: String::from("<anonymous>"),
+            annotations: Vec::new(),
+            extends,
+            implements: Vec::new(),
+        }
+    }
+
     fn class_body(&self) -> Option<Node<'a>> {
         children(self.node)
             .into_iter()
@@ -710,7 +768,13 @@ fn class_matches(matcher: &ClassMatcher, info: &ClassInfo, package_name: &str) -
     true
 }
 
-fn apply_rule(rule: &AstRule, info: &ClassInfo, file: &ScannedFile, out: &mut Vec<Violation>) {
+fn apply_rule(
+    rule: &AstRule,
+    info: &ClassInfo,
+    file: &ScannedFile,
+    generic_wrappers: &[String],
+    out: &mut Vec<Violation>,
+) {
     let source = file.source();
     let rel_path = file.rel_path.as_str();
     let body = match info.class_body() {
@@ -732,7 +796,7 @@ fn apply_rule(rule: &AstRule, info: &ClassInfo, file: &ScannedFile, out: &mut Ve
                         continue;
                     }
                 }
-                let ty = type_text_of_field(member, source);
+                let ty = type_text_of_field(member, source, generic_wrappers);
                 if let Some(t) = ty {
                     if !type_regex.is_match(&t) {
                         continue;
@@ -755,7 +819,7 @@ fn apply_rule(rule: &AstRule, info: &ClassInfo, file: &ScannedFile, out: &mut Ve
                     continue;
                 }
                 for param in formal_parameters(member) {
-                    let ty = type_text_of_param(param, source);
+                    let ty = type_text_of_param(param, source, generic_wrappers);
                     if let Some(t) = ty {
                         if type_regex.is_match(&t) {
                             out.push(make_violation(
@@ -811,7 +875,7 @@ fn apply_rule(rule: &AstRule, info: &ClassInfo, file: &ScannedFile, out: &mut Ve
                 if !method_visibility(member, source).matches_filter(*visibility) {
                     continue;
                 }
-                let ty = method_return_type(member, source);
+                let ty = method_return_type(member, source, generic_wrappers);
                 if let Some(t) = ty {
                     if !type_regex.is_match(&t) {
                         continue;
@@ -859,7 +923,7 @@ fn apply_rule(rule: &AstRule, info: &ClassInfo, file: &ScannedFile, out: &mut Ve
                 }
                 let m_name = method_name(member, source).unwrap_or_else(|| "<anon>".into());
                 for param in formal_parameters(member) {
-                    let ty = type_text_of_param(param, source);
+                    let ty = type_text_of_param(param, source, generic_wrappers);
                     if let Some(t) = ty {
                         if !type_regex.is_match(&t) {
                             continue;
@@ -906,7 +970,7 @@ fn apply_rule(rule: &AstRule, info: &ClassInfo, file: &ScannedFile, out: &mut Ve
                 .into_iter()
                 .filter(|m| m.kind() == "field_declaration")
                 .filter_map(|m| {
-                    let ty = type_text_of_field(m, source)?;
+                    let ty = type_text_of_field(m, source, generic_wrappers)?;
                     if type_regex.is_match(&ty) {
                         let names = field_variable_names(m, source);
                         Some(names.into_iter().map(move |n| (m, n)).collect::<Vec<_>>())
@@ -1093,7 +1157,8 @@ fn apply_rule(rule: &AstRule, info: &ClassInfo, file: &ScannedFile, out: &mut Ve
                     if has_companion {
                         continue;
                     }
-                    let pty = type_text_of_param(param, source).unwrap_or_else(|| "?".into());
+                    let pty = type_text_of_param(param, source, generic_wrappers)
+                        .unwrap_or_else(|| "?".into());
                     out.push(make_violation(
                         rel_path,
                         rule,
@@ -1112,7 +1177,7 @@ fn apply_rule(rule: &AstRule, info: &ClassInfo, file: &ScannedFile, out: &mut Ve
                 if member.kind() != "field_declaration" {
                     continue;
                 }
-                if let Some(t) = type_text_of_field(member, source) {
+                if let Some(t) = type_text_of_field(member, source, generic_wrappers) {
                     if type_regex.is_match(&t) {
                         count += 1;
                     }
@@ -1228,50 +1293,24 @@ fn last_identifier_segment(s: &str) -> &str {
     s.rsplit('.').next().unwrap_or(s).trim()
 }
 
-/// Generic-type "wrappers" whose outer name does not encode the
-/// semantically interesting type. `List<UserDto>` is a list-of-DTO at
-/// the API boundary; the rubric treats it as a DTO return. `Map` is
-/// intentionally absent — it has two type parameters and unwrapping is
-/// ambiguous; it stays in the stdlib allowlist by its outer name.
-const GENERIC_WRAPPERS: &[&str] = &[
-    // Spring / reactive
-    "ResponseEntity",
-    "Mono",
-    "Flux",
-    // JDK collections + value containers
-    "Optional",
-    "List",
-    "Collection",
-    "Set",
-    "Iterable",
-    "Iterator",
-    "Stream",
-    "Queue",
-    "Deque",
-    // Spring Data pagination
-    "Page",
-    "Slice",
-    "PageImpl",
-    // async
-    "CompletableFuture",
-    "Future",
-    "Callable",
-];
-
-fn is_generic_wrapper(name: &str) -> bool {
-    GENERIC_WRAPPERS.contains(&name)
+fn is_generic_wrapper(name: &str, wrappers: &[String]) -> bool {
+    wrappers.iter().any(|w| w == name)
 }
 
-/// For a `generic_type` node whose outer name is in `GENERIC_WRAPPERS`,
-/// return the inner type-argument node so callers can keep drilling
-/// toward the meaningful inner type. Returns `None` when the node
-/// isn't a recognised wrapper or has no type-argument child.
-fn unwrap_generic_wrapper<'a>(node: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
+/// For a `generic_type` node whose outer name is in `wrappers`, return
+/// the inner type-argument node so callers can keep drilling toward
+/// the meaningful inner type. Returns `None` when the node isn't a
+/// recognised wrapper or has no type-argument child.
+fn unwrap_generic_wrapper<'a>(
+    node: Node<'a>,
+    source: &[u8],
+    wrappers: &[String],
+) -> Option<Node<'a>> {
     if node.kind() != "generic_type" {
         return None;
     }
     let outer = simple_type_name(node, source)?;
-    if !is_generic_wrapper(&outer) {
+    if !is_generic_wrapper(&outer, wrappers) {
         return None;
     }
     let args = children(node)
@@ -1292,10 +1331,11 @@ fn unwrap_generic_wrapper<'a>(node: Node<'a>, source: &[u8]) -> Option<Node<'a>>
 /// `List<UserDto>` is tested as `UserDto`, matching the rubric's prose
 /// promise that "generic wrappers are stripped before the type is
 /// tested". Non-wrapped types pass through `simple_type_name`
-/// unchanged.
-fn effective_simple_type_name(node: Node, source: &[u8]) -> Option<String> {
-    if let Some(inner) = unwrap_generic_wrapper(node, source) {
-        return effective_simple_type_name(inner, source);
+/// unchanged. The wrappers list combines built-in defaults with any
+/// TOML extras (see [`crate::rules::default_generic_wrappers`]).
+fn effective_simple_type_name(node: Node, source: &[u8], wrappers: &[String]) -> Option<String> {
+    if let Some(inner) = unwrap_generic_wrapper(node, source, wrappers) {
+        return effective_simple_type_name(inner, source, wrappers);
     }
     simple_type_name(node, source)
 }
@@ -1327,7 +1367,7 @@ fn simple_type_name(node: Node, source: &[u8]) -> Option<String> {
     }
 }
 
-fn type_text_of_field(node: Node, source: &[u8]) -> Option<String> {
+fn type_text_of_field(node: Node, source: &[u8], wrappers: &[String]) -> Option<String> {
     // field_declaration: modifiers? type variable_declarator (',' variable_declarator)* ';'
     // Returns the *effective* type name — generic wrappers like
     // `List<UserDto>` / `Optional<UserDto>` are stripped so the inner
@@ -1343,7 +1383,7 @@ fn type_text_of_field(node: Node, source: &[u8]) -> Option<String> {
             || k == "generic_type"
             || k == "array_type"
         {
-            return effective_simple_type_name(c, source);
+            return effective_simple_type_name(c, source, wrappers);
         }
     }
     None
@@ -1363,7 +1403,7 @@ fn formal_parameters(method_or_ctor: Node) -> Vec<Node> {
     out
 }
 
-fn type_text_of_param(node: Node, source: &[u8]) -> Option<String> {
+fn type_text_of_param(node: Node, source: &[u8], wrappers: &[String]) -> Option<String> {
     // formal_parameter: modifiers? type identifier dims?
     // Same wrapper-stripping policy as `type_text_of_field`.
     for c in children(node) {
@@ -1377,13 +1417,13 @@ fn type_text_of_param(node: Node, source: &[u8]) -> Option<String> {
             || k == "generic_type"
             || k == "array_type"
         {
-            return effective_simple_type_name(c, source);
+            return effective_simple_type_name(c, source, wrappers);
         }
     }
     None
 }
 
-fn method_return_type(method: Node, source: &[u8]) -> Option<String> {
+fn method_return_type(method: Node, source: &[u8], wrappers: &[String]) -> Option<String> {
     // method_declaration: modifiers? type_parameters? type identifier formal_parameters ...
     // The return type is the first type-shaped child after `modifiers` /
     // `type_parameters`. `void_type` is excluded — there is no type name
@@ -1403,7 +1443,7 @@ fn method_return_type(method: Node, source: &[u8]) -> Option<String> {
             || k == "generic_type"
             || k == "array_type"
         {
-            return effective_simple_type_name(c, source);
+            return effective_simple_type_name(c, source, wrappers);
         }
     }
     None
@@ -1762,13 +1802,14 @@ mod tests {
     }
 
     /// Test convenience: parse `src` inline and dispatch through the
-    /// shared AST entry point. The inline source MUST declare its
-    /// `package` — the scanner reads it from the source, not from any
-    /// auxiliary argument.
+    /// shared AST entry point with the built-in generic-wrappers list.
+    /// The inline source MUST declare its `package` — the scanner
+    /// reads it from the source, not from any auxiliary argument.
     fn check_inline(rules: &[AstRule], rel: &str, src: &str) -> Vec<Violation> {
         let file = ScannedFile::from_inline(rel, src.as_bytes())
             .expect("inline test source must declare a `package`");
-        check_java_file(rules, &file)
+        let wrappers = crate::rules::default_generic_wrappers();
+        check_java_file(rules, &file, &wrappers)
     }
 
     #[test]
@@ -3256,5 +3297,111 @@ mod tests {
         "#;
         let v = check_inline(&[r], "C.java", src);
         assert_eq!(v.len(), 1, "List<UserRepository> field must fire: {v:?}");
+    }
+
+    // ---------- Anonymous-class visitor ----------
+
+    #[test]
+    fn anonymous_class_extending_target_fires_extends_keyed_rule() {
+        // Rule keys off `class_match.extends = "ViewModel"`. An anonymous
+        // class `new ViewModel() { … }` should ALSO be visited: the
+        // constructed type is the implicit `extends`, so a Context field
+        // declared inside is just as much of a leak.
+        let r = rule(
+            r#"
+            name = "VIEWMODEL_HOLDS_CONTEXT"
+            class_match.extends = "ViewModel"
+            kind = "forbidden_field_type"
+            type_regex = "^Context$"
+            severity = "CRITICAL"
+            "#,
+        );
+        let src = r#"
+            package com.x.home;
+            class Outer {
+                ViewModel make() {
+                    return new ViewModel() {
+                        private Context context;
+                    };
+                }
+            }
+        "#;
+        let v = check_inline(&[r], "Outer.java", src);
+        assert_eq!(
+            v.len(),
+            1,
+            "anonymous ViewModel must be visited and fire the field rule: {v:?}"
+        );
+    }
+
+    #[test]
+    fn no_class_match_rule_reaches_anonymous_class_methods() {
+        // TRANSACTIONAL_ON_NON_PUBLIC_METHOD carries no `class_match`,
+        // so it must apply to every class shape — including anonymous
+        // ones. A `@Transactional` package-private method inside a
+        // `new Runnable() { … }` must fire.
+        let r = rule(
+            r#"
+            name = "TRANSACTIONAL_ON_NON_PUBLIC_METHOD"
+            kind = "method_annotation_visibility_mismatch"
+            annotation_regex = "^Transactional$"
+            required_visibility = "public"
+            severity = "CRITICAL"
+            "#,
+        );
+        let src = r#"
+            package com.x.service;
+            class S {
+                void f() {
+                    new Runnable() {
+                        @Override
+                        @Transactional
+                        public void run() { /* fine */ }
+                    };
+                    new Runnable() {
+                        @Override
+                        @Transactional
+                        void leak() {}
+                    };
+                }
+            }
+        "#;
+        let v = check_inline(&[r], "S.java", src);
+        assert_eq!(
+            v.len(),
+            1,
+            "only the package-private @Transactional inside the second anonymous class should fire: {v:?}"
+        );
+    }
+
+    #[test]
+    fn annotation_keyed_rule_does_not_fire_on_anonymous_class() {
+        // Anonymous classes can't carry class-level annotations in Java.
+        // A rule keyed off `class_match.annotation = "RestController"`
+        // MUST stay silent on anonymous shapes, regardless of what their
+        // methods contain.
+        let r = rule(
+            r#"
+            name = "CONTROLLER_RETURNS_NON_DTO"
+            class_match.annotation = "RestController"
+            kind = "forbidden_return_type"
+            type_regex = "^User$"
+            "#,
+        );
+        let src = r#"
+            package com.x.controller;
+            class C {
+                Object factory() {
+                    return new Object() {
+                        public User leak() { return null; }
+                    };
+                }
+            }
+        "#;
+        let v = check_inline(&[r], "C.java", src);
+        assert!(
+            v.is_empty(),
+            "anonymous classes can't have @RestController, so the rule must stay silent: {v:?}"
+        );
     }
 }
