@@ -20,6 +20,34 @@
 
 severity = "WARNING"
 
+# --- Optional extension knobs -----------------------------------------
+#
+# Two append-only lists let course-specific framework adoption extend
+# the built-in defaults without recompiling sprint-grader. Replacement
+# is intentionally not supported — a misconfiguration that emptied
+# `external_packages` would silently re-enable the JPA-entity
+# false-positive that the EXTERNAL_PACKAGE_PREFIXES guard exists to
+# prevent. Both blocks default to empty `extras` when omitted.
+#
+# `[external_packages].extras`: package roots the LAYER classifier
+# (crates/architecture/src/checker.rs) treats as framework / JDK —
+# never assigned to a STUDENT layer. The default list covers Spring,
+# Android, JDK, Kotlin, common DI containers; uncomment to add to it.
+#
+#   [external_packages]
+#   extras = ["io.netty.", "com.example.legacy."]
+#
+# `[generic_wrappers].extras`: outer type names whose inner type
+# argument is the semantically-interesting type for the AST
+# suppressors. The default list covers Spring (`ResponseEntity`,
+# `Mono`, `Flux`), JDK collections + value containers (`Optional`,
+# `List`, `Set`, `Stream`, …), Spring Data pagination (`Page`,
+# `Slice`), and async (`CompletableFuture`, `Future`, `Callable`).
+# Uncomment to add functional-style wrappers etc.
+#
+#   [generic_wrappers]
+#   extras = ["Either", "Result"]
+
 # --- Layered model for the Spring backend -----------------------------
 #
 # Mirrors the Spring rubric in `config/architecture-spring.md`:
