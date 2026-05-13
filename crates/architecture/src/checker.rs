@@ -12,56 +12,22 @@
 use crate::rules::ArchitectureRules;
 use crate::scanner::ScannedFile;
 
-/// Package roots we never classify as belonging to a student layer.
+/// Returns true when `pkg` matches one of the prefixes the LAYER
+/// classifier should never assign to a STUDENT layer. The list lives
+/// on [`ArchitectureRules::external_package_prefixes`] (defaults + any
+/// TOML extras).
 ///
 /// Without this guard, a permissive layer pattern like `**/persistence/**`
-/// matches `jakarta.persistence` (the JPA API surface — not the student's
-/// own `infrastructure` package), producing false-positive
+/// matches `jakarta.persistence` (the JPA API surface — not the
+/// student's own `infrastructure` package), producing false-positive
 /// `layer_dependency` violations for a domain entity that legitimately
 /// imports `jakarta.persistence.Entity`. `[[forbidden]]` rules are
 /// authoritative for "framework imports forbidden in this package", so
-/// excluding these prefixes from the *layer* classifier doesn't hide any
-/// real policy — it just stops the layer system from misreading framework
-/// imports as another internal layer.
-const EXTERNAL_PACKAGE_PREFIXES: &[&str] = &[
-    "java.",
-    "javax.",
-    "jakarta.",
-    "kotlin.",
-    "kotlinx.",
-    "scala.",
-    "groovy.",
-    "android.",
-    "androidx.",
-    "com.android.",
-    "com.google.",
-    "com.fasterxml.",
-    "com.squareup.",
-    "org.springframework.",
-    "org.hibernate.",
-    "org.apache.",
-    "org.junit.",
-    "org.mockito.",
-    "org.slf4j.",
-    "org.aspectj.",
-    "org.jetbrains.",
-    "io.micrometer.",
-    "io.swagger.",
-    "lombok.",
-    "retrofit2.",
-    "okhttp3.",
-    "dagger.",
-    "hilt.",
-    "ch.qos.",
-    "reactor.",
-    "rx.",
-    "io.reactivex.",
-];
-
-fn is_external_package(pkg: &str) -> bool {
-    EXTERNAL_PACKAGE_PREFIXES
-        .iter()
-        .any(|prefix| pkg.starts_with(prefix))
+/// excluding these prefixes from the *layer* classifier doesn't hide
+/// any real policy — it just stops the layer system from misreading
+/// framework imports as another internal layer.
+fn is_external_package(pkg: &str, prefixes: &[String]) -> bool {
+    prefixes.iter().any(|prefix| pkg.starts_with(prefix))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +107,7 @@ pub fn check_file(rules: &ArchitectureRules, file: &ScannedFile) -> Vec<Violatio
             // when their package happens to match a layer glob (e.g.
             // `jakarta.persistence` matching `**/persistence/**`). Skip them
             // here; `[[forbidden]]` rules below remain authoritative.
-            if is_external_package(&imp_pkg) {
+            if is_external_package(&imp_pkg, &rules.external_package_prefixes) {
                 // fall through to forbidden-rule evaluation
             } else if let Some(target_layer) = rules.layer_of(&imp_pkg) {
                 if target_layer != own {

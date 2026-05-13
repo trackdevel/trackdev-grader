@@ -61,6 +61,20 @@ pub struct ArchitectureRules {
     /// when the rules file predates the AST extension.
     pub ast_rules: Vec<AstRule>,
     pub severity: String,
+    /// Package roots that the LAYER classifier in `checker.rs` will
+    /// never assign to a STUDENT layer (framework / JDK packages stay
+    /// off the layered map; cross-layer policy for them belongs in
+    /// `[[forbidden]]` blocks). Defaults to a built-in list; TOML can
+    /// append more via `[external_packages] extras = […]`. Replacement
+    /// is intentionally not supported — a misconfiguration that emptied
+    /// the list would silently re-enable the JPA-entity false-positive
+    /// the guard was introduced to fix.
+    pub external_package_prefixes: Vec<String>,
+    /// Generic wrapper type names whose inner type argument is the
+    /// semantically-interesting type for the AST suppressors (e.g.
+    /// `List<UserDto>` is a DTO at the API boundary). Defaults +
+    /// TOML extras via `[generic_wrappers] extras = […]`.
+    pub generic_wrappers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,10 +88,107 @@ struct RawRules {
     /// Severity used for every emitted violation. Default `WARNING`.
     #[serde(default = "default_severity")]
     severity: String,
+    #[serde(default)]
+    external_packages: RawExternalPackages,
+    #[serde(default)]
+    generic_wrappers: RawGenericWrappers,
 }
 
 fn default_severity() -> String {
     "WARNING".to_string()
+}
+
+/// `[external_packages]` block. `extras` is appended to
+/// [`default_external_package_prefixes`].
+#[derive(Debug, Default, Deserialize)]
+struct RawExternalPackages {
+    #[serde(default)]
+    extras: Vec<String>,
+}
+
+/// `[generic_wrappers]` block. `extras` is appended to
+/// [`default_generic_wrappers`].
+#[derive(Debug, Default, Deserialize)]
+struct RawGenericWrappers {
+    #[serde(default)]
+    extras: Vec<String>,
+}
+
+/// Built-in package roots treated as "framework / JDK, never a STUDENT
+/// layer". Returns a fresh `Vec<String>` each call; the loader extends
+/// it with any TOML `[external_packages] extras`.
+pub fn default_external_package_prefixes() -> Vec<String> {
+    [
+        "java.",
+        "javax.",
+        "jakarta.",
+        "kotlin.",
+        "kotlinx.",
+        "scala.",
+        "groovy.",
+        "android.",
+        "androidx.",
+        "com.android.",
+        "com.google.",
+        "com.fasterxml.",
+        "com.squareup.",
+        "org.springframework.",
+        "org.hibernate.",
+        "org.apache.",
+        "org.junit.",
+        "org.mockito.",
+        "org.slf4j.",
+        "org.aspectj.",
+        "org.jetbrains.",
+        "io.micrometer.",
+        "io.swagger.",
+        "lombok.",
+        "retrofit2.",
+        "okhttp3.",
+        "dagger.",
+        "hilt.",
+        "ch.qos.",
+        "reactor.",
+        "rx.",
+        "io.reactivex.",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+}
+
+/// Built-in generic-wrapper outer-type names. The loader extends this
+/// with any TOML `[generic_wrappers] extras`. `Map` is intentionally
+/// absent — it has two type parameters and unwrapping is ambiguous;
+/// keep it in the stdlib allowlist by its outer name.
+pub fn default_generic_wrappers() -> Vec<String> {
+    [
+        // Spring / reactive
+        "ResponseEntity",
+        "Mono",
+        "Flux",
+        // JDK collections + value containers
+        "Optional",
+        "List",
+        "Collection",
+        "Set",
+        "Iterable",
+        "Iterator",
+        "Stream",
+        "Queue",
+        "Deque",
+        // Spring Data pagination
+        "Page",
+        "Slice",
+        "PageImpl",
+        // async
+        "CompletableFuture",
+        "Future",
+        "Callable",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,11 +237,17 @@ impl ArchitectureRules {
         for raw_ast in raw.ast_rule {
             ast_rules.push(AstRule::from_raw(raw_ast)?);
         }
+        let mut external_package_prefixes = default_external_package_prefixes();
+        external_package_prefixes.extend(raw.external_packages.extras);
+        let mut generic_wrappers = default_generic_wrappers();
+        generic_wrappers.extend(raw.generic_wrappers.extras);
         Ok(Self {
             layers,
             forbidden,
             ast_rules,
             severity: raw.severity,
+            external_package_prefixes,
+            generic_wrappers,
         })
     }
 
@@ -269,5 +386,66 @@ must_not_match = ["org/springframework/web/**", "org/springframework/data/**"]
                 "expected Android v1 rule '{rule_id}' in architecture.toml"
             );
         }
+    }
+
+    #[test]
+    fn external_package_prefixes_default_when_section_absent() {
+        let r = ArchitectureRules::from_toml_str("severity = \"WARNING\"\n").unwrap();
+        let defaults = default_external_package_prefixes();
+        assert_eq!(
+            r.external_package_prefixes, defaults,
+            "missing [external_packages] block must yield the built-in defaults verbatim"
+        );
+    }
+
+    #[test]
+    fn external_package_prefixes_toml_extras_are_appended_to_defaults() {
+        const TOML: &str = r#"
+severity = "WARNING"
+
+[external_packages]
+extras = ["io.netty.", "com.example.legacy."]
+"#;
+        let r = ArchitectureRules::from_toml_str(TOML).unwrap();
+        let defaults = default_external_package_prefixes();
+        assert!(
+            r.external_package_prefixes.len() == defaults.len() + 2,
+            "extras must append, not replace; got: {:?}",
+            r.external_package_prefixes
+        );
+        // Defaults stay in place …
+        assert!(r.external_package_prefixes.iter().any(|p| p == "jakarta."));
+        // … and the extras land at the end.
+        assert!(r.external_package_prefixes.iter().any(|p| p == "io.netty."));
+        assert!(r
+            .external_package_prefixes
+            .iter()
+            .any(|p| p == "com.example.legacy."));
+    }
+
+    #[test]
+    fn generic_wrappers_default_when_section_absent() {
+        let r = ArchitectureRules::from_toml_str("severity = \"WARNING\"\n").unwrap();
+        let defaults = default_generic_wrappers();
+        assert_eq!(r.generic_wrappers, defaults);
+    }
+
+    #[test]
+    fn generic_wrappers_toml_extras_are_appended_to_defaults() {
+        const TOML: &str = r#"
+severity = "WARNING"
+
+[generic_wrappers]
+extras = ["Either", "Result"]
+"#;
+        let r = ArchitectureRules::from_toml_str(TOML).unwrap();
+        let defaults = default_generic_wrappers();
+        assert_eq!(r.generic_wrappers.len(), defaults.len() + 2);
+        // Defaults stay in place …
+        assert!(r.generic_wrappers.iter().any(|w| w == "Optional"));
+        assert!(r.generic_wrappers.iter().any(|w| w == "ResponseEntity"));
+        // … extras land at the end.
+        assert!(r.generic_wrappers.iter().any(|w| w == "Either"));
+        assert!(r.generic_wrappers.iter().any(|w| w == "Result"));
     }
 }

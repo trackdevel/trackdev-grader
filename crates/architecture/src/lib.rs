@@ -192,9 +192,10 @@ pub fn scan_repo_to_db(
         }
         // AST rules (T-P3.1). The scanner already parsed the file; the
         // pre-built tree on `ScannedFile` is reused so each file is read
-        // off disk and parsed exactly once per scan.
+        // off disk and parsed exactly once per scan. `generic_wrappers`
+        // combines built-in defaults with any TOML extras.
         if !rules.ast_rules.is_empty() {
-            for v in ast_rules::check_java_file(&rules.ast_rules, file) {
+            for v in ast_rules::check_java_file(&rules.ast_rules, file, &rules.generic_wrappers) {
                 insert_violation(conn, repo_full_name, &rules.severity, &v)?;
                 written += 1;
             }
