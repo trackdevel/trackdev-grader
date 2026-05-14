@@ -5,9 +5,6 @@ pm_base_url = "https://trackdev.org/api"
 github_org = "udg-pds"
 course_id = 5
 
-# Path to the Claude session library (for LLM evaluation)
-claude_scripts_path = "/home/imartin/Dropbox/work/git/claude/src"
-
 # Sprint dates are fetched per-project from the TrackDev API.
 # This section is optional — only used as fallback for temporal analysis
 # if API dates are unavailable.
@@ -225,7 +222,48 @@ llm_review = false
 judge = "claude-cli"
 model_id = "claude-haiku-4-5-20251001"
 judge_workers = 10
-thinking = "disabled"  # see [architecture] thinking notes
+judge_timeout_seconds = 180
+# `thinking` is consumed only by the deepseek-api backend; with claude-cli or
+# anthropic-api it is a silent no-op. Uncomment if/when switching to
+# `judge = "deepseek-api"`.
+# thinking = "disabled"
+
+# Local-hybrid evaluator. Activate by setting `judge = "local-hybrid"`
+# above. The local pipeline routes every PR through:
+#   short-circuit detectors → BGE-M3 embedding (ollama) → ridge regressor
+#   → triage → (borderline) Salamandra-2B chat (ollama) → persist.
+# Every persisted justification begins with the literal "local:" — the
+# CLI `reset-local-scores` command uses that prefix to invalidate stale
+# rows after retraining. See README §"Local-hybrid PR doc evaluator".
+#
+# This block is optional: every knob has a default, so `[evaluate.local]`
+# can be omitted entirely. The defaults shown match
+# `LocalEvaluateConfig::default()` in crates/core/src/config.rs.
+#
+# [evaluate.local]
+# # Base URL for the ollama HTTP API.
+# ollama_url = "http://127.0.0.1:11434"
+# # Per-call HTTP timeout, in seconds.
+# ollama_timeout_seconds = 120
+# # ollama embedding model tag. Must match the one the trainer was run
+# # against — re-train after changing.
+# embed_model = "bge-m3"
+# # ollama chat model tag for the borderline LLM fallback.
+# llm_model = "hf.co/BSC-LT/salamandra-2b-instruct-GGUF:Q5_K_M"
+# # Forwarded to ollama as `keep_alive`. "0" ejects after each call;
+# # "5m" keeps weights resident if cold-load latency dominates throughput.
+# llm_keep_alive = "0"
+# # NeedsLlm band: total_doc_score predictions inside [low, high] route
+# # to the LLM fallback. Widen to make the regressor purely advisory.
+# pr_total_band_low  = 1.0
+# pr_total_band_high = 5.0
+# # When |predicted_total - nearest_grid_cell| > this, also route to LLM.
+# grid_snap_max = 0.20
+# # Directory holding pr_{title,description,total}.json ridge weights.
+# # Resolved relative to the directory containing course.toml.
+# # Absent dir → regressor disabled; every borderline row persists with
+# # justification "local: regressor-disabled".
+# regressor_dir = "data/regressor"
 
 # Mutation testing (T-P2.4). When `enabled = true` and a build profile
 # sets `mutation_command` (typically `./gradlew pitest --info` for the
