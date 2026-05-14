@@ -1725,6 +1725,7 @@ dependencies = [
  "sprint-grader-core",
  "sprint-grader-curriculum",
  "sprint-grader-evaluate",
+ "sprint-grader-evaluate-local",
  "sprint-grader-orchestration",
  "sprint-grader-process",
  "sprint-grader-quality",
@@ -1822,6 +1823,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprint-grader-evaluate-local"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sprint-grader-core",
+ "sprint-grader-evaluate",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "sprint-grader-orchestration"
 version = "0.1.0"
 dependencies = [
@@ -1839,6 +1856,7 @@ dependencies = [
  "sprint-grader-core",
  "sprint-grader-curriculum",
  "sprint-grader-evaluate",
+ "sprint-grader-evaluate-local",
  "sprint-grader-process",
  "sprint-grader-quality",
  "sprint-grader-repo-analysis",
