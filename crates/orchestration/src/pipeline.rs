@@ -1036,6 +1036,51 @@ pub fn run_pipeline(
     // Keep the schema already applied; workers just call `Connection::open`.
     drop(db);
 
+    // Local-hybrid pre-pass: when `[evaluate] judge = "local-hybrid"`,
+    // score PR docs ONCE across every sprint before the parallel per-
+    // sprint block runs. The per-sprint dispatcher's local-hybrid arm
+    // is a defensive no-op (Invariant C) — the pre-pass owns this judge.
+    // On `Err`, log a warn and fall back by calling `evaluate_prs_heuristic`
+    // for each affected sprint so the report column doesn't stay NULL.
+    if config.evaluate.judge == "local-hybrid" && !flat_sprint_ids.is_empty() {
+        info!(
+            stage = 3,
+            sprints = flat_sprint_ids.len(),
+            "local-hybrid pre-pass: batched PR doc evaluation"
+        );
+        let pre_pass_conn = open_worker_conn(db_path).context("opening pre-pass DB conn")?;
+        match sprint_grader_evaluate_local::run_local_hybrid_batch(
+            &pre_pass_conn,
+            &flat_sprint_ids,
+            config,
+        ) {
+            Ok(stats) => info!(
+                short = stats.short_circuited,
+                regressor = stats.regressor_only,
+                llm = stats.llm_used,
+                "local-hybrid pre-pass done"
+            ),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "local-hybrid pre-pass failed — per-sprint fallback to heuristic"
+                );
+                for &sid in &flat_sprint_ids {
+                    if let Err(fb_err) =
+                        sprint_grader_evaluate::evaluate_prs_heuristic(&pre_pass_conn, sid)
+                    {
+                        warn!(sprint_id = sid, error = %fb_err, "heuristic fallback failed");
+                    }
+                    if let Err(avg_err) =
+                        sprint_grader_evaluate::update_avg_doc_score_pub(&pre_pass_conn, sid)
+                    {
+                        warn!(sprint_id = sid, error = %avg_err, "avg_doc_score refresh failed");
+                    }
+                }
+            }
+        }
+    }
+
     // Stage 3: parallel per-(project, sprint) analysis.
     info!(
         stage = 3,
