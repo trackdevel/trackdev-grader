@@ -98,6 +98,47 @@ fn default_project_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Delete `pr_doc_evaluation` rows whose `justification` begins with the
+/// load-bearing `"local:"` prefix written by the local-hybrid evaluator
+/// (Invariant J in `PLAN_LOCAL_SCORING_v3.md`). When `project_filter` is
+/// `Some(non-empty)`, scope the delete to rows whose linked task lives in
+/// a sprint of one of the named projects; otherwise wipe every local row
+/// regardless of project. Returns the number of rows actually deleted.
+///
+/// `tasks` has no direct `project_id` column; the scoped path joins
+/// through `sprints` (`sprints.project_id` is the canonical owner link).
+fn reset_local_scores_for_projects(
+    conn: &rusqlite::Connection,
+    project_filter: Option<&[String]>,
+) -> rusqlite::Result<usize> {
+    let names = match project_filter {
+        Some(names) if !names.is_empty() => names,
+        _ => {
+            return conn.execute(
+                "DELETE FROM pr_doc_evaluation WHERE justification LIKE 'local:%'",
+                [],
+            );
+        }
+    };
+    let placeholders: String = names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "DELETE FROM pr_doc_evaluation
+         WHERE justification LIKE 'local:%'
+           AND pr_id IN (
+               SELECT DISTINCT pr.id
+               FROM pull_requests pr
+               JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
+               JOIN tasks t ON t.id = tpr.task_id
+               JOIN sprints sp ON sp.id = t.sprint_id
+               JOIN projects p ON p.id = sp.project_id
+               WHERE p.name IN ({placeholders})
+           )"
+    );
+    let params: Vec<&dyn rusqlite::ToSql> =
+        names.iter().map(|n| n as &dyn rusqlite::ToSql).collect();
+    conn.execute(&sql, rusqlite::params_from_iter(params.iter().copied()))
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "sprint-grader",
@@ -513,6 +554,14 @@ enum Command {
         #[arg(long)]
         stack: String,
     },
+    /// Delete `pr_doc_evaluation` rows produced by the local-hybrid
+    /// judge (justification prefix `"local:"`). Project-scope via
+    /// `--projects`; pre-existing Haiku/heuristic rows are untouched so
+    /// operators can mix the two judges across a course's lifetime.
+    ResetLocalScores {
+        #[command(flatten)]
+        projects: ProjectsArg,
+    },
     /// Diff two `grading.db` files table-by-table (dual-run verification).
     DiffDb {
         /// First DB (e.g. Python-produced reference)
@@ -785,15 +834,55 @@ fn main() -> Result<()> {
         Command::Evaluate { projects } => {
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
-            for sid in groups.iter().flat_map(|g| g.sprint_ids.iter().copied()) {
-                sprint_grader_evaluate::run_heuristics_for_sprint_id(&db.conn, sid)
-                    .with_context(|| format!("heuristics failed for sprint_id {sid}"))?;
-                sprint_grader_evaluate::run_llm_evaluation_for_sprint_id(&db.conn, sid, &config)
-                    .with_context(|| format!("llm evaluation failed for sprint_id {sid}"))?;
-                sprint_grader_evaluate::score_task_descriptions_for_sprint_id(
-                    &db.conn, sid, &config,
+            let sprint_ids: Vec<i64> = groups
+                .iter()
+                .flat_map(|g| g.sprint_ids.iter().copied())
+                .collect();
+
+            if config.evaluate.judge == "local-hybrid" {
+                // Local-hybrid fast path: one batched call covers every
+                // sprint at once (no per-sprint LLM round-trip), then we
+                // refresh avg_doc_score per sprint. Mirrors the orchestration
+                // pre-pass in `run_pipeline`; the per-sprint dispatcher's
+                // local-hybrid arm is a defensive no-op (Invariant C).
+                sprint_grader_evaluate::run_heuristics_for_all_sprint_ids(&db.conn, &sprint_ids)
+                    .context("heuristics failed (local-hybrid batched path)")?;
+                sprint_grader_evaluate_local::run_local_hybrid_batch(
+                    &db.conn,
+                    &sprint_ids,
+                    &config,
                 )
-                .with_context(|| format!("task description scoring failed for sprint_id {sid}"))?;
+                .context("local-hybrid PR doc batch failed")?;
+                for sid in &sprint_ids {
+                    sprint_grader_evaluate::update_avg_doc_score_pub(&db.conn, *sid).with_context(
+                        || format!("avg_doc_score refresh failed for sprint_id {sid}"),
+                    )?;
+                    // Invariant T: task descriptions stay on the heuristic
+                    // path under local-hybrid. Mirror the per-sprint
+                    // dispatcher's behaviour explicitly here so the CLI
+                    // surface matches.
+                    sprint_grader_evaluate::score_task_descriptions_for_sprint_id(
+                        &db.conn, *sid, &config,
+                    )
+                    .with_context(|| {
+                        format!("task description scoring failed for sprint_id {sid}")
+                    })?;
+                }
+            } else {
+                for sid in &sprint_ids {
+                    sprint_grader_evaluate::run_heuristics_for_sprint_id(&db.conn, *sid)
+                        .with_context(|| format!("heuristics failed for sprint_id {sid}"))?;
+                    sprint_grader_evaluate::run_llm_evaluation_for_sprint_id(
+                        &db.conn, *sid, &config,
+                    )
+                    .with_context(|| format!("llm evaluation failed for sprint_id {sid}"))?;
+                    sprint_grader_evaluate::score_task_descriptions_for_sprint_id(
+                        &db.conn, *sid, &config,
+                    )
+                    .with_context(|| {
+                        format!("task description scoring failed for sprint_id {sid}")
+                    })?;
+                }
             }
         }
         Command::Quality { projects } => {
@@ -1399,6 +1488,12 @@ fn main() -> Result<()> {
             println!();
             println!("version={} body_hash={}", rubric.version, rubric.body_hash);
         }
+        Command::ResetLocalScores { projects } => {
+            let filter = parse_project_filter(projects.projects);
+            let deleted = reset_local_scores_for_projects(&db.conn, filter.as_deref())
+                .context("reset-local-scores failed")?;
+            info!(deleted, "reset-local-scores removed rows");
+        }
         Command::DiffDb {
             db_a,
             db_b,
@@ -1437,4 +1532,132 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+
+    fn seed_two_team_reset_fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, name TEXT);
+             CREATE TABLE sprints (id INTEGER PRIMARY KEY, project_id INTEGER, name TEXT,
+                                   start_date TEXT, end_date TEXT);
+             CREATE TABLE tasks (id INTEGER PRIMARY KEY, task_key TEXT, name TEXT,
+                                 type TEXT, status TEXT, sprint_id INTEGER,
+                                 assignee_id TEXT, parent_task_id INTEGER);
+             CREATE TABLE pull_requests (id TEXT PRIMARY KEY, pr_number INTEGER,
+                                         repo_full_name TEXT, title TEXT, body TEXT,
+                                         author_id TEXT);
+             CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT,
+                                              PRIMARY KEY (task_id, pr_id));
+             CREATE TABLE pr_doc_evaluation (pr_id TEXT, sprint_id INTEGER,
+                                             title_score REAL, description_score REAL,
+                                             total_doc_score REAL, justification TEXT);
+             INSERT INTO projects (id, slug, name) VALUES (1, 'team-a', 'team-a');
+             INSERT INTO projects (id, slug, name) VALUES (2, 'team-b', 'team-b');
+             INSERT INTO sprints (id, project_id, name, start_date, end_date)
+                 VALUES (10, 1, 'S1', '2026-01-01', '2026-01-14');
+             INSERT INTO sprints (id, project_id, name, start_date, end_date)
+                 VALUES (20, 2, 'S1', '2026-01-01', '2026-01-14');
+             INSERT INTO tasks (id, task_key, name, type, status, sprint_id, assignee_id)
+                 VALUES (100, 'A-1', 'task-A', 'TASK', 'DONE', 10, 'alice');
+             INSERT INTO tasks (id, task_key, name, type, status, sprint_id, assignee_id)
+                 VALUES (200, 'B-1', 'task-B', 'TASK', 'DONE', 20, 'bob');
+             INSERT INTO pull_requests (id, title, body, author_id)
+                 VALUES ('pr-a', 'A title', 'A body', 'alice');
+             INSERT INTO pull_requests (id, title, body, author_id)
+                 VALUES ('pr-b', 'B title', 'B body', 'bob');
+             INSERT INTO task_pull_requests (task_id, pr_id) VALUES (100, 'pr-a');
+             INSERT INTO task_pull_requests (task_id, pr_id) VALUES (200, 'pr-b');",
+        )
+        .unwrap();
+        // Each project gets one local row + one non-local row.
+        for (pr_id, sprint_id, justification) in [
+            ("pr-a", 10, "local: stub"),
+            (
+                "pr-a",
+                10,
+                "Scored by deterministic heuristics (LLM unavailable)",
+            ),
+            ("pr-b", 20, "local: regressor"),
+            (
+                "pr-b",
+                20,
+                "Scored by deterministic heuristics (LLM unavailable)",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO pr_doc_evaluation
+                 (pr_id, sprint_id, title_score, description_score, total_doc_score, justification)
+                 VALUES (?, ?, 0.0, 0.0, 0.0, ?)",
+                params![pr_id, sprint_id, justification],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn count_local_rows(conn: &Connection, pr_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM pr_doc_evaluation
+             WHERE pr_id = ? AND justification LIKE 'local:%'",
+            [pr_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn count_non_local_rows(conn: &Connection, pr_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM pr_doc_evaluation
+             WHERE pr_id = ? AND justification NOT LIKE 'local:%'",
+            [pr_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reset_local_scores_does_not_delete_rows_from_other_projects() {
+        let conn = seed_two_team_reset_fixture();
+        // Sanity: both teams start with one local + one non-local row.
+        assert_eq!(count_local_rows(&conn, "pr-a"), 1);
+        assert_eq!(count_local_rows(&conn, "pr-b"), 1);
+        assert_eq!(count_non_local_rows(&conn, "pr-a"), 1);
+        assert_eq!(count_non_local_rows(&conn, "pr-b"), 1);
+
+        let scope = ["team-a".to_string()];
+        let deleted = reset_local_scores_for_projects(&conn, Some(&scope)).unwrap();
+        assert_eq!(deleted, 1, "exactly one local row should have been removed");
+
+        // Team A: local row gone, non-local row preserved.
+        assert_eq!(count_local_rows(&conn, "pr-a"), 0);
+        assert_eq!(count_non_local_rows(&conn, "pr-a"), 1);
+        // Team B is untouched.
+        assert_eq!(count_local_rows(&conn, "pr-b"), 1);
+        assert_eq!(count_non_local_rows(&conn, "pr-b"), 1);
+    }
+
+    #[test]
+    fn reset_local_scores_unscoped_deletes_all_local_rows() {
+        let conn = seed_two_team_reset_fixture();
+        let deleted = reset_local_scores_for_projects(&conn, None).unwrap();
+        assert_eq!(deleted, 2, "both local rows should have been removed");
+        assert_eq!(count_local_rows(&conn, "pr-a"), 0);
+        assert_eq!(count_local_rows(&conn, "pr-b"), 0);
+        // Non-local rows preserved on both teams.
+        assert_eq!(count_non_local_rows(&conn, "pr-a"), 1);
+        assert_eq!(count_non_local_rows(&conn, "pr-b"), 1);
+    }
+
+    #[test]
+    fn reset_local_scores_empty_filter_is_treated_as_unscoped() {
+        let conn = seed_two_team_reset_fixture();
+        let scope: [String; 0] = [];
+        let deleted = reset_local_scores_for_projects(&conn, Some(&scope)).unwrap();
+        assert_eq!(deleted, 2, "empty filter wipes every local row");
+    }
 }
