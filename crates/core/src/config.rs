@@ -52,7 +52,7 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct EvaluateConfig {
     /// Backend selector. One of `"claude-cli"` (default),
-    /// `"anthropic-api"`, or `"deepseek-api"`.
+    /// `"anthropic-api"`, `"deepseek-api"`, or `"local-hybrid"`.
     pub judge: String,
     /// Pinned model id (e.g. `claude-haiku-4-5-20251001`). REQUIRED in
     /// course.toml; passed verbatim to the CLI via `--model` and to the
@@ -72,6 +72,61 @@ pub struct EvaluateConfig {
     /// in the request body; `None` lets DeepSeek apply its server-side
     /// default. Ignored by `claude-cli` and `anthropic-api` backends.
     pub thinking: Option<String>,
+    /// Local-hybrid evaluator knobs. Consumed only when
+    /// `judge = "local-hybrid"`; populated with defaults otherwise so
+    /// branches that read it (CLI dispatcher, orchestration pre-pass)
+    /// can do so unconditionally.
+    pub local: LocalEvaluateConfig,
+}
+
+/// Knobs for the local-hybrid PR doc evaluator (`judge = "local-hybrid"`).
+/// Lives on `EvaluateConfig` so CLI and orchestration can branch on the
+/// config without importing the `sprint-grader-evaluate-local` crate. The
+/// struct is populated with defaults when the `[evaluate.local]` block is
+/// absent.
+#[derive(Debug, Clone)]
+pub struct LocalEvaluateConfig {
+    /// Base URL for the ollama HTTP API. Default `"http://127.0.0.1:11434"`.
+    pub ollama_url: String,
+    /// Per-call HTTP timeout (seconds). Default 120.
+    pub ollama_timeout_seconds: u64,
+    /// Embedding model tag in ollama. Default `"bge-m3"`.
+    pub embed_model: String,
+    /// LLM model tag in ollama. Default
+    /// `"hf.co/BSC-LT/salamandra-2b-instruct-GGUF:Q5_K_M"`.
+    pub llm_model: String,
+    /// Forwarded to ollama as `keep_alive`. `"0"` ejects after each call;
+    /// `"5m"` keeps weights resident for 5 minutes after the last call.
+    pub llm_keep_alive: String,
+    /// Lower bound of the NeedsLlm triage band (total_doc_score). Default 1.0.
+    pub pr_total_band_low: f64,
+    /// Upper bound of the NeedsLlm triage band (total_doc_score). Default 5.0.
+    pub pr_total_band_high: f64,
+    /// Borderline-snap distance threshold: when the regressor total falls
+    /// further than this from the nearest grid cell, route to NeedsLlm.
+    /// Default 0.20.
+    pub grid_snap_max: f64,
+    /// Directory holding `pr_{title,description,total}.json` ridge weights.
+    /// Resolved relative to the directory containing `course.toml` when not
+    /// absolute. Default `"data/regressor"`. Absent dir → regressor disabled
+    /// (everything routes to LLM or short-circuit).
+    pub regressor_dir: std::path::PathBuf,
+}
+
+impl Default for LocalEvaluateConfig {
+    fn default() -> Self {
+        Self {
+            ollama_url: "http://127.0.0.1:11434".to_string(),
+            ollama_timeout_seconds: 120,
+            embed_model: "bge-m3".to_string(),
+            llm_model: "hf.co/BSC-LT/salamandra-2b-instruct-GGUF:Q5_K_M".to_string(),
+            llm_keep_alive: "0".to_string(),
+            pr_total_band_low: 1.0,
+            pr_total_band_high: 5.0,
+            grid_snap_max: 0.20,
+            regressor_dir: std::path::PathBuf::from("data/regressor"),
+        }
+    }
 }
 
 /// Sentinel returned by [`EvaluateConfig::default`]. It deliberately
@@ -89,6 +144,7 @@ impl Default for EvaluateConfig {
             judge_timeout_seconds: 180,
             claude_cli_path: "claude".to_string(),
             thinking: None,
+            local: LocalEvaluateConfig::default(),
         }
     }
 }
@@ -502,6 +558,30 @@ struct RawEvaluate {
     claude_cli_path: Option<String>,
     #[serde(default)]
     thinking: Option<String>,
+    #[serde(default)]
+    local: RawEvaluateLocal,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawEvaluateLocal {
+    #[serde(default)]
+    ollama_url: Option<String>,
+    #[serde(default)]
+    ollama_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    embed_model: Option<String>,
+    #[serde(default)]
+    llm_model: Option<String>,
+    #[serde(default)]
+    llm_keep_alive: Option<String>,
+    #[serde(default)]
+    pr_total_band_low: Option<f64>,
+    #[serde(default)]
+    pr_total_band_high: Option<f64>,
+    #[serde(default)]
+    grid_snap_max: Option<f64>,
+    #[serde(default)]
+    regressor_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1251,6 +1331,54 @@ impl Config {
                     ));
                 }
                 let eval_thinking = parse_thinking_mode(raw.evaluate.thinking, "evaluate")?;
+                let local_defaults = LocalEvaluateConfig::default();
+                let local = LocalEvaluateConfig {
+                    ollama_url: raw
+                        .evaluate
+                        .local
+                        .ollama_url
+                        .unwrap_or(local_defaults.ollama_url),
+                    ollama_timeout_seconds: raw
+                        .evaluate
+                        .local
+                        .ollama_timeout_seconds
+                        .unwrap_or(local_defaults.ollama_timeout_seconds),
+                    embed_model: raw
+                        .evaluate
+                        .local
+                        .embed_model
+                        .unwrap_or(local_defaults.embed_model),
+                    llm_model: raw
+                        .evaluate
+                        .local
+                        .llm_model
+                        .unwrap_or(local_defaults.llm_model),
+                    llm_keep_alive: raw
+                        .evaluate
+                        .local
+                        .llm_keep_alive
+                        .unwrap_or(local_defaults.llm_keep_alive),
+                    pr_total_band_low: raw
+                        .evaluate
+                        .local
+                        .pr_total_band_low
+                        .unwrap_or(local_defaults.pr_total_band_low),
+                    pr_total_band_high: raw
+                        .evaluate
+                        .local
+                        .pr_total_band_high
+                        .unwrap_or(local_defaults.pr_total_band_high),
+                    grid_snap_max: raw
+                        .evaluate
+                        .local
+                        .grid_snap_max
+                        .unwrap_or(local_defaults.grid_snap_max),
+                    regressor_dir: raw
+                        .evaluate
+                        .local
+                        .regressor_dir
+                        .unwrap_or(local_defaults.regressor_dir),
+                };
                 EvaluateConfig {
                     judge: raw.evaluate.judge.unwrap_or(eval_defaults.judge),
                     model_id: eval_model_id,
@@ -1268,6 +1396,7 @@ impl Config {
                         .claude_cli_path
                         .unwrap_or(eval_defaults.claude_cli_path),
                     thinking: eval_thinking,
+                    local,
                 }
             },
         })
@@ -1601,5 +1730,56 @@ contribution_imbalance_stddev = 1.5
         // Untouched keys keep defaults.
         let defaults = DetectorThresholdsConfig::default();
         assert_eq!(cfg.detector_thresholds.gini_crit, defaults.gini_crit);
+    }
+
+    #[test]
+    fn local_evaluate_defaults_populate_when_block_absent() {
+        // MINIMAL_TOML omits [evaluate.local]; every knob must take the
+        // LocalEvaluateConfig::default() value so the dispatcher in CLI/
+        // orchestration can read it unconditionally.
+        let tmp = tempfile::tempdir().unwrap();
+        write_config(tmp.path(), MINIMAL_TOML);
+        let cfg = Config::load(tmp.path()).expect("load minimal config");
+        let local = &cfg.evaluate.local;
+        let defaults = LocalEvaluateConfig::default();
+        assert_eq!(local.ollama_url, defaults.ollama_url);
+        assert_eq!(
+            local.ollama_timeout_seconds,
+            defaults.ollama_timeout_seconds
+        );
+        assert_eq!(local.embed_model, defaults.embed_model);
+        assert_eq!(local.llm_model, defaults.llm_model);
+        assert_eq!(local.llm_keep_alive, defaults.llm_keep_alive);
+        assert_eq!(local.pr_total_band_low, defaults.pr_total_band_low);
+        assert_eq!(local.pr_total_band_high, defaults.pr_total_band_high);
+        assert_eq!(local.grid_snap_max, defaults.grid_snap_max);
+        assert_eq!(local.regressor_dir, defaults.regressor_dir);
+    }
+
+    #[test]
+    fn local_evaluate_overrides_round_trip_through_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_TOML}\n[evaluate.local]\nollama_url = \"http://10.0.0.5:11434\"\n\
+             ollama_timeout_seconds = 60\nembed_model = \"bge-small\"\n\
+             llm_model = \"llama3:8b\"\nllm_keep_alive = \"5m\"\n\
+             pr_total_band_low = 0.5\npr_total_band_high = 5.5\n\
+             grid_snap_max = 0.10\nregressor_dir = \"data/custom-regressor\"\n"
+        );
+        write_config(tmp.path(), &body);
+        let cfg = Config::load(tmp.path()).expect("load overridden config");
+        let local = &cfg.evaluate.local;
+        assert_eq!(local.ollama_url, "http://10.0.0.5:11434");
+        assert_eq!(local.ollama_timeout_seconds, 60);
+        assert_eq!(local.embed_model, "bge-small");
+        assert_eq!(local.llm_model, "llama3:8b");
+        assert_eq!(local.llm_keep_alive, "5m");
+        assert_eq!(local.pr_total_band_low, 0.5);
+        assert_eq!(local.pr_total_band_high, 5.5);
+        assert_eq!(local.grid_snap_max, 0.10);
+        assert_eq!(
+            local.regressor_dir,
+            std::path::PathBuf::from("data/custom-regressor")
+        );
     }
 }
