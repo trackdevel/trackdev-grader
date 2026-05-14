@@ -27,7 +27,7 @@ use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::Value;
 use sprint_grader_core::Config;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::claude_cli_client::ClaudeCliClient;
 use crate::deepseek_client::DeepseekClient;
@@ -83,7 +83,7 @@ struct TaskEvalResponse {
 // so the binary stays self-contained, but each rubric lives in its own .md
 // file for easy per-semester tuning without touching Rust.
 
-const RUBRIC_PR: &str = include_str!("../assets/prompts/rubric_pr.md");
+pub const RUBRIC_PR: &str = include_str!("../assets/prompts/rubric_pr.md");
 const RUBRIC_TASK: &str = include_str!("../assets/prompts/rubric_task.md");
 
 // ---- Heuristic scoring (used when no API key is set) ----
@@ -274,7 +274,10 @@ fn heuristic_task_description_score(name: Option<&str>) -> f64 {
 /// wrap JSON in a markdown fence or add trailing prose. Extract the first `{...}`
 /// balanced block and try to parse it; fall through to a plain parse if that
 /// fails (which also works for pure JSON replies).
-fn extract_json_object(s: &str) -> Option<Value> {
+///
+/// `pub` for downstream crates that share the same parse contract — notably
+/// `sprint-grader-evaluate-local`'s LLM fallback path. Stable API.
+pub fn extract_json_object(s: &str) -> Option<Value> {
     // Strip common ```json fences.
     let trimmed = s.trim();
     let candidates = [
@@ -337,6 +340,21 @@ pub fn run_pr_doc_evaluation_for_sprint_id(
         count += evaluate_prs_heuristic(conn, sprint_id)?;
     } else {
         match config.evaluate.judge.as_str() {
+            "local-hybrid" => {
+                // Defensive no-op: the orchestration / CLI dispatch routes
+                // local-hybrid through evaluate_local::run_local_hybrid_batch
+                // (the pre-pass) before this per-sprint loop runs. Reaching
+                // this arm means something called the per-sprint dispatcher
+                // without owning the routing — we return Ok(0) so we don't
+                // crash and don't double-score; orchestration's failure
+                // path falls back to `evaluate_prs_heuristic` explicitly.
+                debug!(
+                    sprint_id,
+                    "local-hybrid arm reached in per-sprint dispatcher; \
+                     pre-pass owns this judge"
+                );
+                return Ok(0);
+            }
             "claude-cli" => {
                 if !ClaudeCliClient::is_available(&config.evaluate.claude_cli_path) {
                     info!(
@@ -737,7 +755,12 @@ fn evaluate_prs_via_cli(
     Ok(count)
 }
 
-fn evaluate_prs_heuristic(conn: &Connection, sprint_id: i64) -> rusqlite::Result<usize> {
+/// Write deterministic heuristic scores into `pr_doc_evaluation` for
+/// every PR in this sprint. Idempotent via a `SELECT 1 ... WHERE pr_id =
+/// ? AND sprint_id = ?` guard. Exposed `pub` so orchestration's
+/// local-hybrid pre-pass-failure recovery path can call it directly
+/// without rebuilding the full evaluate config dispatch.
+pub fn evaluate_prs_heuristic(conn: &Connection, sprint_id: i64) -> rusqlite::Result<usize> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT pr.id, pr.title, pr.body
          FROM pull_requests pr
@@ -789,6 +812,34 @@ fn evaluate_prs_heuristic(conn: &Connection, sprint_id: i64) -> rusqlite::Result
     Ok(count)
 }
 
+/// Thin public wrapper around the crate-private `update_avg_doc_score` so
+/// `sprint-grader-cli`'s `Command::Evaluate` fast path (local-hybrid) can
+/// refresh per-student `avg_doc_score` without re-routing through the
+/// per-sprint dispatcher. Kept as a separate `_pub` name so the private
+/// helper remains the canonical implementation.
+pub fn update_avg_doc_score_pub(conn: &Connection, sprint_id: i64) -> rusqlite::Result<()> {
+    update_avg_doc_score(conn, sprint_id)
+}
+
+/// Run [`crate::heuristics::run_heuristics_for_sprint_id`] across every
+/// sprint in `sprint_ids` and collapse the result counts. Used by the
+/// local-hybrid CLI fast path so heuristic flag rows are written before
+/// the embed/ridge pass runs. Errors propagate from the first failing
+/// sprint.
+pub fn run_heuristics_for_all_sprint_ids(
+    conn: &Connection,
+    sprint_ids: &[i64],
+) -> rusqlite::Result<(usize, usize)> {
+    let mut empty_total = 0usize;
+    let mut generic_total = 0usize;
+    for &sid in sprint_ids {
+        let (empty, generic) = crate::heuristics::run_heuristics_for_sprint_id(conn, sid)?;
+        empty_total += empty;
+        generic_total += generic;
+    }
+    Ok((empty_total, generic_total))
+}
+
 fn update_avg_doc_score(conn: &Connection, sprint_id: i64) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT t.assignee_id FROM tasks t
@@ -833,6 +884,13 @@ pub fn score_task_descriptions_for_sprint_id(
         return Ok(0);
     }
     match config.evaluate.judge.as_str() {
+        "local-hybrid" => {
+            // Invariant T: local-hybrid does not score task descriptions
+            // with any LLM or regressor. Delegate to the deterministic
+            // heuristic so the CLI's `evaluate` subcommand still writes
+            // task rows under this judge.
+            evaluate_tasks_heuristic(conn, sprint_id)
+        }
         "claude-cli" => {
             if !ClaudeCliClient::is_available(&config.evaluate.claude_cli_path) {
                 info!(
