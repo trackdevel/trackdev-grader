@@ -1,6 +1,9 @@
 /target
 **/*.rs.bk
 /data
+# Local-hybrid PR evaluator ridge weights live here; the committed
+# fixtures for `crates/evaluate_local/tests/` are separate and tracked.
+/data/regressor/
 Cargo.lock.bak
 CLAUDE.md
 *.code-workspace
