@@ -80,6 +80,7 @@ runnable and testable.
 | [`quality`](crates/quality) | 5a | Cyclomatic + cognitive complexity, Halstead volume / difficulty / effort, SATD (self-admitting technical debt) scanning, sprint-over-sprint deltas. |
 | [`process_stage`](crates/process_stage) | 5b | Sprint planning quality (velocity, commitment accuracy), PR regularity scoring (sigmoid against deadline), temporal patterns (commit entropy, weekend / night work), team collaboration network (review reciprocity, density). |
 | [`evaluate`](crates/evaluate) | 4 | Heuristic flags for empty / generic PR descriptions; optional Claude API call to rate title (0–2) and description (0–4) per [`config/rubric.md`](config/rubric.md). Falls back cleanly when no API key is configured. |
+| [`evaluate_local`](crates/evaluate_local) | 4 (alt.) | `judge = "local-hybrid"` backend: BGE-M3 embedding + per-axis ridge regression + Salamandra-2B chat fallback for borderline PRs, all routed through a local ollama daemon over HTTP. Drops Claude Max quota consumption to ~0% in steady state. See [Local-hybrid PR doc evaluator](#local-hybrid-pr-doc-evaluator) below. |
 | [`curriculum`](crates/curriculum) | knowledge base | Parses LaTeX slide decks to extract the set of concepts / imports taught in each sprint. Used downstream by `ai_detect` to flag code that uses material the team hasn't been taught yet. |
 | [`repo_analysis`](crates/repo_analysis) | 6 | Clusters tasks by `(stack, layer, action)` with MAD-based outlier detection; classifies merged PRs into submission timing tiers (early / on-time / late / cramming). |
 | [`ai_detect`](crates/ai_detect) | 7 | Behavioural signals (single-commit dumps, fix-up patterns, line-per-minute productivity), per-student stylometric baseline + deviation, curriculum violations, text-consistency score, and Bayesian fusion into per-PR / per-file / per-student AI-usage probabilities. |
@@ -129,6 +130,56 @@ PR documentation evaluation by variant:
 
 `go-quick` previously skipped PR doc eval entirely; as of T-P0.2 it now
 populates `student_sprint_metrics.avg_doc_score` from the heuristic scorer.
+
+### Local-hybrid PR doc evaluator
+
+For courses running on a Claude Max subscription, the per-PR `claude --print`
+calls in the `claude-cli` backend consume the 5-hour session budget linearly.
+`judge = "local-hybrid"` in `[evaluate]` routes scoring through a local
+pipeline backed by an [ollama](https://ollama.com) daemon instead:
+
+```
+short-circuit detectors → BGE-M3 embedding (ollama HTTP)
+                       → ridge regression (Rust dot product, JSON weights)
+                       → triage: Snap | NeedsLlm | ShortCircuit
+                       → (NeedsLlm) Salamandra-2B-Instruct (ollama chat)
+                       → persist row + update avg_doc_score
+```
+
+Operator setup:
+
+```bash
+# 1. Pull the embedding + chat models into ollama.
+ollama pull bge-m3
+ollama pull hf.co/BSC-LT/salamandra-2b-instruct-GGUF:Q5_K_M
+
+# 2. Cold start: produce ~150 labelled rows with the cloud judge once.
+#    Set `[evaluate] judge = "claude-cli"` in course.toml.
+sprint-grader run-all --today <YYYY-MM-DD>
+
+# 3. Train the regressor on those labels (writes data/regressor/pr_*.json).
+python tools/train_regressor/train.py \
+    --db data/entregues/grading.db \
+    --ollama http://127.0.0.1:11434 \
+    --embed-model bge-m3 \
+    --out data/regressor
+
+# 4. Flip the judge and run normally — no Claude calls in steady state.
+#    Set `[evaluate] judge = "local-hybrid"`.
+sprint-grader run-all --today <YYYY-MM-DD>
+```
+
+After rubric changes (or new sprint labels), retrain the regressor and run
+`sprint-grader reset-local-scores [--projects …]` to invalidate previously
+persisted local rows; pre-existing Haiku-judged rows are untouched. The
+invalidation discriminator is the `"local:"` prefix on
+`pr_doc_evaluation.justification` — never edit a justification by hand to
+drop that prefix.
+
+See [`tools/train_regressor/README.md`](tools/train_regressor/README.md) for
+the full retraining workflow + calibration thresholds. The Spring/Anthropic
+fallback path is unchanged — `judge = "claude-cli"` / `"anthropic-api"` /
+`"deepseek-api"` all still work and ignore the local pipeline entirely.
 
 All variants use a `rayon` thread pool to fan sprints out across worker
 connections (SQLite WAL mode allows concurrent readers + serialised writers).
@@ -441,6 +492,7 @@ Orchestration / utility:
 | `sync-reports [--push]` | Regenerate `REPORT.md` for every sprint up to today; optionally commit + push to each team's `main`. |
 | `purge-cache --line-metrics --survival --compilation --doc-eval [--dry-run] [--require-clean-tree]` | Selectively drop derived rows so the next run recomputes them. `--dry-run` rewrites each `DELETE` as a `SELECT COUNT(*)` over the same predicate and prints projected row counts table-by-table without modifying the DB. `--require-clean-tree` is the same guard as on `go`. |
 | `debug-pr-lines` | Dump LAT/LAR/LS computation for individual PRs (diagnostics). |
+| `reset-local-scores [--projects …]` | Delete `pr_doc_evaluation` rows written by the local-hybrid judge (`justification LIKE 'local:%'`). Non-local rows (Haiku, heuristic) are preserved; project-scoped via `--projects`. Run after retraining the regressor to invalidate stale local scores. |
 | `diff-db DB_A DB_B [--tables …] [--derived-only] [--ignore-cols T:c1,c2] [--dump-diffs]` | Table-by-table checksum diff between two `grading.db` files; exits non-zero on mismatch. Used to verify pipeline changes don't drift. |
 
 Global flags accepted by every command:
