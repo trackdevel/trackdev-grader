@@ -23,6 +23,7 @@ sprint-grader-survival = { path = "../survival" }
 sprint-grader-compile = { path = "../compile_stage" }
 sprint-grader-analyze = { path = "../analyze" }
 sprint-grader-evaluate = { path = "../evaluate" }
+sprint-grader-evaluate-local = { path = "../evaluate_local" }
 sprint-grader-quality = { path = "../quality" }
 sprint-grader-process = { path = "../process_stage" }
 sprint-grader-curriculum = { path = "../curriculum" }
