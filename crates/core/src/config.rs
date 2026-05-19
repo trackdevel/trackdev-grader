@@ -384,6 +384,17 @@ pub struct BuildConfig {
     pub max_parallel_builds: u32,
     pub stderr_max_chars: u32,
     pub skip_already_tested: bool,
+    pub worker_heap_mb: u32,
+    /// When `true`, builds reuse a persistent Gradle daemon JVM across
+    /// PRs (faster cold-start). When `false`, every `./gradlew` invocation
+    /// starts a fresh JVM that exits and releases all memory on completion
+    /// (safer against accumulation; ~15-25 s slower per build).
+    ///
+    /// Default `false`: overnight runs through hundreds of PRs accumulate
+    /// daemon classloaders and native allocations across builds, which is
+    /// the root cause of system OOM events. Iterative day-time use can set
+    /// this to `true` for speed.
+    pub use_daemon: bool,
 }
 
 impl Default for BuildConfig {
@@ -392,6 +403,8 @@ impl Default for BuildConfig {
             max_parallel_builds: 5,
             stderr_max_chars: 2000,
             skip_already_tested: true,
+            worker_heap_mb: 3072,
+            use_daemon: false,
         }
     }
 }
@@ -719,6 +732,8 @@ struct RawBuild {
     max_parallel_builds: Option<u32>,
     stderr_max_chars: Option<u32>,
     skip_already_tested: Option<bool>,
+    worker_heap_mb: Option<u32>,
+    use_daemon: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1026,6 +1041,11 @@ impl Config {
                 .build
                 .skip_already_tested
                 .unwrap_or(build_defaults.skip_already_tested),
+            worker_heap_mb: raw
+                .build
+                .worker_heap_mb
+                .unwrap_or(build_defaults.worker_heap_mb),
+            use_daemon: raw.build.use_daemon.unwrap_or(build_defaults.use_daemon),
         };
 
         let build_profiles: Vec<BuildProfile> = raw
