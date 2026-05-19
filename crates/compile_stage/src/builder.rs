@@ -992,6 +992,62 @@ fn get_reviewer_ids(conn: &Connection, pr_id: &str) -> Vec<String> {
     rows.filter_map(Result::ok).collect()
 }
 
+/// Marker prepended to gradle.properties files written by the compile
+/// worker. Used to distinguish a grader-owned file from a hand-edited
+/// one so a user-managed gradle.properties is never clobbered.
+const GRADER_PROPERTIES_MARKER: &str = "# sprint-grader: managed gradle.properties\n";
+
+/// Default Kotlin daemon heap as a fraction of the worker heap. Kept
+/// modest so the Kotlin daemon and the main Gradle daemon together
+/// stay below the per-worker memory budget.
+fn kotlin_daemon_heap_mb(worker_heap_mb: u32) -> u32 {
+    (worker_heap_mb / 2).max(256)
+}
+
+/// Write a conservative `gradle.properties` into a per-worker
+/// GRADLE_USER_HOME. Caps the daemon JVM heap and (when `use_daemon`
+/// is false) disables the Gradle daemon entirely so every `./gradlew`
+/// invocation runs in a fresh JVM and releases all memory on exit.
+///
+/// Disabling the daemon is the robust fix for system OOM during
+/// long-running overnight backfills: with the daemon on, a worker
+/// grinds through 100+ PRs in a single JVM, and Gradle/AGP/Kotlin
+/// classloader caches plus native (off-heap) allocations grow
+/// monotonically until the host's free memory is exhausted. The
+/// `-Xmx` cap bounds Java heap but NOT native memory.
+///
+/// Idempotent: refreshes the file when our marker is present so config
+/// changes propagate, but never overwrites a hand-edited file.
+pub fn write_worker_gradle_properties(
+    home: &Path,
+    worker_heap_mb: u32,
+    use_daemon: bool,
+) -> std::io::Result<()> {
+    let path = home.join("gradle.properties");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if !existing.starts_with(GRADER_PROPERTIES_MARKER) {
+            // User-managed file — don't touch.
+            return Ok(());
+        }
+    }
+    let kotlin_mb = kotlin_daemon_heap_mb(worker_heap_mb);
+    let daemon_line = if use_daemon { "true" } else { "false" };
+    let content = format!(
+        "{GRADER_PROPERTIES_MARKER}\
+         # Daemon JVM heap caps written by sprint-grader so a single Gradle\n\
+         # build can't OOM the host. Sourced from `[build] worker_heap_mb`\n\
+         # and `[build] use_daemon` in course.toml. Delete this file (or\n\
+         # remove the marker line above) to opt out and revert to Gradle\n\
+         # defaults.\n\
+         org.gradle.daemon={daemon_line}\n\
+         org.gradle.jvmargs=-Xmx{worker_heap_mb}m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8\n\
+         kotlin.daemon.jvmargs=-Xmx{kotlin_mb}m\n\
+         org.gradle.parallel=false\n\
+         org.gradle.workers.max=2\n"
+    );
+    std::fs::write(path, content)
+}
+
 /// Single-sprint convenience wrapper. Most callers should prefer
 /// [`check_compilations_parallel`] which takes `&[sprint_id]` and
 /// batches every PR across every sprint into one rayon pool.
@@ -1005,6 +1061,8 @@ pub fn check_sprint_compilations_parallel(
     stderr_max_chars: usize,
     skip_tested: bool,
     mutation_enabled: bool,
+    worker_heap_mb: u32,
+    use_daemon: bool,
     pr_number_filter: Option<&[i64]>,
     skip_recent_within: Option<chrono::Duration>,
 ) -> rusqlite::Result<CompileSummary> {
@@ -1017,6 +1075,8 @@ pub fn check_sprint_compilations_parallel(
         stderr_max_chars,
         skip_tested,
         mutation_enabled,
+        worker_heap_mb,
+        use_daemon,
         pr_number_filter,
         skip_recent_within,
     )
@@ -1045,6 +1105,8 @@ pub fn check_compilations_parallel(
     stderr_max_chars: usize,
     skip_tested: bool,
     mutation_enabled: bool,
+    worker_heap_mb: u32,
+    use_daemon: bool,
     pr_number_filter: Option<&[i64]>,
     skip_recent_within: Option<chrono::Duration>,
 ) -> rusqlite::Result<CompileSummary> {
@@ -1252,6 +1314,31 @@ pub fn check_compilations_parallel(
     if let Err(e) = std::fs::create_dir_all(&gradle_homes_root) {
         warn!(path = %gradle_homes_root.display(), error = %e,
               "could not create per-worker gradle home root; builds will share ~/.gradle");
+    }
+
+    // Pre-create each worker's GRADLE_USER_HOME and seed a conservative
+    // gradle.properties that caps the daemon JVM heap. Without this cap the
+    // daemon's heap grows across PRs and a Sprint-N build can OOM the host
+    // even at `max_parallel_builds = 1`.
+    for worker_idx in 0..max_workers.max(1) {
+        let worker_home = gradle_homes_root.join(format!("w{worker_idx}"));
+        if let Err(e) = std::fs::create_dir_all(&worker_home) {
+            warn!(
+                path = %worker_home.display(),
+                worker = worker_idx,
+                error = %e,
+                "could not create per-worker gradle home"
+            );
+            continue;
+        }
+        if let Err(e) = write_worker_gradle_properties(&worker_home, worker_heap_mb, use_daemon) {
+            warn!(
+                path = %worker_home.display(),
+                worker = worker_idx,
+                error = %e,
+                "could not write per-worker gradle.properties; daemon will run with Gradle defaults"
+            );
+        }
     }
 
     // Run the actual builds off the SQLite connection (Connection is not Send),
@@ -1683,5 +1770,67 @@ mod tests {
         assert_eq!(build_status_label(&timeout), "FAIL");
         assert_eq!(build_failure_reason(&pass), None);
         assert_eq!(build_failure_reason(&timeout), Some("timeout"));
+    }
+
+    #[test]
+    fn worker_gradle_properties_writes_heap_cap_into_fresh_home() {
+        let home = tempfile::tempdir().unwrap();
+        write_worker_gradle_properties(home.path(), 1536, true).unwrap();
+        let body = std::fs::read_to_string(home.path().join("gradle.properties")).unwrap();
+        assert!(body.starts_with(GRADER_PROPERTIES_MARKER));
+        assert!(body.contains("-Xmx1536m"));
+        // Kotlin daemon defaults to half the worker heap, floor 256.
+        assert!(body.contains("kotlin.daemon.jvmargs=-Xmx768m"));
+        assert!(body.contains("org.gradle.parallel=false"));
+    }
+
+    #[test]
+    fn worker_gradle_properties_refreshes_when_marker_present() {
+        let home = tempfile::tempdir().unwrap();
+        // First write at 1024 MB.
+        write_worker_gradle_properties(home.path(), 1024, true).unwrap();
+        // Second write at 4096 MB must overwrite, not append.
+        write_worker_gradle_properties(home.path(), 4096, true).unwrap();
+        let body = std::fs::read_to_string(home.path().join("gradle.properties")).unwrap();
+        assert!(body.contains("-Xmx4096m"));
+        assert!(!body.contains("-Xmx1024m"));
+    }
+
+    #[test]
+    fn worker_gradle_properties_leaves_user_managed_files_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let original = "org.gradle.jvmargs=-Xmx8g\norg.gradle.parallel=true\n";
+        std::fs::write(home.path().join("gradle.properties"), original).unwrap();
+        write_worker_gradle_properties(home.path(), 1024, true).unwrap();
+        let body = std::fs::read_to_string(home.path().join("gradle.properties")).unwrap();
+        assert_eq!(body, original, "user-managed file must not be rewritten");
+    }
+
+    #[test]
+    fn worker_gradle_properties_emits_daemon_false_when_requested() {
+        let home = tempfile::tempdir().unwrap();
+        write_worker_gradle_properties(home.path(), 2048, false).unwrap();
+        let body = std::fs::read_to_string(home.path().join("gradle.properties")).unwrap();
+        assert!(
+            body.contains("org.gradle.daemon=false"),
+            "use_daemon=false must emit org.gradle.daemon=false: {body}"
+        );
+        assert!(!body.contains("org.gradle.daemon=true"));
+    }
+
+    #[test]
+    fn worker_gradle_properties_emits_daemon_true_when_requested() {
+        let home = tempfile::tempdir().unwrap();
+        write_worker_gradle_properties(home.path(), 2048, true).unwrap();
+        let body = std::fs::read_to_string(home.path().join("gradle.properties")).unwrap();
+        assert!(body.contains("org.gradle.daemon=true"));
+    }
+
+    #[test]
+    fn kotlin_daemon_heap_keeps_floor_above_256() {
+        assert_eq!(kotlin_daemon_heap_mb(2048), 1024);
+        assert_eq!(kotlin_daemon_heap_mb(1024), 512);
+        // Floor: even with a tiny worker_heap_mb we never go below 256 MB.
+        assert_eq!(kotlin_daemon_heap_mb(64), 256);
     }
 }
