@@ -20,13 +20,18 @@ from pathlib import Path
 import numpy as np
 import requests
 from scipy.stats import spearmanr
-from sklearn.linear_model import Ridge
-from sklearn.model_selection import train_test_split
+from sklearn.linear_model import RidgeCV
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 # Mirror of `crates/evaluate_local/src/pipeline.rs::EMBED_BATCH`. Keep in
 # sync; throughput-only knob — does not affect determinism.
 EMBED_BATCH = 32
 MIN_TRAIN_DEFAULT = 20
+
+# Log-spaced α grid for RidgeCV's leave-one-out GCV. Spans 3.5 orders of
+# magnitude around α=1, dense enough to land on a well-calibrated value
+# at any plausible (samples, features) ratio without burning compute.
+DEFAULT_ALPHAS = (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
 
 import sqlite3
 
@@ -83,6 +88,45 @@ def build_inputs(rows):
     return inputs
 
 
+def dedupe_by_pr(rows):
+    """Collapse multi-row PRs into a single representative row with
+    averaged labels.
+
+    The trainer's SQL joins through task_pull_requests, so a PR linked
+    to N tasks yields N rows — each row has its OWN Claude scoring,
+    independent of the others. In practice Claude at temp=0 has ~0.4
+    point intra-PR spread (diagnostic on the current corpus: 54 % of
+    PRs are multi-labelled; avg spread is 0.40; 9 PRs have ≥2.0
+    spread). Ridge fits every row as independent ground truth, so the
+    residual stddev floor is bounded by this label noise.
+
+    Deduping here breaks training-inference parity in a minor way:
+    production still emits one pr_doc_evaluation row per (PR, task),
+    but those rows have near-identical embedder inputs (task_name +
+    parent_story prefixes are short relative to the rubric content),
+    so they get near-identical predictions. The resulting per-PR
+    score is more stable, not less.
+
+    Representative row choice is deterministic: lowest sprint_id, then
+    alphabetical task_name. Labels are simple averages across the
+    group."""
+    groups: dict[str, list] = {}
+    for row in rows:
+        groups.setdefault(row[0], []).append(row)
+    deduped = []
+    for pr_id, group in groups.items():
+        rep = sorted(group, key=lambda r: (r[1], r[4] or ""))[0]
+        n = len(group)
+        title_avg = sum(r[6] for r in group) / n
+        desc_avg = sum(r[7] for r in group) / n
+        total_avg = sum(r[8] for r in group) / n
+        deduped.append(
+            (rep[0], rep[1], rep[2], rep[3], rep[4], rep[5], title_avg, desc_avg, total_avg)
+        )
+    deduped.sort(key=lambda r: r[0])
+    return deduped
+
+
 def embed_batch(ollama_url: str, model: str, inputs: list[str]) -> list[list[float]]:
     """POST /api/embed with three-attempt exponential backoff."""
     url = ollama_url.rstrip("/") + "/api/embed"
@@ -124,11 +168,16 @@ def fit_and_save(
     embed_model: str,
     dim: int,
 ) -> dict:
-    """Fit a Ridge head and persist it as `pr_<name>.json` in the on-disk
-    shape `RidgeHead::load` expects."""
-    model = Ridge(alpha=1.0).fit(X, y)
+    """Fit a RidgeCV head and persist it as `pr_<name>.json` in the
+    on-disk shape `RidgeHead::load` expects.
+
+    Uses leave-one-out GCV across DEFAULT_ALPHAS to pick the
+    regularisation strength. The chosen α is written to the payload as
+    `alpha` for auditability; the Rust loader ignores unknown fields."""
+    model = RidgeCV(alphas=DEFAULT_ALPHAS).fit(X, y)
     coefficients = model.coef_.astype(float).tolist()
     intercept = float(model.intercept_)
+    chosen_alpha = float(model.alpha_)
     residuals = y - model.predict(X)
     residual_stddev = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else 0.0
     payload = {
@@ -137,6 +186,7 @@ def fit_and_save(
         "intercept": intercept,
         "coefficients": coefficients,
         "residual_stddev": residual_stddev,
+        "alpha": chosen_alpha,
         "n_train": int(X.shape[0]),
         "trained_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
     }
@@ -181,6 +231,12 @@ def parse_args() -> argparse.Namespace:
         default=0.2,
         help="held-out fraction (default 0.20)",
     )
+    p.add_argument(
+        "--no-dedupe",
+        action="store_true",
+        help="keep one row per (PR, task) pair (legacy behaviour; "
+        "produces a noisier training set — see dedupe_by_pr docstring).",
+    )
     return p.parse_args()
 
 
@@ -199,29 +255,41 @@ def main() -> int:
         )
         return 1
 
+    raw_unique = len({row[0] for row in rows})
+    sys.stderr.write(
+        f"  {len(rows)} raw rows from {raw_unique} unique PRs "
+        f"({len(rows) / max(raw_unique, 1):.1f} rows/PR)\n"
+    )
+    if not args.no_dedupe:
+        rows = dedupe_by_pr(rows)
+        sys.stderr.write(
+            f"  deduped to {len(rows)} rows (one per PR, labels averaged across fan-out)\n"
+        )
+
     inputs = build_inputs(rows)
     labels = np.asarray(
         [(row[-3], row[-2], row[-1]) for row in rows], dtype=np.float64
     )
+    pr_ids = np.asarray([row[0] for row in rows])
+    n_unique_prs = int(len(np.unique(pr_ids)))
 
     sys.stderr.write(f"embedding {len(inputs)} PRs via {args.embed_model} on {args.ollama}…\n")
     X = embed_all(args.ollama, args.embed_model, inputs)
     sys.stderr.write(f"  shape = {X.shape}\n")
 
-    # Stratify by the rounded total bucket so the test split keeps the
-    # label distribution balanced.
-    total_buckets = np.round(labels[:, 2]).astype(int)
-    if len(np.unique(total_buckets)) < 2:
-        # Fall back to plain split if every label collapses to one bucket.
-        idx_train, idx_test = train_test_split(
-            np.arange(len(rows)), test_size=args.test_split, random_state=0
+    # Group-aware split: every row for a given pr_id lands in train OR
+    # test, never both. Stratification is dropped (GroupShuffleSplit can't
+    # stratify and group simultaneously); the label distribution is
+    # close-enough to balanced at this corpus size that random group
+    # sampling is fine.
+    if n_unique_prs >= 2:
+        splitter = GroupShuffleSplit(
+            n_splits=1, test_size=args.test_split, random_state=0
         )
+        idx_train, idx_test = next(splitter.split(np.arange(len(rows)), groups=pr_ids))
     else:
         idx_train, idx_test = train_test_split(
-            np.arange(len(rows)),
-            test_size=args.test_split,
-            random_state=0,
-            stratify=total_buckets,
+            np.arange(len(rows)), test_size=args.test_split, random_state=0
         )
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -247,10 +315,13 @@ def main() -> int:
             "quarter_grid_agreement": kappa,
             "n_train": int(len(idx_train)),
             "n_test": int(len(idx_test)),
+            "n_train_unique_prs": int(len(np.unique(pr_ids[idx_train]))),
+            "n_test_unique_prs": int(len(np.unique(pr_ids[idx_test]))),
         }
         sys.stderr.write(
             f"  pr_{name}.json — spearman={metrics[name]['spearman']:.3f}, "
-            f"grid_agreement={metrics[name]['quarter_grid_agreement']:.3f}\n"
+            f"grid_agreement={metrics[name]['quarter_grid_agreement']:.3f}, "
+            f"alpha={head['alpha']:g}\n"
         )
 
     (args.out / "metrics.json").write_text(json.dumps(metrics, indent=2))
