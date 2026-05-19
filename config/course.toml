@@ -78,7 +78,11 @@ overlay_files = [
 ]
 
 [build]
-max_parallel_builds = 2
+# Serial builds — each parallel Gradle worker draws 2-4 GB resident
+# (daemon JVM + Kotlin daemon + AGP processes), so 2-way concurrency was
+# OOM-killing 16 GB machines during overnight backfills. Bump back to 2+
+# only on workstations with ≥32 GB RAM.
+max_parallel_builds = 1
 stderr_max_chars = 2000
 skip_already_tested = true
 
@@ -248,8 +252,10 @@ judge_timeout_seconds = 180
 # # ollama embedding model tag. Must match the one the trainer was run
 # # against — re-train after changing.
 # embed_model = "bge-m3"
-# # ollama chat model tag for the borderline LLM fallback.
-# llm_model = "hf.co/BSC-LT/salamandra-2b-instruct-GGUF:Q5_K_M"
+# # ollama chat model tag for the borderline LLM fallback. The exact
+# # string must match what `ollama list` returns — HuggingFace mirrors
+# # differ between uploaders (BSC-LT vs community re-uploads).
+# llm_model = "hf.co/hdnh2006/BSC-LT-salamandra-2b-instruct-gguf:Q5_K_M"
 # # Forwarded to ollama as `keep_alive`. "0" ejects after each call;
 # # "5m" keeps weights resident if cold-load latency dominates throughput.
 # llm_keep_alive = "0"
