@@ -170,6 +170,70 @@ fn open_worker_conn(db_path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Hoisted PR-doc-evaluation pre-pass for the three remote-LLM judges
+/// (`claude-cli`, `anthropic-api`, `deepseek-api`). Scores every PR in
+/// `sprint_ids` ONCE, one sprint at a time, before the per-sprint parallel
+/// block runs.
+///
+/// Without this hoist, the outer parallel pool (N sprints) and the per-sprint
+/// dispatcher's inner Rayon pool (`config.evaluate.judge_workers`) multiply:
+/// peak concurrent LLM subprocesses = N × judge_workers, instead of the
+/// configured `judge_workers`. For typical `run-all` runs (~40 sprints,
+/// `judge_workers = 3`) that means ~120 concurrent `claude --print` processes,
+/// which produces conntrack pressure, OOMs the user's VPN, and burns the
+/// Claude session budget on parallel-startup-overhead instead of throughput.
+///
+/// The per-sprint stage block in `run_project_stage_block` skips
+/// `llm_eval_pr_docs` when `use_llm_pr_docs` is true and the judge is one for
+/// which this pre-pass runs, so no double work happens.
+///
+/// No-op for `local-hybrid` (handled inline by the caller via
+/// `evaluate_local::run_local_hybrid_batch`) and for `heuristic` /
+/// `use_llm_pr_docs == false` (cheap; runs inside the parallel block).
+fn run_remote_llm_pre_pass(
+    db_path: &Path,
+    config: &Config,
+    sprint_ids: &[i64],
+    use_llm_pr_docs: bool,
+) -> Result<()> {
+    let is_remote_llm_judge = matches!(
+        config.evaluate.judge.as_str(),
+        "claude-cli" | "anthropic-api" | "deepseek-api"
+    );
+    if !(use_llm_pr_docs && is_remote_llm_judge && !sprint_ids.is_empty()) {
+        return Ok(());
+    }
+    info!(
+        judge = %config.evaluate.judge,
+        sprints = sprint_ids.len(),
+        workers = config.evaluate.judge_workers,
+        "remote-LLM pre-pass: sequential per-sprint PR doc evaluation"
+    );
+    let pre_pass_conn = open_worker_conn(db_path).context("opening pre-pass DB conn")?;
+    let mut ok_count = 0usize;
+    let mut err_count = 0usize;
+    for &sid in sprint_ids {
+        match sprint_grader_evaluate::run_pr_doc_evaluation_for_sprint_id(
+            &pre_pass_conn,
+            sid,
+            config,
+            true,
+        ) {
+            Ok(_) => ok_count += 1,
+            Err(e) => {
+                warn!(sprint_id = sid, error = %e, "remote-LLM pre-pass failed for sprint");
+                err_count += 1;
+            }
+        }
+    }
+    info!(
+        ok = ok_count,
+        errors = err_count,
+        "remote-LLM pre-pass done"
+    );
+    Ok(())
+}
+
 /// Run the per-project parallel analysis block — metrics, flags, inequality,
 /// contribution, LLM eval (heuristic fallback), quality, process, task
 /// similarity, temporal analysis. Each stage writes to rows keyed by its own
@@ -273,15 +337,31 @@ fn run_project_stage_block(
     stage("heuristics", &mut || {
         sprint_grader_evaluate::run_heuristics_for_sprint_id(&conn, sprint_id).map(|_| ())
     });
-    stage("llm_eval_pr_docs", &mut || {
-        sprint_grader_evaluate::run_pr_doc_evaluation_for_sprint_id(
-            &conn,
-            sprint_id,
-            config,
-            use_llm_pr_docs,
-        )
-        .map(|_| ())
-    });
+    // Skip `llm_eval_pr_docs` when an orchestration pre-pass owns the
+    // writes for this judge. Without the skip, every outer parallel
+    // worker would call the dispatcher — which for `claude-cli`,
+    // `anthropic-api`, `deepseek-api` builds its OWN inner Rayon pool of
+    // `judge_workers` subprocesses. With N(sprints) outer workers all
+    // doing this concurrently, peak LLM-subprocess count is N × workers
+    // instead of the configured `workers`. `local-hybrid` is included
+    // for symmetry — its dispatcher arm is already a defensive no-op,
+    // but skipping outright avoids the wasted DB scan.
+    let pre_pass_owns_pr_docs = use_llm_pr_docs
+        && matches!(
+            config.evaluate.judge.as_str(),
+            "local-hybrid" | "claude-cli" | "anthropic-api" | "deepseek-api"
+        );
+    if !pre_pass_owns_pr_docs {
+        stage("llm_eval_pr_docs", &mut || {
+            sprint_grader_evaluate::run_pr_doc_evaluation_for_sprint_id(
+                &conn,
+                sprint_id,
+                config,
+                use_llm_pr_docs,
+            )
+            .map(|_| ())
+        });
+    }
     stage("llm_eval_task_descriptions", &mut || {
         sprint_grader_evaluate::score_task_descriptions_for_sprint_id(&conn, sprint_id, config)
             .map(|_| ())
@@ -505,6 +585,13 @@ pub fn rerun_post_collection_for_sprint_ids(
         }
     }
     drop(db);
+
+    // Mirror the `run_pipeline` pre-pass so the rerun path (used by
+    // `sync-reports` after a partial re-collect) doesn't multiply outer
+    // workers × inner judge_workers into a flood of concurrent LLM
+    // subprocesses. `use_llm_pr_docs = true` matches the value passed to
+    // `run_parallel_project_block` immediately below.
+    run_remote_llm_pre_pass(db_path, config, sprint_ids, true)?;
 
     let workers = max_workers.unwrap_or(sprint_ids.len());
     let results = run_parallel_project_block(db_path, config, sprint_ids, workers, true)?;
@@ -1015,6 +1102,8 @@ pub fn run_pipeline(
             let stderr_cap = config.build.stderr_max_chars as usize;
             let skip_tested = config.build.skip_already_tested;
             let mutation_enabled = config.mutation.enabled;
+            let worker_heap_mb = config.build.worker_heap_mb;
+            let use_daemon = config.build.use_daemon;
             if let Err(e) = sprint_grader_compile::check_compilations_parallel(
                 &db.conn,
                 &flat_sprint_ids_for_reprocess,
@@ -1024,6 +1113,8 @@ pub fn run_pipeline(
                 stderr_cap,
                 skip_tested,
                 mutation_enabled,
+                worker_heap_mb,
+                use_daemon,
                 None,
                 None,
             ) {
@@ -1081,6 +1172,13 @@ pub fn run_pipeline(
         }
     }
 
+    // Remote-LLM pre-pass: see `run_remote_llm_pre_pass` doc-comment.
+    // Gated on `use_llm_pr_docs` so `go-quick` (heuristic-only) is
+    // unaffected and continues to run heuristic scoring per sprint
+    // inside the parallel block.
+    let use_llm_pr_docs = !matches!(variant, PipelineVariant::GoQuick);
+    run_remote_llm_pre_pass(db_path, config, &flat_sprint_ids, use_llm_pr_docs)?;
+
     // Stage 3: parallel per-(project, sprint) analysis.
     info!(
         stage = 3,
@@ -1094,7 +1192,7 @@ pub fn run_pipeline(
         config,
         &flat_sprint_ids,
         max_workers,
-        !matches!(variant, PipelineVariant::GoQuick),
+        use_llm_pr_docs,
     )?;
     for r in &results {
         if r.stage_errors.is_empty() {
@@ -1596,7 +1694,7 @@ pub fn run_pipeline(
             // Content-level dirty check so the summary reports only
             // clones whose REPORT.md actually differs from origin/main.
             // Pure observability — we do not act on the result.
-            match repo_has_report_changes(&repo_root, &[report_path.clone()]) {
+            match repo_has_report_changes(&repo_root, std::slice::from_ref(&report_path)) {
                 Ok(true) => {
                     dirty_repos += 1;
                     info!(
@@ -1731,5 +1829,53 @@ mod tests {
         let mut ids = resolve_project_ids_from_names(&conn, None);
         ids.sort();
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    // ---- run_remote_llm_pre_pass gating ----
+    //
+    // The early-exit branch must NOT touch `db_path`. We use a path under a
+    // non-existent parent directory so any attempt to `Connection::open` it
+    // would fail visibly (sqlite cannot create a file when the parent dir
+    // is missing). `Ok(())` therefore proves the helper short-circuited
+    // before any DB I/O.
+    fn bogus_db_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(
+            "/tmp/sprint-grader-orchestration-tests/no-such-dir/never-opened.sqlite",
+        )
+    }
+
+    #[test]
+    fn remote_llm_pre_pass_skips_when_use_llm_false() {
+        let mut cfg = sprint_grader_core::config::Config::test_default();
+        cfg.evaluate.judge = "claude-cli".to_string();
+        let res = run_remote_llm_pre_pass(&bogus_db_path(), &cfg, &[1, 2, 3], false);
+        assert!(
+            res.is_ok(),
+            "go-quick must not invoke the remote-LLM pre-pass: {res:?}"
+        );
+    }
+
+    #[test]
+    fn remote_llm_pre_pass_skips_when_sprint_ids_empty() {
+        let mut cfg = sprint_grader_core::config::Config::test_default();
+        cfg.evaluate.judge = "claude-cli".to_string();
+        let res = run_remote_llm_pre_pass(&bogus_db_path(), &cfg, &[], true);
+        assert!(
+            res.is_ok(),
+            "empty sprint set must skip the pre-pass: {res:?}"
+        );
+    }
+
+    #[test]
+    fn remote_llm_pre_pass_skips_for_non_remote_judges() {
+        for judge in ["heuristic", "local-hybrid", "unknown-backend"] {
+            let mut cfg = sprint_grader_core::config::Config::test_default();
+            cfg.evaluate.judge = judge.to_string();
+            let res = run_remote_llm_pre_pass(&bogus_db_path(), &cfg, &[1], true);
+            assert!(
+                res.is_ok(),
+                "judge {judge:?} must not trigger the remote-LLM pre-pass: {res:?}"
+            );
+        }
     }
 }
