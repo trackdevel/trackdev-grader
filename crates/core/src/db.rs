@@ -345,6 +345,16 @@ impl Database {
         // survive a refresh of GitHub-side fields. Initial inserts still
         // accept the caller's attribution_errors value (always None today,
         // but kept on the surface for back-compat).
+        //
+        // GitHub-only fields (body, merged_at, github_author_*, merged_by_*)
+        // use COALESCE because `upsert_pr_from_export` passes None for them
+        // — the TrackDev export does not carry the body. Without COALESCE
+        // the TrackDev resync wipes the body that the GitHub backfill set
+        // on the previous collect, and the skip-guard
+        // (`pr_unchanged_since_last_fetch`) prevents the next backfill
+        // from refilling it. TrackDev-owned fields (title, state, merged,
+        // updated_at, …) keep the unconditional overwrite so edits made
+        // in TrackDev propagate every collect.
         self.conn.execute(
             "INSERT INTO pull_requests
              (id, pr_number, repo_full_name, url, title, body, state, merged,
@@ -358,20 +368,20 @@ impl Database {
                 repo_full_name = excluded.repo_full_name,
                 url = excluded.url,
                 title = excluded.title,
-                body = excluded.body,
+                body = COALESCE(excluded.body, body),
                 state = excluded.state,
                 merged = excluded.merged,
                 author_id = excluded.author_id,
-                github_author_login = excluded.github_author_login,
-                github_author_email = excluded.github_author_email,
-                merged_by_login = excluded.merged_by_login,
-                merged_by_email = excluded.merged_by_email,
+                github_author_login = COALESCE(excluded.github_author_login, github_author_login),
+                github_author_email = COALESCE(excluded.github_author_email, github_author_email),
+                merged_by_login = COALESCE(excluded.merged_by_login, merged_by_login),
+                merged_by_email = COALESCE(excluded.merged_by_email, merged_by_email),
                 additions = COALESCE(excluded.additions, additions),
                 deletions = COALESCE(excluded.deletions, deletions),
                 changed_files = COALESCE(excluded.changed_files, changed_files),
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at,
-                merged_at = excluded.merged_at",
+                merged_at = COALESCE(excluded.merged_at, merged_at)",
             params![
                 id,
                 pr_number,
@@ -1231,5 +1241,114 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(tasks, vec![1]);
+    }
+
+    /// Regression — TrackDev export resync wiped GitHub-fetched body.
+    ///
+    /// `upsert_pr_from_export` passes `None` for body and the other
+    /// GitHub-only fields. Prior to the COALESCE fix, the ON CONFLICT
+    /// clause overwrote those columns to NULL on every resync, breaking
+    /// PR doc evaluation downstream. Lock in that a second upsert with
+    /// `None` does not clobber prior values, while TrackDev-owned fields
+    /// (title, state) still receive the new value.
+    #[test]
+    fn upsert_pull_request_does_not_clobber_github_only_fields_on_resync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open(&tmp.path().join("grading.db")).unwrap();
+        db.create_tables().unwrap();
+
+        // First write — GitHub-fed payload with body, merged_at, author/merger.
+        db.upsert_pull_request(
+            "pr-1",
+            42,
+            "udg-pds/spring-x",
+            "https://example.test/pr-1",
+            "feat: original title",
+            Some("# Summary\n\nLong PR description with multiple paragraphs."),
+            "closed",
+            true,
+            Some("trackdev-author-id"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("2026-05-01T10:00:00Z"),
+            Some("gh-login"),
+            Some("gh@example.test"),
+            Some("merger-login"),
+            Some("merger@example.test"),
+            None,
+        )
+        .unwrap();
+
+        // Resync — TrackDev export shape: title may have been edited;
+        // body and all github_* fields are None.
+        db.upsert_pull_request(
+            "pr-1",
+            42,
+            "udg-pds/spring-x",
+            "https://example.test/pr-1",
+            "feat: edited title",
+            None,
+            "closed",
+            true,
+            Some("trackdev-author-id"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let (title, body, merged_at, gh_login, gh_email, merger_login, merger_email): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = db
+            .conn
+            .query_row(
+                "SELECT title, body, merged_at, github_author_login,
+                        github_author_email, merged_by_login, merged_by_email
+                 FROM pull_requests WHERE id = 'pr-1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        // TrackDev-owned field still overwrites — title edits propagate.
+        assert_eq!(title, "feat: edited title");
+
+        // GitHub-only fields survive the TrackDev resync.
+        assert_eq!(
+            body.as_deref(),
+            Some("# Summary\n\nLong PR description with multiple paragraphs.")
+        );
+        assert_eq!(merged_at.as_deref(), Some("2026-05-01T10:00:00Z"));
+        assert_eq!(gh_login.as_deref(), Some("gh-login"));
+        assert_eq!(gh_email.as_deref(), Some("gh@example.test"));
+        assert_eq!(merger_login.as_deref(), Some("merger-login"));
+        assert_eq!(merger_email.as_deref(), Some("merger@example.test"));
     }
 }
