@@ -358,6 +358,16 @@ pub enum AstRuleKind {
         annotation_regex: Regex,
         scope: ClassAnnotationScope,
     },
+    /// W5.1 — class or method carries an annotation whose full source
+    /// text (including its argument list) matches `source_regex`.
+    /// Complements `ClassHasForbiddenAnnotation`, whose `annotation_regex`
+    /// is matched against the bare annotation name and therefore can't
+    /// distinguish e.g. `@Query(value = "...")` from
+    /// `@Query(value = "...", nativeQuery = true)`.
+    ForbiddenAnnotationSource {
+        source_regex: Regex,
+        scope: ClassAnnotationScope,
+    },
     /// W2.2 — method carries `annotation_regex` but its visibility does
     /// not match `required_visibility` (e.g. `@Transactional` on a
     /// non-`public` method).
@@ -405,6 +415,7 @@ impl AstRuleKind {
             AstRuleKind::MustNullInLifecycle { .. } => "ast_must_null_in_lifecycle",
             AstRuleKind::ForbiddenCallSource { .. } => "ast_forbidden_call_source",
             AstRuleKind::ClassHasForbiddenAnnotation { .. } => "ast_class_has_forbidden_annotation",
+            AstRuleKind::ForbiddenAnnotationSource { .. } => "ast_forbidden_annotation_source",
             AstRuleKind::MethodAnnotationVisibilityMismatch { .. } => {
                 "ast_method_annotation_visibility_mismatch"
             }
@@ -496,6 +507,10 @@ impl AstRule {
                     "annotation_regex",
                     &raw.name,
                 )?,
+                scope: ClassAnnotationScope::parse(raw.scope.as_deref())?,
+            },
+            "forbidden_annotation_source" => AstRuleKind::ForbiddenAnnotationSource {
+                source_regex: compile_regex(raw.source_regex.clone(), "source_regex", &raw.name)?,
                 scope: ClassAnnotationScope::parse(raw.scope.as_deref())?,
             },
             "method_annotation_visibility_mismatch" => {
@@ -727,9 +742,12 @@ impl<'a> ClassInfo<'a> {
     }
 
     fn class_body(&self) -> Option<Node<'a>> {
-        children(self.node)
-            .into_iter()
-            .find(|c| c.kind() == "class_body")
+        children(self.node).into_iter().find(|c| {
+            matches!(
+                c.kind(),
+                "class_body" | "interface_body" | "enum_body" | "record_body"
+            )
+        })
     }
 }
 
@@ -1071,6 +1089,62 @@ fn apply_rule(
                             &format!("{}::{}::annot@L{}", info.name, m_name, line),
                             anchor,
                         ));
+                    }
+                }
+            }
+        }
+        AstRuleKind::ForbiddenAnnotationSource {
+            source_regex,
+            scope,
+        } => {
+            // Class-level annotations: match against the full annotation
+            // source slice (e.g. `@Query(value="…", nativeQuery = true)`).
+            for c in children(info.node) {
+                if c.kind() != "modifiers" {
+                    continue;
+                }
+                for m in children(c) {
+                    if !matches!(m.kind(), "annotation" | "marker_annotation") {
+                        continue;
+                    }
+                    let src = node_text(m, source);
+                    if source_regex.is_match(&src) {
+                        let line = m.start_position().row as u32 + 1;
+                        out.push(make_violation(
+                            rel_path,
+                            rule,
+                            &format!("{}::class-annot-src@L{}", info.name, line),
+                            m,
+                        ));
+                    }
+                }
+            }
+            // Method-level annotations (when scope allows).
+            if matches!(scope, ClassAnnotationScope::ClassOrMethod) {
+                for member in children(body) {
+                    if member.kind() != "method_declaration" {
+                        continue;
+                    }
+                    let m_name = method_name(member, source).unwrap_or_else(|| "<anon>".into());
+                    for c in children(member) {
+                        if c.kind() != "modifiers" {
+                            continue;
+                        }
+                        for ann in children(c) {
+                            if !matches!(ann.kind(), "annotation" | "marker_annotation") {
+                                continue;
+                            }
+                            let src = node_text(ann, source);
+                            if source_regex.is_match(&src) {
+                                let line = ann.start_position().row as u32 + 1;
+                                out.push(make_violation(
+                                    rel_path,
+                                    rule,
+                                    &format!("{}::{}::annot-src@L{}", info.name, m_name, line),
+                                    ann,
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -2567,6 +2641,109 @@ mod tests {
         "#;
         let v = check_inline(&[r], "Post.java", src);
         assert_eq!(v.len(), 1);
+    }
+
+    // ---------- W5.1: forbidden_annotation_source ----------
+
+    #[test]
+    fn forbidden_annotation_source_fires_on_native_query_in_repository_interface() {
+        let r = rule(
+            r#"
+            name = "repository-no-native-query"
+            class_match.name_suffix = "Repository"
+            kind = "forbidden_annotation_source"
+            source_regex = "@Query\\s*\\([\\s\\S]*?\\bnativeQuery\\s*=\\s*true\\b"
+            scope = "class_or_method"
+            severity = "CRITICAL"
+            "#,
+        );
+        let src = r#"
+            package com.x.repo;
+            public interface UserRepository extends JpaRepository<User, Long> {
+                @Query(value = "SELECT * FROM users", nativeQuery = true)
+                List<User> findAllNative();
+            }
+        "#;
+        let v = check_inline(&[r], "UserRepository.java", src);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind.as_str(), "ast_forbidden_annotation_source");
+        assert_eq!(v[0].severity.as_deref(), Some("CRITICAL"));
+    }
+
+    #[test]
+    fn forbidden_annotation_source_silent_when_native_query_false_or_absent() {
+        let r = rule(
+            r#"
+            name = "repository-no-native-query"
+            class_match.name_suffix = "Repository"
+            kind = "forbidden_annotation_source"
+            source_regex = "@Query\\s*\\([\\s\\S]*?\\bnativeQuery\\s*=\\s*true\\b"
+            scope = "class_or_method"
+            "#,
+        );
+        let src = r#"
+            package com.x.repo;
+            public interface UserRepository extends JpaRepository<User, Long> {
+                @Query("SELECT u FROM User u WHERE u.id = ?1")
+                User byId(Long id);
+                @Query(value = "SELECT u FROM User u", nativeQuery = false)
+                List<User> findAllJpql();
+            }
+        "#;
+        let v = check_inline(&[r], "UserRepository.java", src);
+        assert!(v.is_empty(), "JPQL @Query → no fire: {v:?}");
+    }
+
+    #[test]
+    fn forbidden_annotation_source_method_scope_does_not_fire_on_class_annotation_alone() {
+        // Sanity: a class-level @Query (nonsensical, but parseable) does
+        // not bleed across into method scope when only `scope = "class"`.
+        let r = rule(
+            r#"
+            name = "class-only-annot-src"
+            class_match.name_suffix = "Repository"
+            kind = "forbidden_annotation_source"
+            source_regex = "@Query\\([^)]*nativeQuery\\s*=\\s*true"
+            scope = "class"
+            "#,
+        );
+        let src = r#"
+            package com.x.repo;
+            public interface UserRepository extends JpaRepository<User, Long> {
+                @Query(value = "SELECT * FROM users", nativeQuery = true)
+                List<User> findAllNative();
+            }
+        "#;
+        let v = check_inline(&[r], "UserRepository.java", src);
+        assert!(
+            v.is_empty(),
+            "class scope must ignore method annotations: {v:?}"
+        );
+    }
+
+    #[test]
+    fn forbidden_annotation_source_matches_across_line_breaks() {
+        let r = rule(
+            r#"
+            name = "repository-no-native-query"
+            class_match.name_suffix = "Repository"
+            kind = "forbidden_annotation_source"
+            source_regex = "@Query\\s*\\([\\s\\S]*?\\bnativeQuery\\s*=\\s*true\\b"
+            scope = "class_or_method"
+            "#,
+        );
+        let src = "
+            package com.x.repo;
+            public interface UserRepository extends JpaRepository<User, Long> {
+                @Query(
+                    value = \"SELECT * FROM users\",
+                    nativeQuery = true
+                )
+                List<User> findAllNative();
+            }
+        ";
+        let v = check_inline(&[r], "UserRepository.java", src);
+        assert_eq!(v.len(), 1, "multi-line @Query must fire: {v:?}");
     }
 
     // ---------- W2.2: method_annotation_visibility_mismatch ----------
