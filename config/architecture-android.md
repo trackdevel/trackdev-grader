@@ -1,5 +1,5 @@
 ---
-version: 7
+version: 8
 ---
 
 # Android rubric
@@ -11,9 +11,14 @@ the semantic and design-level checks.
 
 ## Layering
 
-- **Activities and Fragments access data only through a Repository.**
-  Direct calls to `Retrofit`, `Room` DAOs, or shared preferences from
-  UI classes break testability and re-usability across screens.
+- **Activities and Fragments observe their ViewModel and nothing else
+  from the data side.** Direct references to `Retrofit`, `OkHttp`,
+  `Room` DAOs, shared preferences, or any `*Repository` /
+  `*ApiService` class from a UI class break testability and
+  re-usability across screens. This holds in every form: field
+  declarations, constructor parameters (the Hilt assisted-injection
+  escape hatch), method parameters, and even bare imports — if the
+  type appears anywhere in the file, the rule fires.
 - **ViewModels do not depend on Activity / Fragment / Context.**
   `ViewModel`s outlive configuration changes; holding a reference to a
   destroyed Activity is a memory leak. Use `AndroidViewModel` only
