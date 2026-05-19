@@ -1084,8 +1084,10 @@ pub fn attribute_findings_for_repo(
         it.collect::<rusqlite::Result<_>>()?
     };
 
-    // Group rows by file so we blame each file once.
-    let mut by_file: HashMap<String, Vec<(i64, u32, u32, String, String)>> = HashMap::new();
+    // Group rows by file so we blame each file once. The tuple is
+    // (finding_id, start_line, end_line, rule_key, detail).
+    type FindingTuple = (i64, u32, u32, String, String);
+    let mut by_file: HashMap<String, Vec<FindingTuple>> = HashMap::new();
     for (id, file_path, start, end, rule, detail) in rows {
         let s = start.max(1) as u32;
         let e = end.max(start) as u32;
@@ -2127,6 +2129,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_finding(
         conn: &Connection,
         repo_full_name: &str,
