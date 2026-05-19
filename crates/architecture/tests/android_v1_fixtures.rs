@@ -233,6 +233,89 @@ fn bad_case_activity_imports_retrofit() {
     );
 }
 
+#[test]
+fn bad_case_fragment_imports_repository_class_without_field() {
+    // The student dropped the field but still imports + uses the
+    // repository statically. forbidden_import on `*Repository` catches
+    // this even though `forbidden_field_type` would miss it.
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "app/src/main/java/com/x/home/HomeFragment.java",
+        "package com.x.home;\n\
+         import com.x.data.UserRepository;\n\
+         public class HomeFragment extends Fragment {\n\
+             public void load() { UserRepository.singleton().fetch(); }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("FRAGMENT_BYPASSES_VIEWMODEL"),
+        "Repository import alone must fire: {hits:?}"
+    );
+}
+
+#[test]
+fn bad_case_activity_imports_okhttp() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "app/src/main/java/com/x/home/HomeActivity.java",
+        "package com.x.home;\n\
+         import okhttp3.OkHttpClient;\n\
+         public class HomeActivity extends AppCompatActivity {\n\
+             private OkHttpClient client;\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("FRAGMENT_BYPASSES_VIEWMODEL"),
+        "okhttp3 import must fire: {hits:?}"
+    );
+}
+
+#[test]
+fn bad_case_fragment_takes_repository_ctor_param() {
+    // Hilt @AssistedInject is the realistic vector here. Even without
+    // it, ctor params on a Fragment shouldn't include Repositories.
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "app/src/main/java/com/x/home/HomeFragment.java",
+        "package com.x.home;\n\
+         public class HomeFragment extends Fragment {\n\
+             public HomeFragment(HomeRepository repo) {}\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("FRAGMENT_BYPASSES_VIEWMODEL"),
+        "ctor-param form must fire: {hits:?}"
+    );
+}
+
+#[test]
+fn bad_case_activity_method_takes_api_service_param() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "app/src/main/java/com/x/home/HomeActivity.java",
+        "package com.x.home;\n\
+         public class HomeActivity extends AppCompatActivity {\n\
+             public void route(UserApiService api) { api.list(); }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("FRAGMENT_BYPASSES_VIEWMODEL"),
+        "method-param form must fire: {hits:?}"
+    );
+}
+
 // ---------- REPOSITORY_DEPENDS_ON_VIEW_LAYER ----------
 
 #[test]
