@@ -23,7 +23,6 @@
 
     <module name="TreeWalker">
         <!-- Imports -->
-        <module name="UnusedImports"/>
         <module name="RedundantImport"/>
         <module name="AvoidStarImport"/>
 
