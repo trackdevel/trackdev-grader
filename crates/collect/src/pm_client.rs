@@ -10,8 +10,13 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use tracing::warn;
 
-const MAX_RETRIES: u32 = 3;
+const MAX_RETRIES: u32 = 5;
 const BACKOFF_BASE_SECS: u64 = 2;
+// /export/tasks for a fully-populated project can stream multiple MB of
+// nested JSON. The 30 s default was empirically too tight (pds26-3a hit it
+// repeatably overnight). 120 s covers the realistic worst case while
+// still surfacing genuine hangs within a minute or two.
+const REQUEST_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrackDevError {
@@ -60,7 +65,7 @@ impl TrackDevClient {
 
         let client = Client::builder()
             .default_headers(headers)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()
             .expect("reqwest client build");
 
@@ -73,33 +78,56 @@ impl TrackDevClient {
     fn get(&self, path: &str) -> Result<Value, TrackDevError> {
         let url = format!("{}{path}", self.base_url);
         let mut last_err: Option<reqwest::Error> = None;
+        let mut last_was_json_failure = false;
 
         for attempt in 0..MAX_RETRIES {
             match self.client.get(&url).send() {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        return resp.json::<Value>().map_err(|e| TrackDevError::Json {
-                            path: path.to_string(),
-                            source: e,
-                        });
-                    }
-                    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                        match resp.json::<Value>() {
+                            Ok(v) => return Ok(v),
+                            Err(e) => {
+                                // Body streaming or parse failure. When the
+                                // server is slow to render a large export
+                                // (`/export/tasks`), reqwest's overall
+                                // request timeout fires mid-stream and
+                                // surfaces here as a decode error. Treat as
+                                // transient and retry with backoff.
+                                last_err = Some(e);
+                                last_was_json_failure = true;
+                                if attempt + 1 < MAX_RETRIES {
+                                    let wait = BACKOFF_BASE_SECS.pow(attempt + 1);
+                                    warn!(
+                                        path,
+                                        wait_s = wait,
+                                        attempt = attempt + 1,
+                                        max = MAX_RETRIES,
+                                        "TrackDev JSON decode failed — retrying"
+                                    );
+                                    std::thread::sleep(Duration::from_secs(wait));
+                                    continue;
+                                }
+                            }
+                        }
+                    } else if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                         let wait = BACKOFF_BASE_SECS.pow(attempt + 1);
                         warn!(%status, path, wait_s = wait, "TrackDev retry");
                         std::thread::sleep(Duration::from_secs(wait));
                         continue;
+                    } else {
+                        let body = resp.text().unwrap_or_default();
+                        return Err(TrackDevError::Http {
+                            method: "GET".to_string(),
+                            path: path.to_string(),
+                            status: status.as_u16(),
+                            body,
+                        });
                     }
-                    let body = resp.text().unwrap_or_default();
-                    return Err(TrackDevError::Http {
-                        method: "GET".to_string(),
-                        path: path.to_string(),
-                        status: status.as_u16(),
-                        body,
-                    });
                 }
                 Err(e) => {
                     last_err = Some(e);
+                    last_was_json_failure = false;
                     if attempt + 1 < MAX_RETRIES {
                         let wait = BACKOFF_BASE_SECS.pow(attempt + 1);
                         warn!(path, wait_s = wait, "TrackDev request error — retrying");
@@ -109,12 +137,23 @@ impl TrackDevClient {
                 }
             }
         }
-        Err(TrackDevError::RequestFailed {
-            method: "GET".to_string(),
-            path: path.to_string(),
-            retries: MAX_RETRIES,
-            source: last_err.expect("loop always populates last_err before exit"),
-        })
+        let source = last_err.expect("loop always populates last_err before exit");
+        if last_was_json_failure {
+            // Preserve the more informative Json error variant when the
+            // terminal failure was a decode error rather than a transport
+            // error.
+            Err(TrackDevError::Json {
+                path: path.to_string(),
+                source,
+            })
+        } else {
+            Err(TrackDevError::RequestFailed {
+                method: "GET".to_string(),
+                path: path.to_string(),
+                retries: MAX_RETRIES,
+                source,
+            })
+        }
     }
 
     /// `GET /courses/{course_id}/details` → CourseDetailsDTO.
