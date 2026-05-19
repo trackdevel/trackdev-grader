@@ -692,6 +692,196 @@ fn good_case_service_takes_list_of_dto_param() {
 /// One GOOD fixture per rule, all stuffed into one project — together
 /// they must produce zero Spring v8 violations.
 #[test]
+fn bad_case_repository_uses_native_query() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/repo/UserRepository.java",
+        "package com.x.repo;\n\
+         import java.util.List;\n\
+         import com.x.entity.User;\n\
+         import org.springframework.data.jpa.repository.JpaRepository;\n\
+         import org.springframework.data.jpa.repository.Query;\n\
+         public interface UserRepository extends JpaRepository<User, Long> {\n\
+             @Query(value = \"SELECT * FROM users WHERE age > ?1\", nativeQuery = true)\n\
+             List<User> olderThan(int age);\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let rows = scan_with_severity(tmp.path());
+    let hit = rows
+        .iter()
+        .find(|(name, _)| name == "REPOSITORY_USES_NATIVE_QUERY")
+        .expect("REPOSITORY_USES_NATIVE_QUERY must fire");
+    assert_eq!(hit.1, "CRITICAL");
+}
+
+#[test]
+fn bad_case_repository_uses_native_query_multiline_form() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/repo/UserRepository.java",
+        "package com.x.repo;\n\
+         import java.util.List;\n\
+         import com.x.entity.User;\n\
+         import org.springframework.data.jpa.repository.JpaRepository;\n\
+         import org.springframework.data.jpa.repository.Query;\n\
+         public interface UserRepository extends JpaRepository<User, Long> {\n\
+             @Query(\n\
+                 value = \"SELECT * FROM users\",\n\
+                 nativeQuery = true\n\
+             )\n\
+             List<User> findAllNative();\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("REPOSITORY_USES_NATIVE_QUERY"),
+        "multi-line @Query must fire: {hits:?}"
+    );
+}
+
+#[test]
+fn good_case_repository_jpql_query_is_silent() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/repo/UserRepository.java",
+        "package com.x.repo;\n\
+         import java.util.List;\n\
+         import com.x.entity.User;\n\
+         import org.springframework.data.jpa.repository.JpaRepository;\n\
+         import org.springframework.data.jpa.repository.Query;\n\
+         public interface UserRepository extends JpaRepository<User, Long> {\n\
+             @Query(\"SELECT u FROM User u WHERE u.age > ?1\")\n\
+             List<User> olderThan(int age);\n\
+             @Query(value = \"SELECT u FROM User u\", nativeQuery = false)\n\
+             List<User> all();\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        !hits.contains("REPOSITORY_USES_NATIVE_QUERY"),
+        "JPQL @Query must stay silent: {hits:?}"
+    );
+}
+
+#[test]
+fn bad_case_service_holds_entity_manager_field() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/service/UserService.java",
+        "package com.x.service;\n\
+         import jakarta.persistence.EntityManager;\n\
+         import org.springframework.stereotype.Service;\n\
+         @Service\n\
+         public class UserService {\n\
+             private final EntityManager em = null;\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("SERVICE_BYPASSES_REPOSITORY"),
+        "expected SERVICE_BYPASSES_REPOSITORY, got: {hits:?}"
+    );
+}
+
+#[test]
+fn bad_case_service_injects_jdbc_template_via_constructor() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/service/AuditService.java",
+        "package com.x.service;\n\
+         import org.springframework.jdbc.core.JdbcTemplate;\n\
+         import org.springframework.stereotype.Service;\n\
+         @Service\n\
+         public class AuditService {\n\
+             public AuditService(JdbcTemplate jdbc) {}\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("SERVICE_BYPASSES_REPOSITORY"),
+        "constructor-param form must fire: {hits:?}"
+    );
+}
+
+#[test]
+fn bad_case_service_calls_create_native_query() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/service/ReportService.java",
+        "package com.x.service;\n\
+         import org.springframework.stereotype.Service;\n\
+         @Service\n\
+         public class ReportService {\n\
+             private Object em;\n\
+             public Object run() { return ((jakarta.persistence.EntityManager) em).createNativeQuery(\"SELECT 1\"); }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("SERVICE_BYPASSES_REPOSITORY"),
+        "createNativeQuery call must fire: {hits:?}"
+    );
+}
+
+#[test]
+fn bad_case_service_imports_raw_jdbc_connection() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/service/RawSqlService.java",
+        "package com.x.service;\n\
+         import java.sql.Connection;\n\
+         import org.springframework.stereotype.Service;\n\
+         @Service\n\
+         public class RawSqlService {\n\
+             public void run(Connection c) { }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        hits.contains("SERVICE_BYPASSES_REPOSITORY"),
+        "import-level form must fire: {hits:?}"
+    );
+}
+
+#[test]
+fn good_case_service_only_uses_repository() {
+    let tmp = TempDir::new().unwrap();
+    write_java(
+        tmp.path(),
+        "src/main/java/com/x/service/UserService.java",
+        "package com.x.service;\n\
+         import com.x.repo.UserRepository;\n\
+         import org.springframework.stereotype.Service;\n\
+         @Service\n\
+         public class UserService {\n\
+             private final UserRepository repo;\n\
+             public UserService(UserRepository r) { this.repo = r; }\n\
+             public Object byId(Long id) { return repo.findById(id); }\n\
+         }\n",
+    );
+    git_init(tmp.path());
+    let hits = scan_with_production_config(tmp.path());
+    assert!(
+        !hits.contains("SERVICE_BYPASSES_REPOSITORY"),
+        "clean service using a repository must stay silent: {hits:?}"
+    );
+}
+
+#[test]
 fn all_good_cases_produce_zero_spring_v8_violations() {
     let tmp = TempDir::new().unwrap();
     let v8: HashSet<&str> = [
@@ -708,6 +898,8 @@ fn all_good_cases_produce_zero_spring_v8_violations() {
         "SERVICE_PUBLIC_METHOD_USES_NON_DTO",
         "SERVICE_USES_MULTIPLE_REPOSITORIES",
         "ENTITY_DEPENDS_ON_SPRING_BEAN",
+        "REPOSITORY_USES_NATIVE_QUERY",
+        "SERVICE_BYPASSES_REPOSITORY",
     ]
     .into_iter()
     .collect();
