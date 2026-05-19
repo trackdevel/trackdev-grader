@@ -600,9 +600,22 @@ fn setup_logging(verbose: bool) {
         .init();
 }
 
+/// Bias the kernel OOM-killer against sprint-grader so that, under
+/// system-wide memory pressure, the kernel kills heavy short-lived
+/// processes (browsers, build daemons) before it touches the grader.
+/// Best-effort: silently no-op if /proc/self/oom_score_adj is not
+/// writable (non-Linux, sandboxed, or root-policy). The
+/// `SPRINT_GRADER_OOM_SCORE_ADJ` env var overrides the default;
+/// set it to `0` (or any positive value) to opt out.
+fn lower_oom_score_adj() {
+    let value = std::env::var("SPRINT_GRADER_OOM_SCORE_ADJ").unwrap_or_else(|_| "-500".to_string());
+    let _ = std::fs::write("/proc/self/oom_score_adj", format!("{value}\n"));
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     setup_logging(cli.verbose);
+    lower_oom_score_adj();
 
     let today = cli
         .today
@@ -758,6 +771,8 @@ fn main() -> Result<()> {
                     config.build.stderr_max_chars as usize,
                     skip_tested,
                     config.mutation.enabled,
+                    config.build.worker_heap_mb,
+                    config.build.use_daemon,
                     pr_filter,
                     skip_recent_within,
                 )

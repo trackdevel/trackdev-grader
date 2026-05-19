@@ -308,6 +308,60 @@ kind = "forbidden_field_type"
 type_regex = ".*(Service|Repository|Component)$"
 severity = "WARNING"
 
+# REPOSITORY_USES_NATIVE_QUERY — `@Query(..., nativeQuery = true)` on a
+# Spring Data repository method. Native queries skip the ORM, bypass JPQL
+# type-checking, and tie the codebase to a specific database dialect.
+# `name_suffix = "Repository"` covers both annotated classes and the
+# common Spring Data interface form (`UserRepository extends JpaRepository
+# <User, Long>`). The regex matches across line breaks so the multi-line
+# `@Query(...)` form is caught too.
+[[ast_rule]]
+name = "REPOSITORY_USES_NATIVE_QUERY"
+class_match.name_suffix = "Repository"
+kind = "forbidden_annotation_source"
+source_regex = "@Query\\s*\\([\\s\\S]*?\\bnativeQuery\\s*=\\s*true\\b"
+scope = "class_or_method"
+severity = "CRITICAL"
+
+# SERVICE_BYPASSES_REPOSITORY — `@Service` classes reach the persistence
+# model only through repositories. Holding an `EntityManager`,
+# `JdbcTemplate`, `DataSource`, `Connection`, Hibernate `Session`, or
+# friends as a field / constructor param means the service is issuing
+# its own queries instead of going through a `@Repository` /
+# `JpaRepository`. The matching `forbidden_import` block catches the
+# import even when the type is referenced indirectly (e.g. inside a
+# method body without a field), and the `forbidden_method_call` block
+# catches `entityManager.createNativeQuery(...)` /
+# `createQuery(...)` / `createNamedQuery(...)` style usage.
+
+[[ast_rule]]
+name = "SERVICE_BYPASSES_REPOSITORY"
+class_match.annotation = "Service"
+kind = "forbidden_field_type"
+type_regex = "^(EntityManager|EntityManagerFactory|JdbcTemplate|NamedParameterJdbcTemplate|DataSource|Connection|Session|SessionFactory)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "SERVICE_BYPASSES_REPOSITORY"
+class_match.annotation = "Service"
+kind = "forbidden_constructor_param"
+type_regex = "^(EntityManager|EntityManagerFactory|JdbcTemplate|NamedParameterJdbcTemplate|DataSource|Connection|Session|SessionFactory)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "SERVICE_BYPASSES_REPOSITORY"
+class_match.annotation = "Service"
+kind = "forbidden_import"
+import_regex = "^(jakarta\\.persistence\\.EntityManager|javax\\.persistence\\.EntityManager|jakarta\\.persistence\\.EntityManagerFactory|javax\\.persistence\\.EntityManagerFactory|org\\.springframework\\.jdbc\\.core\\.|java\\.sql\\.|javax\\.sql\\.|org\\.hibernate\\.Session|org\\.hibernate\\.SessionFactory)"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "SERVICE_BYPASSES_REPOSITORY"
+class_match.annotation = "Service"
+kind = "forbidden_method_call"
+call_regex = "\\.(createNativeQuery|createQuery|createNamedQuery|createStoredProcedureQuery)$"
+severity = "CRITICAL"
+
 # --- Android v1 rubric --------------------------------------------------
 #
 # Verbatim rule IDs from `config/android-rubric.md` (v1). Severity
@@ -378,7 +432,13 @@ severity = "CRITICAL"
 # --- FRAGMENT_BYPASSES_VIEWMODEL --- CRITICAL ---
 #
 # The View layer must talk only to its ViewModel — no Retrofit / repo
-# / ApiService fields, no direct retrofit2.* imports.
+# / ApiService access in any form. Each block below closes one bypass
+# path; together they cover field declarations, constructor / method
+# parameters (the Hilt assisted-injection escape hatch), and file-level
+# imports of either Retrofit (`retrofit2.*`), OkHttp (`okhttp3.*` — the
+# layer Retrofit sits on top of, equally bypassable directly), or any
+# `*Repository` / `*ApiService` class (catches references that never
+# become fields, e.g. local variables or static-method calls).
 
 [[ast_rule]]
 name = "FRAGMENT_BYPASSES_VIEWMODEL"
@@ -397,6 +457,34 @@ severity = "CRITICAL"
 [[ast_rule]]
 name = "FRAGMENT_BYPASSES_VIEWMODEL"
 class_match.name_suffix = "Fragment"
+kind = "forbidden_constructor_param"
+type_regex = ".*(Repository|ApiService)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Activity"
+kind = "forbidden_constructor_param"
+type_regex = ".*(Repository|ApiService)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_method_param"
+type_regex = ".*(Repository|ApiService)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Activity"
+kind = "forbidden_method_param"
+type_regex = ".*(Repository|ApiService)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Fragment"
 kind = "forbidden_import"
 import_regex = "^retrofit2\\."
 severity = "CRITICAL"
@@ -406,6 +494,34 @@ name = "FRAGMENT_BYPASSES_VIEWMODEL"
 class_match.name_suffix = "Activity"
 kind = "forbidden_import"
 import_regex = "^retrofit2\\."
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_import"
+import_regex = "^okhttp3\\."
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Activity"
+kind = "forbidden_import"
+import_regex = "^okhttp3\\."
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Fragment"
+kind = "forbidden_import"
+import_regex = "(^|\\.)\\w+(Repository|ApiService)$"
+severity = "CRITICAL"
+
+[[ast_rule]]
+name = "FRAGMENT_BYPASSES_VIEWMODEL"
+class_match.name_suffix = "Activity"
+kind = "forbidden_import"
+import_regex = "(^|\\.)\\w+(Repository|ApiService)$"
 severity = "CRITICAL"
 
 # --- REPOSITORY_DEPENDS_ON_VIEW_LAYER --- CRITICAL ---

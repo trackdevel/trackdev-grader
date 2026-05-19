@@ -495,15 +495,35 @@ fn write_decision(
     }
 }
 
+/// Body length at or above which a `pr_doc_evaluation` row with
+/// `description_score = 0.0` is treated as stale and re-evaluated.
+/// Mirrors `sprint_grader_evaluate::llm_eval::STALE_BODY_LEN_THRESHOLD`.
+const STALE_BODY_LEN_THRESHOLD: i64 = 50;
+
+/// Returns true iff the PR already has a *fresh* `pr_doc_evaluation`
+/// row for this sprint. A row is stale (and so re-evaluated) when
+/// `description_score = 0.0` but the current `pull_requests.body` has
+/// at least `STALE_BODY_LEN_THRESHOLD` characters — symptomatic of the
+/// row being scored before the GitHub-detail collect populated body.
+/// See `sprint_grader_evaluate::llm_eval::pr_doc_row_present_and_fresh`
+/// for the longer rationale (this is the local-hybrid mirror).
 fn pr_already_scored(conn: &Connection, pr_id: &str, sprint_id: i64) -> rusqlite::Result<bool> {
-    let exists: Option<i64> = conn
+    let row: Option<(f64, i64)> = conn
         .query_row(
-            "SELECT 1 FROM pr_doc_evaluation WHERE pr_id = ? AND sprint_id = ?",
+            "SELECT pde.description_score,
+                    length(coalesce(pr.body, ''))
+             FROM pr_doc_evaluation pde
+             JOIN pull_requests pr ON pr.id = pde.pr_id
+             WHERE pde.pr_id = ? AND pde.sprint_id = ?",
             params![pr_id, sprint_id],
-            |r| r.get(0),
+            |r| Ok((r.get::<_, f64>(0)?, r.get::<_, i64>(1)?)),
         )
         .ok();
-    Ok(exists.is_some())
+    let Some((desc_score, body_len)) = row else {
+        return Ok(false);
+    };
+    let is_stale = desc_score == 0.0 && body_len >= STALE_BODY_LEN_THRESHOLD;
+    Ok(!is_stale)
 }
 
 fn select_prs_for_sprint(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<PrInputRow>> {

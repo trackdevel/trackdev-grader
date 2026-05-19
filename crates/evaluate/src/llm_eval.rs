@@ -321,6 +321,60 @@ pub fn extract_json_object(s: &str) -> Option<Value> {
     None
 }
 
+// ---- Resume-guard helper ----
+
+/// Body length (chars) at or above which a `pr_doc_evaluation` row with
+/// `description_score = 0.0` is treated as stale and re-evaluated.
+/// See `pr_doc_row_present_and_fresh` for the why.
+const STALE_BODY_LEN_THRESHOLD: i64 = 50;
+
+/// Returns true iff `pr_doc_evaluation` already has a row for this
+/// `(pr_id, sprint_id)` AND the row is *fresh* — i.e., it isn't an
+/// obvious artifact of having scored an empty body.
+///
+/// The collect stage populates `pull_requests.body` in two phases:
+/// TrackDev export writes the row with `body = NULL`, then
+/// `collect_github_details_for_project` fills the body from GitHub. If
+/// the GitHub pass was skipped or quietly returned a null body on a
+/// given run, the PR-doc eval pre-pass saw `body_str = "(empty)"` and
+/// the judge correctly scored `description = 0`. Later runs that DO
+/// populate the body would never re-score, because the bare existence
+/// of any row matched the resume guard.
+///
+/// This helper closes that gap: when `description_score = 0.0` AND the
+/// current PR body has at least `STALE_BODY_LEN_THRESHOLD` characters,
+/// the row is considered stale and the caller MUST re-evaluate (the
+/// `INSERT OR REPLACE` UPSERT then overwrites the stale row).
+///
+/// Edge cases:
+/// - genuinely empty / very short body (`< THRESHOLD` chars) → not
+///   stale → skipped, preserving the legitimate 0 score
+/// - body that legitimately deserves 0 (bullet list of pure task IDs
+///   etc.) → flagged stale → re-evaluated → judge returns 0 again
+///   (cost: one extra LLM call per such PR per re-run, idempotent)
+pub(crate) fn pr_doc_row_present_and_fresh(
+    conn: &Connection,
+    pr_id: &str,
+    sprint_id: i64,
+) -> rusqlite::Result<bool> {
+    let row: Option<(f64, i64)> = conn
+        .query_row(
+            "SELECT pde.description_score,
+                    length(coalesce(pr.body, ''))
+             FROM pr_doc_evaluation pde
+             JOIN pull_requests pr ON pr.id = pde.pr_id
+             WHERE pde.pr_id = ? AND pde.sprint_id = ?",
+            params![pr_id, sprint_id],
+            |r| Ok((r.get::<_, f64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .ok();
+    let Some((desc_score, body_len)) = row else {
+        return Ok(false);
+    };
+    let is_stale = desc_score == 0.0 && body_len >= STALE_BODY_LEN_THRESHOLD;
+    Ok(!is_stale)
+}
+
 // ---- Public entry points ----
 
 /// PR doc evaluation for a single sprint. Selects the LLM backend per
@@ -497,18 +551,13 @@ fn evaluate_prs_llm(
             continue;
         }
 
-        // Resume support — skip PRs that already have a scored row.
+        // Resume support — skip PRs that already have a fresh scored
+        // row. See `pr_doc_row_present_and_fresh` for the staleness
+        // discriminator (rows scored when pr.body was NULL).
         let mut to_evaluate: Vec<_> = Vec::with_capacity(prs.len());
         let mut already = 0usize;
         for pr in &prs {
-            let exists: Option<i64> = conn
-                .query_row(
-                    "SELECT 1 FROM pr_doc_evaluation WHERE pr_id = ? AND sprint_id = ?",
-                    params![pr.0, sprint_id],
-                    |r| r.get(0),
-                )
-                .ok();
-            if exists.is_some() {
+            if pr_doc_row_present_and_fresh(conn, &pr.0, sprint_id)? {
                 already += 1;
             } else {
                 to_evaluate.push(pr);
@@ -638,18 +687,13 @@ fn evaluate_prs_via_cli(
         return Ok(0);
     }
 
-    // Resume support — skip PRs that already have a scored row.
+    // Resume support — skip PRs that already have a fresh scored row.
+    // See `pr_doc_row_present_and_fresh` for the staleness discriminator
+    // (rows scored when pr.body was NULL).
     let mut to_evaluate: Vec<_> = Vec::with_capacity(prs.len());
     let mut already = 0usize;
     for pr in prs {
-        let exists: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM pr_doc_evaluation WHERE pr_id = ? AND sprint_id = ?",
-                params![pr.0, sprint_id],
-                |r| r.get(0),
-            )
-            .ok();
-        if exists.is_some() {
+        if pr_doc_row_present_and_fresh(conn, &pr.0, sprint_id)? {
             already += 1;
         } else {
             to_evaluate.push(pr);
@@ -781,14 +825,7 @@ pub fn evaluate_prs_heuristic(conn: &Connection, sprint_id: i64) -> rusqlite::Re
 
     let mut count = 0usize;
     for (pr_id, title, body) in prs {
-        let exists: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM pr_doc_evaluation WHERE pr_id = ? AND sprint_id = ?",
-                params![pr_id, sprint_id],
-                |r| r.get(0),
-            )
-            .ok();
-        if exists.is_some() {
+        if pr_doc_row_present_and_fresh(conn, &pr_id, sprint_id)? {
             continue;
         }
         let title_score = heuristic_title_score(title.as_deref());
@@ -1463,6 +1500,109 @@ model_id = "claude-haiku-4-5-20251001"
             .unwrap();
         assert!(avg.is_some(), "avg_doc_score must be populated");
         assert!((avg.unwrap() - total).abs() < 1e-9);
+    }
+
+    fn mk_resume_guard_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pull_requests (id TEXT PRIMARY KEY, body TEXT);
+             CREATE TABLE pr_doc_evaluation (
+                pr_id TEXT, sprint_id INTEGER,
+                title_score REAL, description_score REAL,
+                total_doc_score REAL, justification TEXT,
+                PRIMARY KEY (pr_id, sprint_id));",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn seed_pr_with_body(conn: &Connection, pr_id: &str, body: Option<&str>) {
+        conn.execute(
+            "INSERT INTO pull_requests(id, body) VALUES (?, ?)",
+            params![pr_id, body],
+        )
+        .unwrap();
+    }
+
+    fn seed_eval_row(
+        conn: &Connection,
+        pr_id: &str,
+        sprint_id: i64,
+        title_score: f64,
+        description_score: f64,
+    ) {
+        conn.execute(
+            "INSERT INTO pr_doc_evaluation
+             (pr_id, sprint_id, title_score, description_score,
+              total_doc_score, justification)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                pr_id,
+                sprint_id,
+                title_score,
+                description_score,
+                title_score + description_score,
+                "x"
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resume_guard_returns_false_when_no_row_exists() {
+        let conn = mk_resume_guard_conn();
+        seed_pr_with_body(&conn, "pr-1", Some("body"));
+        assert!(!pr_doc_row_present_and_fresh(&conn, "pr-1", 10).unwrap());
+    }
+
+    #[test]
+    fn resume_guard_returns_true_when_row_is_nonzero_description() {
+        let conn = mk_resume_guard_conn();
+        seed_pr_with_body(&conn, "pr-1", Some("body"));
+        seed_eval_row(&conn, "pr-1", 10, 1.5, 2.0);
+        assert!(pr_doc_row_present_and_fresh(&conn, "pr-1", 10).unwrap());
+    }
+
+    #[test]
+    fn resume_guard_returns_true_when_description_zero_but_body_short() {
+        // Legit empty/short body → 0 is correct → keep the row.
+        let conn = mk_resume_guard_conn();
+        seed_pr_with_body(&conn, "pr-1", Some("done."));
+        seed_eval_row(&conn, "pr-1", 10, 1.75, 0.0);
+        assert!(pr_doc_row_present_and_fresh(&conn, "pr-1", 10).unwrap());
+    }
+
+    #[test]
+    fn resume_guard_returns_true_when_description_zero_and_body_null() {
+        // Genuinely missing body — caller will pass "(empty)" to the
+        // judge again, which is fine; we shouldn't churn on these rows.
+        let conn = mk_resume_guard_conn();
+        seed_pr_with_body(&conn, "pr-1", None);
+        seed_eval_row(&conn, "pr-1", 10, 1.0, 0.0);
+        assert!(pr_doc_row_present_and_fresh(&conn, "pr-1", 10).unwrap());
+    }
+
+    #[test]
+    fn resume_guard_returns_false_when_description_zero_and_body_substantial() {
+        // The bug case: row was scored when body was NULL, body has
+        // since been populated. The resume guard must re-evaluate.
+        let conn = mk_resume_guard_conn();
+        let body = "## Included tasks\n* Create BuyerProfileFragment + layout: [p1d-353](https://example.org/4600)\n\n## Description\n* Created the layout with profile card and stats row.";
+        assert!(body.len() >= 50);
+        seed_pr_with_body(&conn, "pr-1", Some(body));
+        seed_eval_row(&conn, "pr-1", 10, 1.75, 0.0);
+        assert!(!pr_doc_row_present_and_fresh(&conn, "pr-1", 10).unwrap());
+    }
+
+    #[test]
+    fn resume_guard_returns_true_when_description_zero_and_body_just_below_threshold() {
+        // Boundary: a 49-char body keeps the row; a 50-char body triggers
+        // re-eval. The literal threshold is wired through one constant.
+        let conn = mk_resume_guard_conn();
+        let body = "x".repeat((STALE_BODY_LEN_THRESHOLD - 1) as usize);
+        seed_pr_with_body(&conn, "pr-1", Some(&body));
+        seed_eval_row(&conn, "pr-1", 10, 1.0, 0.0);
+        assert!(pr_doc_row_present_and_fresh(&conn, "pr-1", 10).unwrap());
     }
 
     #[test]

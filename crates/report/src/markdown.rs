@@ -1302,6 +1302,14 @@ const KNOWN_RULE_DESCRIPTIONS: &[(&str, &str)] = &[
         "ENTITY_DEPENDS_ON_SPRING_BEAN",
         "Entities are persistent POJOs — holding a Service / Repository / Component field mixes persistence with business logic",
     ),
+    (
+        "REPOSITORY_USES_NATIVE_QUERY",
+        "Native SQL queries (`@Query(..., nativeQuery = true)`) in a repository skip JPQL type-checking and tie the codebase to a specific database dialect — use JPQL or derived query methods instead",
+    ),
+    (
+        "SERVICE_BYPASSES_REPOSITORY",
+        "Services must reach the persistence model only through repositories — `EntityManager`, `JdbcTemplate`, raw `java.sql.*`, or Hibernate `Session` in a `@Service` defeats the layered architecture",
+    ),
     // Android v1 rubric (AST rules — replaces the per-file LLM judge).
     (
         "VIEWMODEL_IMPORTS_ANDROID_UI",
@@ -1611,15 +1619,17 @@ fn write_section_b(
     // up or down. Falls back to the total alone when the breakdown is
     // missing (legacy rows). Silently returns an empty map when the
     // table is absent so minimal test fixtures keep working.
-    let pr_doc_scores: HashMap<String, (Option<f64>, Option<f64>, Option<f64>)> = match conn
-        .prepare(
-            "SELECT pr_id, title_score, description_score, total_doc_score
+    // (title_score, description_score, total_doc_score); each can be NULL
+    // for legacy rows that pre-date the per-axis split.
+    type PrDocBreakdown = (Option<f64>, Option<f64>, Option<f64>);
+    let pr_doc_scores: HashMap<String, PrDocBreakdown> = match conn.prepare(
+        "SELECT pr_id, title_score, description_score, total_doc_score
               FROM pr_doc_evaluation
              WHERE sprint_id = ?
                AND (title_score IS NOT NULL
                     OR description_score IS NOT NULL
                     OR total_doc_score IS NOT NULL)",
-        ) {
+    ) {
         Ok(mut stmt) => {
             let rows = stmt.query_map([sprint_id], |r| {
                 Ok((
@@ -4162,6 +4172,8 @@ mod tests {
             "SERVICE_PUBLIC_METHOD_USES_NON_DTO",
             "SERVICE_USES_MULTIPLE_REPOSITORIES",
             "ENTITY_DEPENDS_ON_SPRING_BEAN",
+            "REPOSITORY_USES_NATIVE_QUERY",
+            "SERVICE_BYPASSES_REPOSITORY",
         ] {
             let s = humanize_rule_name(rule_id);
             assert!(

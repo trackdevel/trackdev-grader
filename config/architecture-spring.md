@@ -1,5 +1,5 @@
 ---
-version: 7
+version: 8
 ---
 
 # Spring Boot rubric
@@ -30,6 +30,17 @@ per-file.
   call services or controllers.** Inversion-of-control runs the other
   way; circular references between layers indicate a missing
   abstraction.
+- **Repositories must not declare native SQL queries
+  (`@Query(..., nativeQuery = true)`).** Native queries skip JPQL
+  type-checking, bypass the ORM, and tie the codebase to a specific
+  database dialect. Use a JPQL `@Query` or a derived query method
+  (`findByEmailAndStatus`) instead.
+- **Services must reach the persistence model only through
+  repositories.** A `@Service` that holds an `EntityManager`,
+  `JdbcTemplate`, `DataSource`, raw `java.sql.Connection`, or
+  Hibernate `Session` is issuing its own queries and defeats the
+  layered architecture. All database access goes through a
+  `@Repository` / `JpaRepository`.
 - **Domain / model classes must not depend on Spring web, Spring data
   repositories, or `javax.servlet.*`.** Concretely, do not import
   `org.springframework.web.*`, `org.springframework.data.repository.*`,

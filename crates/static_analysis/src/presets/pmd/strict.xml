@@ -10,7 +10,10 @@
         bar — this set will be loud on first-year code.
     </description>
 
-    <rule ref="category/java/bestpractices.xml"/>
+    <rule ref="category/java/bestpractices.xml">
+        <exclude name="UnusedPrivateMethod"/>
+        <exclude name="UnusedAssignment"/>
+    </rule>
     <rule ref="category/java/errorprone.xml"/>
     <rule ref="category/java/design.xml"/>
     <rule ref="category/java/multithreading.xml"/>
