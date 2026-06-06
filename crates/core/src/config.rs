@@ -52,7 +52,8 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct EvaluateConfig {
     /// Backend selector. One of `"claude-cli"` (default),
-    /// `"anthropic-api"`, `"deepseek-api"`, or `"local-hybrid"`.
+    /// `"cursor-cli"`, `"anthropic-api"`, `"deepseek-api"`, or
+    /// `"local-hybrid"`.
     pub judge: String,
     /// Pinned model id (e.g. `claude-haiku-4-5-20251001`). REQUIRED in
     /// course.toml; passed verbatim to the CLI via `--model` and to the
@@ -67,6 +68,9 @@ pub struct EvaluateConfig {
     /// Path to the Claude Code CLI binary. Default `"claude"`
     /// (resolved against `$PATH`).
     pub claude_cli_path: String,
+    /// Path to the Cursor Agent CLI binary. Default `"agent"`
+    /// (resolved against `$PATH`). Used only when `judge = "cursor-cli"`.
+    pub cursor_cli_path: String,
     /// DeepSeek-only: V4 `thinking` mode. `Some("enabled")` or
     /// `Some("disabled")` is forwarded as `{"thinking": {"type": ...}}`
     /// in the request body; `None` lets DeepSeek apply its server-side
@@ -143,6 +147,7 @@ impl Default for EvaluateConfig {
             judge_workers: 4,
             judge_timeout_seconds: 180,
             claude_cli_path: "claude".to_string(),
+            cursor_cli_path: "agent".to_string(),
             thinking: None,
             local: LocalEvaluateConfig::default(),
         }
@@ -569,6 +574,8 @@ struct RawEvaluate {
     judge_timeout_seconds: Option<u64>,
     #[serde(default)]
     claude_cli_path: Option<String>,
+    #[serde(default)]
+    cursor_cli_path: Option<String>,
     #[serde(default)]
     thinking: Option<String>,
     #[serde(default)]
@@ -1338,10 +1345,11 @@ impl Config {
                     Error::ConfigInvalid(
                         "[evaluate] model_id is required in course.toml — pin to a \
                          specific id (e.g. \"claude-haiku-4-5-20251001\" for Anthropic, \
-                         or \"deepseek-chat\" for DeepSeek). There is no default to \
-                         prevent silently falling back to the user's Claude session \
-                         model (Opus on Max plans) or to a backend-default that \
-                         drifts under your feet."
+                         \"composer-2.5\" for Cursor (Composer pool; avoid *-fast), or \
+                         \"deepseek-chat\" for \
+                         DeepSeek). There is no default to prevent silently falling \
+                         back to the user's Claude session model (Opus on Max plans) \
+                         or to a backend-default that drifts under your feet."
                             .to_string(),
                     )
                 })?;
@@ -1415,6 +1423,10 @@ impl Config {
                         .evaluate
                         .claude_cli_path
                         .unwrap_or(eval_defaults.claude_cli_path),
+                    cursor_cli_path: raw
+                        .evaluate
+                        .cursor_cli_path
+                        .unwrap_or(eval_defaults.cursor_cli_path),
                     thinking: eval_thinking,
                     local,
                 }
