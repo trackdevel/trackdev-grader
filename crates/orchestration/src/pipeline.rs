@@ -171,7 +171,7 @@ fn open_worker_conn(db_path: &Path) -> rusqlite::Result<Connection> {
 }
 
 /// Hoisted PR-doc-evaluation pre-pass for the three remote-LLM judges
-/// (`claude-cli`, `anthropic-api`, `deepseek-api`). Scores every PR in
+/// (`claude-cli`, `cursor-cli`, `anthropic-api`, `deepseek-api`). Scores every PR in
 /// `sprint_ids` ONCE, one sprint at a time, before the per-sprint parallel
 /// block runs.
 ///
@@ -198,7 +198,7 @@ fn run_remote_llm_pre_pass(
 ) -> Result<()> {
     let is_remote_llm_judge = matches!(
         config.evaluate.judge.as_str(),
-        "claude-cli" | "anthropic-api" | "deepseek-api"
+        "claude-cli" | "cursor-cli" | "anthropic-api" | "deepseek-api"
     );
     if !(use_llm_pr_docs && is_remote_llm_judge && !sprint_ids.is_empty()) {
         return Ok(());
@@ -340,7 +340,7 @@ fn run_project_stage_block(
     // Skip `llm_eval_pr_docs` when an orchestration pre-pass owns the
     // writes for this judge. Without the skip, every outer parallel
     // worker would call the dispatcher — which for `claude-cli`,
-    // `anthropic-api`, `deepseek-api` builds its OWN inner Rayon pool of
+    // `cursor-cli`, `anthropic-api`, `deepseek-api` builds its OWN inner Rayon pool of
     // `judge_workers` subprocesses. With N(sprints) outer workers all
     // doing this concurrently, peak LLM-subprocess count is N × workers
     // instead of the configured `workers`. `local-hybrid` is included
@@ -349,7 +349,7 @@ fn run_project_stage_block(
     let pre_pass_owns_pr_docs = use_llm_pr_docs
         && matches!(
             config.evaluate.judge.as_str(),
-            "local-hybrid" | "claude-cli" | "anthropic-api" | "deepseek-api"
+            "local-hybrid" | "claude-cli" | "cursor-cli" | "anthropic-api" | "deepseek-api"
         );
     if !pre_pass_owns_pr_docs {
         stage("llm_eval_pr_docs", &mut || {
