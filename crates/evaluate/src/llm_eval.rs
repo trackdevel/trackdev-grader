@@ -11,6 +11,10 @@
 //!   accumulates tokens linearly and the per-PR JSON contract is
 //!   intrinsically independent, so the sharing buys nothing useful.
 //!
+//! * `judge = "cursor-cli"` — shells out to the Cursor Agent CLI
+//!   (`agent --print`). Uses the Cursor subscription or `CURSOR_API_KEY`.
+//!   Runs in `--mode ask` against an isolated temp workspace.
+//!
 //! * `judge = "anthropic-api"` — uses the Messages API directly.
 //!   Requires `ANTHROPIC_API_KEY`. Keeps the existing `Conversation`
 //!   accumulator so prompt-cache hits apply across PRs in the same team.
@@ -29,7 +33,9 @@ use serde_json::Value;
 use sprint_grader_core::Config;
 use tracing::{debug, info, warn};
 
+use crate::cli_rubric::RubricCliBackend;
 use crate::claude_cli_client::ClaudeCliClient;
+use crate::cursor_cli_client::CursorCliClient;
 use crate::deepseek_client::DeepseekClient;
 use crate::llm_client::{AnthropicClient, Conversation};
 use crate::llm_trait::LlmClient;
@@ -83,8 +89,8 @@ struct TaskEvalResponse {
 // so the binary stays self-contained, but each rubric lives in its own .md
 // file for easy per-semester tuning without touching Rust.
 
-pub const RUBRIC_PR: &str = include_str!("../assets/prompts/rubric_pr.md");
-const RUBRIC_TASK: &str = include_str!("../assets/prompts/rubric_task.md");
+pub use crate::prompt::{build_pr_judge_user_message, build_task_judge_user_message, RUBRIC_PR};
+use crate::prompt::RUBRIC_TASK;
 
 // ---- Heuristic scoring (used when no API key is set) ----
 
@@ -427,6 +433,29 @@ pub fn run_pr_doc_evaluation_for_sprint_id(
                         sprint_id,
                         &client,
                         config.evaluate.judge_workers,
+                        "claude-cli",
+                    )?;
+                }
+            }
+            "cursor-cli" => {
+                if !CursorCliClient::is_available(&config.evaluate.cursor_cli_path) {
+                    info!(
+                        cli = %config.evaluate.cursor_cli_path,
+                        "cursor agent CLI not on PATH — heuristic PR doc scoring fallback"
+                    );
+                    count += evaluate_prs_heuristic(conn, sprint_id)?;
+                } else {
+                    let client = CursorCliClient::new(
+                        config.evaluate.cursor_cli_path.clone(),
+                        config.evaluate.model_id.clone(),
+                        config.evaluate.judge_timeout_seconds,
+                    );
+                    count += evaluate_prs_via_cli(
+                        conn,
+                        sprint_id,
+                        &client,
+                        config.evaluate.judge_workers,
+                        "cursor-cli",
                     )?;
                 }
             }
@@ -480,7 +509,7 @@ pub fn run_pr_doc_evaluation_for_sprint_id(
             other => {
                 warn!(
                     judge = %other,
-                    "unknown [evaluate] judge — expected \"claude-cli\", \"anthropic-api\", or \"deepseek-api\"; heuristic PR doc scoring fallback"
+                    "unknown [evaluate] judge — expected \"claude-cli\", \"cursor-cli\", \"anthropic-api\", or \"deepseek-api\"; heuristic PR doc scoring fallback"
                 );
                 count += evaluate_prs_heuristic(conn, sprint_id)?;
             }
@@ -570,7 +599,7 @@ fn evaluate_prs_llm(
         info!(team = %team_label, evaluating = to_evaluate.len(), total = prs.len(), already);
 
         let mut conv = Conversation::new(client, RUBRIC_PR);
-        for (pr_id, pr_number, repo, title, body, task_name) in to_evaluate {
+        for (pr_id, _pr_number, _repo, title, body, task_name) in to_evaluate {
             let parent_story: String = conn
                 .query_row(
                     "SELECT t2.name FROM tasks t
@@ -584,12 +613,12 @@ fn evaluate_prs_llm(
                 .flatten()
                 .unwrap_or_else(|| "N/A".to_string());
             let task_name = task_name.as_deref().unwrap_or("");
-            let repo_name = repo.as_deref().unwrap_or("");
             let title_str = title.as_deref().unwrap_or("");
-            let body_str = body.as_deref().unwrap_or("(empty)");
-            let pr_num_str = pr_number.map(|n| n.to_string()).unwrap_or_default();
-            let msg = format!(
-                "Task: {task_name}\nUser Story: {parent_story}\nPR #{pr_num_str} in {repo_name}\nTitle: {title_str}\nDescription:\n{body_str}"
+            let msg = build_pr_judge_user_message(
+                task_name,
+                &parent_story,
+                title_str,
+                body.as_deref(),
             );
 
             let reply = match conv.ask(&msg) {
@@ -601,7 +630,7 @@ fn evaluate_prs_llm(
             };
             let parsed = extract_json_object(&reply).or_else(|| {
                 // One retry — same contract as the Python side.
-                match conv.ask("Please respond with ONLY a JSON object as specified.") {
+                match conv.ask("JSON only.") {
                     Ok(r2) => extract_json_object(&r2),
                     Err(_) => None,
                 }
@@ -649,14 +678,15 @@ fn evaluate_prs_llm(
     Ok(count)
 }
 
-fn evaluate_prs_via_cli(
+fn evaluate_prs_via_cli<B: RubricCliBackend + Sync>(
     conn: &Connection,
     sprint_id: i64,
-    client: &ClaudeCliClient,
+    client: &B,
     workers: usize,
+    backend_label: &'static str,
 ) -> rusqlite::Result<usize> {
-    // Mirrors evaluate_prs_llm's iteration but issues one stateless
-    // claude-cli call per PR. PRs across all teams in this sprint are
+    // Mirrors evaluate_prs_llm's iteration but issues one stateless CLI
+    // call per PR. PRs across all teams in this sprint are
     // collected in one batch, then judged in parallel through a Rayon
     // worker pool. DB writes happen serially after the batch returns —
     // this connection is not shared with workers.
@@ -705,7 +735,9 @@ fn evaluate_prs_via_cli(
     }
     info!(
         evaluating = to_evaluate.len(),
-        already, "claude-cli PR doc scoring"
+        already,
+        backend = backend_label,
+        "CLI PR doc scoring"
     );
 
     // Resolve parent-story names ahead of the parallel section so each
@@ -713,7 +745,7 @@ fn evaluate_prs_via_cli(
     let prepared: Vec<(String, String)> = to_evaluate
         .into_iter()
         .map(
-            |(pr_id, pr_number, repo, title, body, task_name, parent_id)| {
+            |(pr_id, _pr_number, _repo, title, body, task_name, parent_id)| {
                 let parent_story = match parent_id {
                     Some(pid) => conn
                         .query_row("SELECT name FROM tasks WHERE id = ?", [pid], |r| {
@@ -724,13 +756,13 @@ fn evaluate_prs_via_cli(
                         .unwrap_or_else(|| "N/A".to_string()),
                     None => "N/A".to_string(),
                 };
-                let pr_num_str = pr_number.map(|n| n.to_string()).unwrap_or_default();
-                let repo_name = repo.as_deref().unwrap_or("");
                 let title_str = title.as_deref().unwrap_or("");
-                let body_str = body.as_deref().unwrap_or("(empty)");
                 let task_str = task_name.as_deref().unwrap_or("");
-                let user_msg = format!(
-                    "Task: {task_str}\nUser Story: {parent_story}\nPR #{pr_num_str} in {repo_name}\nTitle: {title_str}\nDescription:\n{body_str}\n\nReturn ONLY the JSON object specified by the rubric — no prose, no fences."
+                let user_msg = build_pr_judge_user_message(
+                    task_str,
+                    &parent_story,
+                    title_str,
+                    body.as_deref(),
                 );
                 (pr_id, user_msg)
             },
@@ -744,7 +776,7 @@ fn evaluate_prs_via_cli(
         .build()
         .map_err(|e| {
             rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(format!(
-                "claude-cli rayon pool: {e}"
+                "{backend_label} rayon pool: {e}"
             ))))
         })?;
 
@@ -752,10 +784,10 @@ fn evaluate_prs_via_cli(
         prepared
             .par_iter()
             .map(|(pr_id, user_msg)| {
-                let raw = match client.complete(RUBRIC_PR, user_msg) {
+                let raw = match client.complete_rubric(RUBRIC_PR, user_msg) {
                     Ok(r) => r,
                     Err(e) => {
-                        warn!(pr_id = %pr_id, error = %e, "claude-cli call failed");
+                        warn!(pr_id = %pr_id, backend = backend_label, error = %e, "CLI call failed");
                         return (pr_id.clone(), None);
                     }
                 };
@@ -941,7 +973,34 @@ pub fn score_task_descriptions_for_sprint_id(
                 config.evaluate.model_id.clone(),
                 config.evaluate.judge_timeout_seconds,
             );
-            evaluate_tasks_via_cli(conn, sprint_id, &client, config.evaluate.judge_workers)
+            evaluate_tasks_via_cli(
+                conn,
+                sprint_id,
+                &client,
+                config.evaluate.judge_workers,
+                "claude-cli",
+            )
+        }
+        "cursor-cli" => {
+            if !CursorCliClient::is_available(&config.evaluate.cursor_cli_path) {
+                info!(
+                    cli = %config.evaluate.cursor_cli_path,
+                    "cursor agent CLI not on PATH — heuristic task scoring fallback"
+                );
+                return evaluate_tasks_heuristic(conn, sprint_id);
+            }
+            let client = CursorCliClient::new(
+                config.evaluate.cursor_cli_path.clone(),
+                config.evaluate.model_id.clone(),
+                config.evaluate.judge_timeout_seconds,
+            );
+            evaluate_tasks_via_cli(
+                conn,
+                sprint_id,
+                &client,
+                config.evaluate.judge_workers,
+                "cursor-cli",
+            )
         }
         "anthropic-api" => {
             let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
@@ -979,7 +1038,7 @@ pub fn score_task_descriptions_for_sprint_id(
             }
         }
         other => {
-            warn!(judge = %other, "unknown [evaluate] judge — expected \"claude-cli\", \"anthropic-api\", or \"deepseek-api\"; heuristic task scoring");
+            warn!(judge = %other, "unknown [evaluate] judge — expected \"claude-cli\", \"cursor-cli\", \"anthropic-api\", or \"deepseek-api\"; heuristic task scoring");
             evaluate_tasks_heuristic(conn, sprint_id)
         }
     }
@@ -1032,10 +1091,7 @@ fn evaluate_tasks_llm(
                 .unwrap_or_else(|| "N/A".to_string()),
             None => "N/A".to_string(),
         };
-        let msg = format!(
-            "Task key: {task_key}\nUser Story: {parent_name}\nTask description: {}",
-            name.as_deref().unwrap_or("(empty)"),
-        );
+        let msg = build_task_judge_user_message(&task_key, &parent_name, name.as_deref());
         let reply = match conv.ask(&msg) {
             Ok(r) => r,
             Err(e) => {
@@ -1044,7 +1100,7 @@ fn evaluate_tasks_llm(
             }
         };
         let parsed = extract_json_object(&reply).or_else(|| {
-            conv.ask("Please respond with ONLY a JSON object as specified.")
+            conv.ask("JSON only.")
                 .ok()
                 .and_then(|r2| extract_json_object(&r2))
         });
@@ -1084,11 +1140,12 @@ fn evaluate_tasks_llm(
     Ok(count)
 }
 
-fn evaluate_tasks_via_cli(
+fn evaluate_tasks_via_cli<B: RubricCliBackend + Sync>(
     conn: &Connection,
     sprint_id: i64,
-    client: &ClaudeCliClient,
+    client: &B,
     workers: usize,
+    backend_label: &'static str,
 ) -> rusqlite::Result<usize> {
     let mut stmt = conn.prepare(
         "SELECT id, task_key, name, parent_task_id FROM tasks
@@ -1141,10 +1198,8 @@ fn evaluate_tasks_via_cli(
                     .unwrap_or_else(|| "N/A".to_string()),
                 None => "N/A".to_string(),
             };
-            let user_msg = format!(
-                "Task key: {task_key}\nUser Story: {parent_name}\nTask description: {}\n\nReturn ONLY the JSON object specified by the rubric.",
-                name.as_deref().unwrap_or("(empty)"),
-            );
+            let user_msg =
+                build_task_judge_user_message(&task_key, &parent_name, name.as_deref());
             (task_id, name, user_msg)
         })
         .collect();
@@ -1154,7 +1209,7 @@ fn evaluate_tasks_via_cli(
         .build()
         .map_err(|e| {
             rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(format!(
-                "claude-cli rayon pool: {e}"
+                "{backend_label} rayon pool: {e}"
             ))))
         })?;
 
@@ -1162,10 +1217,10 @@ fn evaluate_tasks_via_cli(
         prepared
             .par_iter()
             .map(|(task_id, name, user_msg)| {
-                let raw = match client.complete(RUBRIC_TASK, user_msg) {
+                let raw = match client.complete_rubric(RUBRIC_TASK, user_msg) {
                     Ok(r) => r,
                     Err(e) => {
-                        warn!(task_id, error = %e, "claude-cli task call failed");
+                        warn!(task_id, backend = backend_label, error = %e, "CLI task call failed");
                         let s = heuristic_task_description_score(name.as_deref());
                         return (
                             *task_id,
@@ -1717,6 +1772,60 @@ model_id = "claude-haiku-4-5-20251001"
         assert!(
             justification.contains("heuristics"),
             "missing CLI binary must fall back to heuristic, got: {justification}"
+        );
+    }
+
+    #[test]
+    fn pr_doc_cursor_cli_judge_falls_back_to_heuristic_when_binary_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE students (id TEXT PRIMARY KEY, full_name TEXT,
+                github_login TEXT, team_project_id INTEGER);
+             CREATE TABLE tasks (id INTEGER PRIMARY KEY, task_key TEXT, name TEXT,
+                type TEXT, status TEXT, estimation_points INTEGER,
+                assignee_id TEXT, sprint_id INTEGER, parent_task_id INTEGER);
+             CREATE TABLE pull_requests (id TEXT PRIMARY KEY, pr_number INTEGER,
+                repo_full_name TEXT, title TEXT, body TEXT, author_id TEXT);
+             CREATE TABLE task_pull_requests (task_id INTEGER, pr_id TEXT,
+                PRIMARY KEY (task_id, pr_id));
+             CREATE TABLE pr_doc_evaluation (pr_id TEXT, sprint_id INTEGER,
+                title_score REAL, description_score REAL,
+                total_doc_score REAL, justification TEXT,
+                PRIMARY KEY (pr_id, sprint_id));
+             CREATE TABLE student_sprint_metrics (student_id TEXT, sprint_id INTEGER,
+                avg_doc_score REAL, PRIMARY KEY (student_id, sprint_id));
+             INSERT INTO students(id, full_name, team_project_id)
+                VALUES ('dana', 'Dana', 1);
+             INSERT INTO tasks(id, task_key, name, type, status, sprint_id, assignee_id)
+                VALUES (1, 'PDS-1', 'login', 'TASK', 'DONE', 10, 'dana');
+             INSERT INTO pull_requests(id, pr_number, repo_full_name, title, body, author_id)
+                VALUES ('pr-1', 7, 'org/repo',
+                        'Implement login controller with JWT',
+                        'Implement the login controller because users could not sign in. \
+                         Linked to task PDS-42; verify by running the auth test suite.',
+                        'dana');
+             INSERT INTO task_pull_requests(task_id, pr_id) VALUES (1, 'pr-1');
+             INSERT INTO student_sprint_metrics(student_id, sprint_id, avg_doc_score)
+                VALUES ('dana', 10, NULL);",
+        )
+        .unwrap();
+
+        let mut cfg = build_minimal_config();
+        cfg.evaluate.judge = "cursor-cli".to_string();
+        cfg.evaluate.cursor_cli_path = "/definitely/not/a/real/binary-xyz".to_string();
+        let count = run_pr_doc_evaluation_for_sprint_id(&conn, 10, &cfg, true).unwrap();
+        assert_eq!(count, 1);
+
+        let justification: String = conn
+            .query_row(
+                "SELECT justification FROM pr_doc_evaluation WHERE sprint_id = 10",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            justification.contains("heuristics"),
+            "missing cursor agent CLI must fall back to heuristic, got: {justification}"
         );
     }
 }
