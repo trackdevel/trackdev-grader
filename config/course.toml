@@ -222,9 +222,18 @@ llm_review = false
 [evaluate]
 # judge = "deepseek-api"
 # model_id = "deepseek-v4-flash"
+# judge = "claude-cli"
+# model_id = "claude-haiku-4-5-20251001"
 
-judge = "claude-cli"
-model_id = "claude-haiku-4-5-20251001"
+# Cursor Agent CLI (`agent` on PATH). Use `composer-2.5` (not *-fast):
+# official pricing has Composer 2.5 at $0.50/$2.50 per M tokens vs
+# Composer 2.5 Fast at $3/$15 — fast is for latency, not cost. Stays in
+# the Auto+Composer pool. Run `agent models` to confirm the slug on your
+# account. API-pool alternatives (e.g. gpt-5.4-nano) are cheaper per
+# token but burn the separate API allowance.
+judge = "cursor-cli"
+model_id = "composer-2.5"
+cursor_cli_path = "agent"
 judge_workers = 10
 judge_timeout_seconds = 180
 # `thinking` is consumed only by the deepseek-api backend; with claude-cli or

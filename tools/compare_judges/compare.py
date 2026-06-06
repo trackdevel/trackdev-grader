@@ -35,7 +35,7 @@ from pathlib import Path
 import requests
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_RUBRIC = REPO_ROOT / "crates" / "evaluate" / "assets" / "prompts" / "rubric_pr.md"
+DEFAULT_RUBRIC = REPO_ROOT / "crates" / "evaluate" / "assets" / "prompts" / "rubric_pr_compact.md"
 
 # Schema posted to ollama as `format` to constrain Salamandra's reply.
 # Mirrors `pr_response_schema` in pipeline.rs — keep in sync.
