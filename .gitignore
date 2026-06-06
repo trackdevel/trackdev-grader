@@ -18,6 +18,8 @@ CLAUDE.md
 plan*/
 .gaviero/
 .claude/
+.cursor/
+.codex/
 .mcp.json
 tmp/
 # Static-analysis vendored JARs/distributions installed by
