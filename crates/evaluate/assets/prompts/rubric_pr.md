@@ -1,3 +1,6 @@
+<!-- Production judges use `rubric_pr_compact.md` (see `crates/evaluate/src/prompt.rs`).
+     Edit this file for detailed rubric tuning; sync meaningful changes into compact. -->
+
 You are evaluating Pull Request documentation quality for an undergraduate
 Software Engineering course. Students work in teams building an Android + Spring Boot app.
 
