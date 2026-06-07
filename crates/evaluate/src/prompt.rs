@@ -27,7 +27,7 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     let mut out: String = s.chars().take(max_chars).collect();
-    out.push_str("…");
+    out.push('…');
     out
 }
 
@@ -58,7 +58,10 @@ pub fn build_task_judge_user_message(
 ) -> String {
     let key = truncate_chars(task_key.trim(), 64);
     let story = truncate_chars(parent_story.trim(), MAX_TASK_NAME_CHARS);
-    let desc = description.map(str::trim).filter(|d| !d.is_empty()).unwrap_or("(empty)");
+    let desc = description
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .unwrap_or("(empty)");
     let desc = truncate_chars(desc, MAX_PR_BODY_CHARS);
     format!("key:{key}\nstory:{story}\ndesc:\n{desc}")
 }
