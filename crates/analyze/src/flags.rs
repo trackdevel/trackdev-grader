@@ -174,6 +174,57 @@ fn zero_tasks(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> 
     Ok(flags)
 }
 
+/// MISSING_AI_DECLARATION — WARNING per (assignee, sprint) for DONE,
+/// non-USER_STORY tasks with no declared "Ús de IA" usage (no `task_ai_usage`
+/// row, or `declared = 0`). Advisory only — never a grade penalty; the grade
+/// applies the assumed-discount separately. Fires for everyone when
+/// `task_ai_usage` is empty (e.g. a DB not yet re-collected post-Wave 2).
+fn missing_ai_declaration(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.assignee_id, t.task_key
+           FROM tasks t
+           LEFT JOIN task_ai_usage au ON au.task_id = t.id
+          WHERE t.sprint_id = ?
+            AND t.status = 'DONE'
+            AND t.type != 'USER_STORY'
+            AND t.assignee_id IS NOT NULL
+            AND (au.task_id IS NULL OR au.declared = 0)
+          ORDER BY t.assignee_id, t.task_key",
+    )?;
+    let rows = stmt
+        .query_map([sprint_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    // Rows arrive grouped by assignee (ORDER BY); fold into one flag each.
+    let mut by_student: Vec<(String, Vec<String>)> = Vec::new();
+    for (sid, key) in rows {
+        let key = key.unwrap_or_default();
+        match by_student.last_mut() {
+            Some((s, keys)) if *s == sid => keys.push(key),
+            _ => by_student.push((sid, vec![key])),
+        }
+    }
+
+    let mut flags = Vec::new();
+    for (sid, keys) in by_student {
+        let count = keys.len();
+        flags.push(Flag {
+            student_id: sid,
+            flag_type: "MISSING_AI_DECLARATION",
+            severity: "WARNING",
+            details: json!({
+                "message": "Declared AI usage ('Ús de IA') missing on DONE tasks",
+                "task_keys": keys,
+                "count": count,
+            }),
+        });
+    }
+    Ok(flags)
+}
+
 fn carrying_team(
     conn: &Connection,
     sprint_id: i64,
@@ -2738,6 +2789,10 @@ pub fn detect_flags_for_sprint_id(
 
     let mut total = 0usize;
     total += run!("ZERO_TASKS", zero_tasks(conn, sprint_id));
+    total += run!(
+        "MISSING_AI_DECLARATION",
+        missing_ai_declaration(conn, sprint_id)
+    );
     total += run!("CARRYING_TEAM", carrying_team(conn, sprint_id, t));
     total += run!(
         "CONTRIBUTION_IMBALANCE",

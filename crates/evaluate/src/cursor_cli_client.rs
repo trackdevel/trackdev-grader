@@ -173,11 +173,7 @@ mod tests {
 
     #[test]
     fn build_argv_always_passes_explicit_model_and_ask_mode() {
-        let client = CursorCliClient::new(
-            "agent".to_string(),
-            "composer-2.5".to_string(),
-            180,
-        );
+        let client = CursorCliClient::new("agent".to_string(), "composer-2.5".to_string(), 180);
         let argv = client.build_argv("score this PR");
         let model_idx = argv
             .iter()
@@ -201,11 +197,7 @@ mod tests {
 
     #[test]
     fn build_argv_propagates_caller_supplied_model_verbatim() {
-        let client = CursorCliClient::new(
-            "agent".to_string(),
-            "composer-2.5".to_string(),
-            180,
-        );
+        let client = CursorCliClient::new("agent".to_string(), "composer-2.5".to_string(), 180);
         let argv = client.build_argv("");
         let i = argv.iter().position(|a| a == "--model").unwrap();
         assert_eq!(argv[i + 1], "composer-2.5");

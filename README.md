@@ -86,6 +86,8 @@ runnable and testable.
 | [`ai_detect`](crates/ai_detect) | 7 | Behavioural signals (single-commit dumps, fix-up patterns, line-per-minute productivity), per-student stylometric baseline + deviation, curriculum violations, text-consistency score, and Bayesian fusion into per-PR / per-file / per-student AI-usage probabilities. |
 | [`static_analysis`](crates/static_analysis) | 5c | Java static-analysis stage. Shells PMD / Checkstyle (T6 adds SpotBugs + FindSecBugs), parses SARIF 2.1.0, normalises severity per analyzer, and writes `static_analysis_findings` + `static_analysis_finding_attribution` (per-student blame weights). Gated on `config/static_analysis.toml`; absent file → silent skip. |
 | [`report`](crates/report) | 8 | Per-sprint Excel workbooks (one per team + cross-team summary) and a multi-sprint Markdown `REPORT.md` committed back into each team's Android repo with inline SVG sparklines. |
+| [`grading_xlsx`](crates/grading_xlsx) | sheet | Read-mostly `grading-sheet` command: computes 0–10 project + student grades from evidence already in `grading.db`, persists `project_final_grade` / `student_final_grade`, and writes a self-recalculating `grading_sheet.xlsx`. |
+| [`quality_llm`](crates/quality_llm) | sheet (Track B) | Stub for `quality-flags` — feedback-only LLM quality context; never a grade input. |
 | [`orchestration`](crates/orchestration) | glue | The three full-pipeline variants (`run-all`, `go`, `go-quick`), parallel sprint execution via `rayon`, cache purge, the `diff-db` table-by-table dual-run checker, and the `sync-reports` publisher. |
 | [`cli`](crates/cli) | binary | The `sprint-grader` clap CLI exposing every stage as its own subcommand plus the full-pipeline aggregates. |
 
@@ -235,7 +237,7 @@ Edit [`config/course.toml`](config/course.toml) — the most important keys:
 | `[regularity]` | `midpoint_hours`, `steepness`, band thresholds | Shape of the sigmoid that scores how early before the deadline a PR landed. |
 | `[repo_analysis]` | `group_min_size`, `mad_k_threshold`, `temporal_*_hours` | MAD-based outlier detection + temporal-tier cutoffs. |
 | `[curriculum]` | `freeze_after_sprint_end` (bool, default `false`) | When true, the orchestrator snapshots the curriculum-as-taught for any sprint whose `end_date` has passed (T-P2.5). Past sprints are then graded against the frozen `curriculum_concepts_snapshot`; the active sprint reads the live `curriculum_concepts` until you freeze. The CLI `sprint-grader freeze-curriculum --sprint <N>` is the explicit alternative. |
-| `[grading]` | `hidden_thresholds` (bool, default `false`), `jitter_pct` (float, default `0.0`) | Anti-gaming: when `hidden_thresholds = true`, every fractional detector knob is uniformly jittered by `± jitter_pct` once per pipeline run, seeded by `(today, course_id)`. Same `--today` reproduces; different `--today` may differ within the band. Realised values land in the `pipeline_run` audit table; reports show only the published threshold and the `±jitter_pct` band, never the realised value. Roll out only after the course's grading policy is publicly amended (T-P2.6). |
+| `[grading]` in **`course.toml`** | `hidden_thresholds` (bool, default `false`), `jitter_pct` (float, default `0.0`) | **Not** the sprint grade model. Anti-gaming for flag detectors: when `hidden_thresholds = true`, every fractional detector knob is uniformly jittered by `± jitter_pct` once per pipeline run, seeded by `(today, course_id)`. Realised values land in `pipeline_run`. For 0–10 project/student grades see [`config/grading.toml`](#grading-sheet-project--student-grades) and `sprint-grader grading-sheet`. |
 
 ### Run
 
@@ -259,6 +261,9 @@ sprint-grader ai-detect
 
 # write reports
 sprint-grader report
+
+# end-of-term grades (read-mostly; needs a fresh collect for declared AI)
+sprint-grader grading-sheet
 ```
 
 Or, equivalently, the orchestrated forms:
@@ -278,11 +283,16 @@ sprints) and `--data-dir` (lets you point at a different DB / repo cache).
 ```
 config/
 ├── course.toml                # main course + threshold + build config
+├── grading.toml               # grading-sheet weights, AI modulation, penalties (see below)
 ├── architecture.toml          # T-P2.2 layered/onion-model rules (optional; absent → scan skipped)
 ├── rubric.md                  # PR documentation rubric (sent to Claude)
 ├── boilerplate_patterns.txt   # SHA-256 fingerprints excluded from cross-team detection
 └── user_mapping.csv           # optional pm_username → github_username mapping
 ```
+
+`config/grading.toml` is consumed only by `sprint-grader grading-sheet`. It is
+**unrelated** to the `[grading]` block in `course.toml`, which controls
+detector-threshold jitter (anti-gaming), not the 0–10 grade arithmetic.
 
 ## Data layout
 
@@ -290,6 +300,7 @@ config/
 data/
 └── entregues/
     ├── grading.db                        # SQLite — every metric the pipeline produces
+    ├── grading_sheet.xlsx                # self-recalculating grade workbook (grading-sheet)
     ├── sprint_1/
     │   ├── team-01.xlsx                  # per-team workbook
     │   └── _summary.xlsx                 # cross-team comparison
@@ -342,6 +353,20 @@ Tables fall into a few groups:
   records the seed, jitter %, and the realised threshold map when
   `[grading] hidden_thresholds = true`).
 - **Flags** — `flags` (the consolidated per-student / per-PR anomaly list).
+- **Declared AI usage** — `task_ai_usage`, `ai_usage_enum_domain`. Populated by
+  `collect` from the TrackDev "Ús de IA" ENUM_PAIR on each task. **Requires a
+  fresh `collect`** after enabling this feature; older DBs treat tasks as
+  undeclared (assumed discount + `MISSING_AI_DECLARATION` flag).
+- **Final grades** — `project_final_grade`, `student_final_grade`,
+  `project_component_score`, `student_component_score`. Written by
+  `grading-sheet`; read-mostly report output, not pipeline inputs.
+- **LLM quality flags (Track B)** — `llm_quality_flag`. Advisory context only;
+  the grade pipeline never reads this table.
+
+The seven grade + AI-usage tables above are **deliberately excluded** from the
+`diff-db --derived-only` parity contract (`DERIVED_TABLES` /
+`COLLECTION_TABLES`). Re-running `grading-sheet` may change them without
+implying a pipeline regression.
 
 `pull_requests.attribution_errors` carries an accumulating JSON array of
 `{kind, detail, observed_at}` entries describing data-quality issues found
@@ -460,6 +485,93 @@ types changed behaviour during the P0/P1 wave and warrant calling out:
   `mutation_command = "./gradlew pitest --info"` (or your build
   tool's equivalent in `scmMutationCoverage` mode).
 
+## Grading sheet (project + student grades)
+
+`sprint-grader grading-sheet` reads `grading.db` and writes:
+
+1. Four grade tables (`project_final_grade`, `student_final_grade`, and the
+   two `*_component_score` diagnostics tables).
+2. `data/entregues/grading_sheet.xlsx` — a self-recalculating workbook whose
+   `Weights` sheet mirrors [`config/grading.toml`](config/grading.toml).
+
+Configuration lives in **`config/grading.toml`** (not `course.toml`). Key
+sections:
+
+| Section | Purpose |
+|---|---|
+| `[weights.project]` | Cross-team quality composite: documentation, code_quality, survival, architecture (present-renormalized mean → `Q`). |
+| `[ai_usage]` | Declared-AI modulation: per-model `m`, per-level `l`, global `strength` (α), `floor_keep`, and assumed `(m,l)` for undeclared tasks. |
+| `[penalty]` | Subtractive caps for CRITICAL static-analysis / complexity (project) and behavioural flags (student). |
+| `[gate]` | Review routes (`NO_DELIVERY`, `PLAGIARISM`, `AI_REVIEW`) — informational; most do not auto-zero. |
+| `[normalization]` | Anchors mapping raw metrics to 0–10 sub-scores. |
+| `[output]` | `decimals` for display; `quantize_final = 0` keeps scoring continuous. |
+
+### Grade model (summary)
+
+Quality is measured **once per team** from four axes (documentation, code
+quality, survival, architecture), comparable across projects. Each student's
+grade redistributes that team quality by their share of **AI-discounted
+effective story points**:
+
+- Per DONE task: `effective = raw_points × keep`, where
+  `keep = 1 − (1 − floor_keep) × α × m × l` from the declared "Ús de IA"
+  model/level (undeclared tasks get an assumed discount + warning flag).
+- **Project grade:** `final = Q_pen × A`, with `A = Σeffective / Σraw` (team
+  AI factor).
+- **Student grade:** `final = CLAMP(Q_pen × eff_u / mean_raw − penalty_u, 0, 10)`.
+
+**Team-AI cancellation:** `A` affects the reported project grade, but it
+**cancels for individuals** — each student's grade reflects their own declared
+AI usage, not teammates'. Algebraically `base_u = Q_pen × eff_u / mean_raw`, so
+an honest student with full retention can recover `Q_pen` even when the team
+average is dragged down by heavy AI use elsewhere.
+
+Example: Alice (no AI, 10 raw → 10 eff) and Bob (frontier×E, 10 raw → 2 eff),
+`Q_pen = 8`, team size 2 → project `= 8 × 12/20 = 4.8`; Alice `= 8`, Bob `= 1.6`.
+
+### Gates
+
+| Gate | Trigger | Effect on grade |
+|---|---|---|
+| `NO_DELIVERY` | Cumulative effective points = 0 | `final = 0` (formula already yields zero) |
+| `PLAGIARISM` | `CROSS_TEAM_SIMILARITY` on synthetic `PROJECT_<id>` | Review route only — no auto-zero |
+| `AI_REVIEW` | Per-student: detected AI risk HIGH + low/absent declaration | Review route only — no auto-zero by default; project row is not gated by teammates' detection |
+
+### Incremental runs
+
+Grades are persisted **per project** in `grading.db`. The workbook is rebuilt
+from the **union** of all graded projects on every export; each included project
+is recomputed and re-persisted so the DB and xlsx stay aligned.
+
+```bash
+# Grade team-01 first
+sprint-grader grading-sheet --projects team-01
+
+# Add team-02; xlsx contains both teams (team-01 refreshed from current evidence)
+sprint-grader grading-sheet --projects team-02
+
+# Refresh everyone after a pipeline re-run, without naming projects
+sprint-grader grading-sheet --workbook-only
+
+# Persist grades only (no xlsx write)
+sprint-grader grading-sheet --projects team-01 --no-workbook
+```
+
+### Importing edited weights
+
+```bash
+sprint-grader grading-sheet --import-weights data/entregues/grading_sheet.xlsx
+```
+
+Reads the `Weights` sheet via calamine and overwrites `config/grading.toml`
+without running a grading pass.
+
+### `quality-flags` (Track B)
+
+`sprint-grader quality-flags` will populate advisory `llm_quality_flag` rows and
+the workbook `LLM_Flags` sheet. It is **not implemented yet**; LLM output never
+feeds the grade model. `grading-sheet` does not trigger any LLM pass.
+
 ## Subcommand reference
 
 Stage commands (each runs one analysis stage against sprints with
@@ -494,7 +606,9 @@ Orchestration / utility:
 | `purge-cache --line-metrics --survival --compilation --doc-eval [--dry-run] [--require-clean-tree]` | Selectively drop derived rows so the next run recomputes them. `--dry-run` rewrites each `DELETE` as a `SELECT COUNT(*)` over the same predicate and prints projected row counts table-by-table without modifying the DB. `--require-clean-tree` is the same guard as on `go`. |
 | `debug-pr-lines` | Dump LAT/LAR/LS computation for individual PRs (diagnostics). |
 | `reset-local-scores [--projects …]` | Delete `pr_doc_evaluation` rows written by the local-hybrid judge (`justification LIKE 'local:%'`). Non-local rows (Haiku, heuristic) are preserved; project-scoped via `--projects`. Run after retraining the regressor to invalidate stale local scores. |
-| `diff-db DB_A DB_B [--tables …] [--derived-only] [--ignore-cols T:c1,c2] [--dump-diffs]` | Table-by-table checksum diff between two `grading.db` files; exits non-zero on mismatch. Used to verify pipeline changes don't drift. |
+| `grading-sheet [--projects …] [--out PATH] [--import-weights XLSX] [--workbook-only] [--no-workbook]` | Compute 0–10 project + student grades from `grading.db`; persist grade tables; write merged `grading_sheet.xlsx` (default: `data/entregues/grading_sheet.xlsx`). `--projects` grades a subset; the workbook includes every project in `project_final_grade`, each refreshed on export. `--workbook-only` skips new grading and rebuilds the xlsx from existing grade rows. `--no-workbook` persists only. `--import-weights` updates `config/grading.toml` and exits. Deterministic — no LLM. Requires `collect` for `task_ai_usage`. |
+| `quality-flags [--projects …] [--max-holistic N] [--resume]` | **Track B stub** — feedback-only LLM quality flags; not yet implemented. Will never alter grades. |
+| `diff-db DB_A DB_B [--tables …] [--derived-only] [--ignore-cols T:c1,c2] [--dump-diffs]` | Table-by-table checksum diff between two `grading.db` files; exits non-zero on mismatch. Used to verify pipeline changes don't drift. Grade + declared-AI tables are parity-exempt (see [Grading sheet](#grading-sheet-project--student-grades)). |
 
 Global flags accepted by every command:
 

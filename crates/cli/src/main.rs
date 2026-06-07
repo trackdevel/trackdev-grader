@@ -671,6 +671,7 @@ fn main() -> Result<()> {
                 skip_repos,
                 force_pr_refresh,
                 repos_dir: Some(entregues_dir.clone()),
+                ai_attribute_name: None,
             };
             run_collection(&config, &db, &opts).context("collect failed")?;
         }

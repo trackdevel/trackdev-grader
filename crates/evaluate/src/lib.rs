@@ -28,5 +28,5 @@ pub use llm_eval::{
     run_llm_evaluation_for_sprint_id, run_pr_doc_evaluation_for_sprint_id,
     score_task_descriptions_for_sprint_id, update_avg_doc_score_pub,
 };
-pub use prompt::RUBRIC_PR;
 pub use llm_trait::{LlmClient, LlmError};
+pub use prompt::RUBRIC_PR;

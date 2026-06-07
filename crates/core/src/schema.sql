@@ -1098,3 +1098,111 @@ JOIN task_pull_requests tpr ON tpr.pr_id = pr.id
 JOIN tasks t ON t.id = tpr.task_id
 WHERE t.type != 'USER_STORY' AND t.assignee_id IS NOT NULL
 GROUP BY pr.id, t.assignee_id;
+
+-- grading-sheet / grading_xlsx feature tables.
+-- Plan: plans/total_grading/claude-refine-plan-v2.md; column bindings in
+-- crates/grading_xlsx/SCHEMA_NOTES.md. All seven are deliberately OUTSIDE the
+-- dual-run parity contract — neither DERIVED_TABLES nor COLLECTION_TABLES in
+-- crates/orchestration/src/db_diff.rs lists them. The grade tables are
+-- downstream report output and the AI-usage tables are collected
+-- inputs/diagnostics, so both are intentionally exempt from diff-db.
+
+-- Declared AI usage per task, captured from the TrackDev "Ús de IA"
+-- ENUM_PAIR ProfileAttribute (slot 1 = model, slot 2 = level A–E). One row
+-- per task; slots are NULL and declared = 0 when the student left it blank.
+CREATE TABLE IF NOT EXISTS task_ai_usage (
+    task_id     INTEGER PRIMARY KEY,
+    model_value TEXT,                         -- slot 1 (value); NULL when undeclared
+    level_value TEXT,                         -- slot 2 (valueB); NULL when undeclared
+    declared    INTEGER NOT NULL DEFAULT 0,   -- 1 iff both slots present and non-empty
+    captured_at TEXT
+);
+
+-- Snapshot of the two inline enum domains backing the "Ús de IA" ENUM_PAIR,
+-- captured at collect time so reports render value descriptions without a
+-- live TrackDev call. slot 1 = "Model IA", slot 2 = "Nivell IA".
+CREATE TABLE IF NOT EXISTS ai_usage_enum_domain (
+    slot        INTEGER NOT NULL,             -- 1 = model, 2 = level
+    value       TEXT NOT NULL,
+    description TEXT,
+    ord         INTEGER,                      -- array index in the export (NOT capability order)
+    PRIMARY KEY (slot, value)
+);
+
+-- One final grade (0–10) per team, written by `sprint-grader grading-sheet`
+-- (grading_xlsx crate). Read-mostly report output, never a pipeline input.
+CREATE TABLE IF NOT EXISTS project_final_grade (
+    project_id        INTEGER PRIMARY KEY,
+    quality_grade     REAL NOT NULL,          -- Q (0–10 quality composite)
+    project_penalty   REAL NOT NULL DEFAULT 0,
+    quality_penalized REAL NOT NULL,          -- Q_pen = CLAMP(Q − penalty, 0, 10)
+    ai_factor         REAL NOT NULL DEFAULT 1, -- A = Σeff/Σraw (team AI factor)
+    final_grade       REAL NOT NULL,          -- project_final = Q_pen · A
+    team_size         INTEGER NOT NULL,       -- N (enrolled by default)
+    review_gate       TEXT,                   -- NULL | NO_DELIVERY | PLAGIARISM | AI_REVIEW
+    ai_strength       REAL,                   -- α in force at generation
+    weights_version   TEXT,                   -- sha256 of the canonical grading.toml
+    generated_at      TEXT NOT NULL
+);
+
+-- One final grade (0–10) per student. base_grade = Q_pen · eff_u / mean_raw;
+-- the team AI factor cancels for individuals (see the plan's worked example).
+CREATE TABLE IF NOT EXISTS student_final_grade (
+    student_id         TEXT NOT NULL,
+    project_id         INTEGER NOT NULL,
+    raw_points         REAL NOT NULL DEFAULT 0,
+    effective_points   REAL NOT NULL DEFAULT 0, -- AI-discounted points (eff_u)
+    ai_keep_factor     REAL,                    -- eff_u / raw_u (points-weighted mean keep)
+    contribution_ratio REAL,                    -- r_u = eff_u / Σeff
+    base_grade         REAL NOT NULL,
+    student_penalty    REAL NOT NULL DEFAULT 0,
+    final_grade        REAL NOT NULL,           -- CLAMP(base − penalty, 0, 10)
+    review_gate        TEXT,
+    weights_version    TEXT,
+    generated_at       TEXT NOT NULL,
+    PRIMARY KEY (student_id, project_id)
+);
+
+-- Per-team quality sub-scores feeding Q (documentation / code_quality /
+-- survival / architecture). present = 0 means the axis had no input and
+-- renormalized out of the composite — it never scored 0.
+CREATE TABLE IF NOT EXISTS project_component_score (
+    project_id    INTEGER NOT NULL,
+    component_key TEXT NOT NULL,              -- 'documentation'|'code_quality'|'survival'|'architecture'
+    raw_value     REAL,
+    score_0_10    REAL,
+    present       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (project_id, component_key)
+);
+
+-- DIAGNOSTIC ONLY: per-student quality axes shown as feedback, NOT a grade
+-- input (within-team differentiation comes from the effective-points ratio).
+CREATE TABLE IF NOT EXISTS student_component_score (
+    student_id    TEXT NOT NULL,
+    project_id    INTEGER NOT NULL,
+    component_key TEXT NOT NULL,
+    raw_value     REAL,
+    score_0_10    REAL,
+    present       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (student_id, project_id, component_key)
+);
+
+-- Track B: feedback-only LLM quality flags. ADVISORY context surfaced next to
+-- the grade; the grade pipeline NEVER reads this table (LLM output is
+-- non-deterministic). Populated by `sprint-grader quality-flags`.
+CREATE TABLE IF NOT EXISTS llm_quality_flag (
+    id             INTEGER PRIMARY KEY,
+    project_id     INTEGER NOT NULL,
+    student_id     TEXT,
+    sprint_id      INTEGER,
+    scope          TEXT NOT NULL,            -- 'file' | 'pr' | 'student' | 'project'
+    target_ref     TEXT,
+    category       TEXT NOT NULL,
+    severity       TEXT NOT NULL,
+    summary        TEXT NOT NULL,
+    detail         TEXT,
+    backend        TEXT NOT NULL,
+    model_id       TEXT NOT NULL,
+    prompt_version TEXT,
+    generated_at   TEXT NOT NULL
+);

@@ -962,6 +962,7 @@ pub fn run_pipeline(
         skip_repos: opts.skip_repos,
         force_pr_refresh: opts.force_pr_refresh,
         repos_dir: Some(opts.entregues_dir.clone()),
+        ai_attribute_name: None,
     };
     sprint_grader_collect::run_collection(config, &db, &collect_opts)
         .context("collection failed")?;
