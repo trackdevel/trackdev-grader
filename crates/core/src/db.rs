@@ -314,6 +314,50 @@ impl Database {
         Ok(())
     }
 
+    /// Capture a task's declared "Ús de IA" usage (model + level slots) from
+    /// the TrackDev export. `declared` is true iff the student filled both
+    /// slots. Idempotent on `task_id` (grading-sheet Wave 2).
+    pub fn upsert_task_ai_usage(
+        &self,
+        task_id: i64,
+        model_value: Option<&str>,
+        level_value: Option<&str>,
+        declared: bool,
+        captured_at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO task_ai_usage
+             (task_id, model_value, level_value, declared, captured_at)
+             VALUES (?, ?, ?, ?, ?)",
+            params![
+                task_id,
+                model_value,
+                level_value,
+                declared as i64,
+                captured_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Snapshot one inline enum-domain entry for the "Ús de IA" ENUM_PAIR
+    /// (`slot` 1 = model, 2 = level). Idempotent on `(slot, value)`.
+    pub fn upsert_ai_usage_enum_value(
+        &self,
+        slot: i64,
+        value: &str,
+        description: Option<&str>,
+        ord: Option<i64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ai_usage_enum_domain
+             (slot, value, description, ord)
+             VALUES (?, ?, ?, ?)",
+            params![slot, value, description, ord],
+        )?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_pull_request(
         &self,
