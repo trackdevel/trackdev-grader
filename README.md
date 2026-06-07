@@ -512,7 +512,7 @@ Global flags accepted by every command:
 | `TRACKDEV_TOKEN` | `collect` | TrackDev API auth. |
 | `GITHUB_TOKEN` | `collect` | GitHub PAT with read access to the course org. |
 | `ANTHROPIC_API_KEY` | `evaluate`, `ai-detect` | Optional. Without it, `evaluate` runs heuristic-only and the LLM-judge AI signal is skipped. |
-| `CURSOR_API_KEY` | `evaluate` (`cursor-cli` judge) | Optional when the Cursor Agent CLI is logged in via `agent login`; otherwise set for headless runs. |
+| `CURSOR_API_KEY` | `evaluate` (`cursor-cli` judge) | Optional when the Cursor Agent CLI is logged in via `agent login`; otherwise set for headless runs. Keep `[evaluate] judge_workers = 1` — parallel `agent` startups race on `~/.cursor/cli-config.json` and fail with `ENOENT` on the temp-file rename. |
 | `ANTHROPIC_MODEL` | `evaluate` (anthropic-api backend) | Overrides `[evaluate].model_id`. Pipeline default is `claude-haiku-4-5-20251001`; do not set this to an Opus id unless you want to burn Max quota. |
 | `SURVIVAL_RESTRICT_TO_PR_FILES` | `survive` | If set, restricts fingerprinting to files touched by PRs (40–70% faster, default off). |
 | `RUST_LOG` | all | Standard `tracing-subscriber` filter; overrides the `--verbose` shorthand. |

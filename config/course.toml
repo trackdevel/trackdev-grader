@@ -234,6 +234,8 @@ llm_review = false
 judge = "cursor-cli"
 model_id = "composer-2.5"
 cursor_cli_path = "agent"
+# judge_workers is ignored for cursor-cli (forced to 1 in code): parallel agent
+# startups race on ~/.cursor/cli-config.json and fail with ENOENT on rename.
 judge_workers = 10
 judge_timeout_seconds = 180
 # `thinking` is consumed only by the deepseek-api backend; with claude-cli or
