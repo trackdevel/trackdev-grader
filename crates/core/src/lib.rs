@@ -12,6 +12,6 @@ pub mod stats;
 pub mod time;
 
 pub use ai_usage::DEFAULT_AI_ATTRIBUTE_NAME;
-pub use config::Config;
+pub use config::{Config, QualityLlmConfig};
 pub use db::Database;
 pub use error::{Error, Result};
