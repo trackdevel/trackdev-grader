@@ -454,7 +454,7 @@ pub fn run_pr_doc_evaluation_for_sprint_id(
                         conn,
                         sprint_id,
                         &client,
-                        config.evaluate.judge_workers,
+                        CursorCliClient::max_parallel_invocations(),
                         "cursor-cli",
                     )?;
                 }
@@ -998,7 +998,7 @@ pub fn score_task_descriptions_for_sprint_id(
                 conn,
                 sprint_id,
                 &client,
-                config.evaluate.judge_workers,
+                CursorCliClient::max_parallel_invocations(),
                 "cursor-cli",
             )
         }
