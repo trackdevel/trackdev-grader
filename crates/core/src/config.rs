@@ -245,8 +245,7 @@ impl Default for ArchitectureConfig {
 /// `llm_quality_flag`.
 #[derive(Debug, Clone)]
 pub struct QualityLlmConfig {
-    /// Backend selector: `claude-cli` (default), `cursor-cli`,
-    /// `anthropic-api`, or `ollama`.
+    /// Backend selector: `claude-cli` (default), `cursor-cli`, or `ollama`.
     pub backend: String,
     /// Pinned model id. Required when `quality-flags` runs; no default
     /// (prevents silent Opus / session-model fallback).
@@ -307,6 +306,22 @@ impl Default for QualityLlmConfig {
 impl QualityLlmConfig {
     /// Called by `quality-flags` before any LLM work starts.
     pub fn validate_for_run(&self) -> Result<()> {
+        match self.backend.as_str() {
+            "claude-cli" | "cursor-cli" | "ollama" => {}
+            "anthropic-api" => {
+                return Err(Error::ConfigInvalid(
+                    "[quality_llm] backend \"anthropic-api\" is not implemented for \
+                     quality-flags — use claude-cli, cursor-cli, or ollama."
+                        .to_string(),
+                ));
+            }
+            other => {
+                return Err(Error::ConfigInvalid(format!(
+                    "[quality_llm] unknown backend {other:?} — expected \"claude-cli\", \
+                     \"cursor-cli\", or \"ollama\""
+                )));
+            }
+        }
         let id = self.model_id.as_deref().unwrap_or("").trim();
         if id.is_empty() {
             return Err(Error::ConfigInvalid(
@@ -1581,8 +1596,7 @@ impl Config {
                     max_holistic: raw
                         .quality_llm
                         .max_holistic
-                        .unwrap_or(ql_defaults.max_holistic)
-                        .max(1),
+                        .unwrap_or(ql_defaults.max_holistic),
                     workers: raw
                         .quality_llm
                         .workers

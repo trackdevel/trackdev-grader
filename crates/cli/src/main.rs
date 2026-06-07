@@ -1600,6 +1600,7 @@ fn main() -> Result<()> {
                 max_holistic,
                 resume,
                 today: today.clone(),
+                entregues_dir: entregues_dir.clone(),
             };
             run_quality_flags(&db, &config_dir, &opts).context("quality-flags failed")?;
         }

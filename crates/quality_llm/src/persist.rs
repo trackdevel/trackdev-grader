@@ -49,6 +49,31 @@ pub fn persist_project_flags(
     Ok(())
 }
 
+/// Whether a holistic row already exists for resume.
+pub fn holistic_flag_exists(
+    conn: &Connection,
+    project_id: i64,
+    target_ref: &str,
+    backend: &str,
+    model_id: &str,
+    prompt_version: &str,
+) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM llm_quality_flag
+         WHERE project_id = ? AND scope = 'project' AND target_ref = ?
+           AND backend = ? AND model_id = ? AND prompt_version = ?",
+        params![
+            project_id,
+            target_ref,
+            backend,
+            model_id,
+            prompt_version
+        ],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Whether a file-tier row already exists for resume (same target + prompt + backend + model).
 pub fn file_flag_exists(
     conn: &Connection,

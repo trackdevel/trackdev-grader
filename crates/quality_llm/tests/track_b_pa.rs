@@ -3,7 +3,8 @@
 use sprint_grader_core::{Config, Database, QualityLlmConfig};
 use sprint_grader_quality_llm::{
     delete_project_flags, file_flag_exists, list_all_flags, list_file_candidates,
-    list_flagged_project_ids, load_rubric, persist_project_flags, run,
+    list_flagged_project_ids, list_flags_for_projects, load_rubric, persist_project_flags,
+    run,
     LlmQualityFlagRow, QualityFlagsOpts,
 };
 use tempfile::tempdir;
@@ -230,9 +231,47 @@ fn run_fails_without_model_id_in_config() {
         dir.path(),
         &QualityFlagsOpts {
             today: "2026-03-01".into(),
+            entregues_dir: dir.path().to_path_buf(),
             ..Default::default()
         },
     )
     .unwrap_err();
     assert!(err.to_string().contains("model_id"));
+}
+
+#[test]
+fn file_pass_errors_when_cli_missing_and_file_pending() {
+    use sprint_grader_quality_llm::{run_file_pass, FileCandidate};
+
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("quality-llm-rubric.md"), "# r\n").unwrap();
+    let mut ql = QualityLlmConfig::default();
+    ql.model_id = Some("claude-haiku-4-5-20251001".into());
+    ql.claude_cli_path = "/nonexistent/claude-quality-flags".into();
+    let rubric = load_rubric(dir.path(), &ql).unwrap();
+
+    let entregues = dir.path().join("entregues");
+    let java_path = entregues.join("T").join("spring-foo").join("src/Foo.java");
+    std::fs::create_dir_all(java_path.parent().unwrap()).unwrap();
+    std::fs::write(&java_path, "public class Foo {}\n").unwrap();
+
+    let db = Database::open(&dir.path().join("g.db")).unwrap();
+    db.create_tables().unwrap();
+    let cand = FileCandidate {
+        repo_full_name: "org/spring-foo".into(),
+        file_path: "src/Foo.java".into(),
+        statement_count: 1,
+    };
+    let err = run_file_pass(
+        &db.conn,
+        1,
+        "T",
+        &entregues,
+        &ql,
+        &rubric,
+        &[cand],
+        false,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("claude CLI not found"));
 }

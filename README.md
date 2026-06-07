@@ -87,7 +87,7 @@ runnable and testable.
 | [`static_analysis`](crates/static_analysis) | 5c | Java static-analysis stage. Shells PMD / Checkstyle (T6 adds SpotBugs + FindSecBugs), parses SARIF 2.1.0, normalises severity per analyzer, and writes `static_analysis_findings` + `static_analysis_finding_attribution` (per-student blame weights). Gated on `config/static_analysis.toml`; absent file → silent skip. |
 | [`report`](crates/report) | 8 | Per-sprint Excel workbooks (one per team + cross-team summary) and a multi-sprint Markdown `REPORT.md` committed back into each team's Android repo with inline SVG sparklines. |
 | [`grading_xlsx`](crates/grading_xlsx) | sheet | Read-mostly `grading-sheet` command: computes 0–10 project + student grades from evidence already in `grading.db`, persists `project_final_grade` / `student_final_grade`, and writes a self-recalculating `grading_sheet.xlsx`. |
-| [`quality_llm`](crates/quality_llm) | sheet (Track B) | Stub for `quality-flags` — feedback-only LLM quality context; never a grade input. |
+| [`quality_llm`](crates/quality_llm) | sheet (Track B) | `quality-flags` command: file-tier + holistic LLM advisory flags into `llm_quality_flag`; never a grade input. |
 | [`orchestration`](crates/orchestration) | glue | The three full-pipeline variants (`run-all`, `go`, `go-quick`), parallel sprint execution via `rayon`, cache purge, the `diff-db` table-by-table dual-run checker, and the `sync-reports` publisher. |
 | [`cli`](crates/cli) | binary | The `sprint-grader` clap CLI exposing every stage as its own subcommand plus the full-pipeline aggregates. |
 
@@ -568,24 +568,23 @@ without running a grading pass.
 
 ### `quality-flags` (Track B)
 
-`sprint-grader quality-flags` will populate advisory `llm_quality_flag` rows and
-the workbook `LLM_Flags` sheet. LLM output never feeds the grade model;
-`grading-sheet` does not trigger any LLM pass.
+`sprint-grader quality-flags` populates advisory `llm_quality_flag` rows (file
+tier, then optional holistic synthesis). `grading-sheet` exports them on the
+`LLM_Flags` workbook sheet (`scope`, `target_ref`, `category`, `severity`,
+`summary`, …). LLM output never feeds the grade model; `grading-sheet` does not
+trigger any LLM pass.
 
 Configuration lives in **`course.toml` `[quality_llm]`** (not `grading.toml`):
 
 | Knob | Purpose |
 |---|---|
-| `backend` | `claude-cli` (default), `cursor-cli`, `anthropic-api`, or `ollama` |
+| `backend` | `claude-cli` (default), `cursor-cli`, or `ollama` |
 | `model_id` | **Required** when running quality-flags — pin a cheap model |
 | `prompt_version` | Cache-bust tag for `--resume` |
-| `rubric_path` | Markdown rubric (default `quality-llm-rubric.md`) |
-| `max_holistic` | Cap on per-project holistic LLM calls (`--max-holistic` overrides) |
+| `rubric_path` | Markdown rubric (default `config/quality-llm-rubric.md`) |
+| `max_holistic` | Holistic LLM calls per project (`0` = file tier only; `1` = team-wide synthesis; `≥2` = per-repo passes up to cap) |
 | `max_files_per_project` | Pre-filter cap on file-tier calls |
 | `skip_globs` | Skip generated/build paths before LLM |
-
-Track B PA (config + prefilter + persist scaffolding) is in place; the LLM file
-pass lands in PB.
 
 **Incremental** (mirrors `grading-sheet`): `--projects` refreshes only the
 listed teams' `llm_quality_flag` rows; other teams' flags are preserved.
@@ -632,7 +631,7 @@ Orchestration / utility:
 | `debug-pr-lines` | Dump LAT/LAR/LS computation for individual PRs (diagnostics). |
 | `reset-local-scores [--projects …]` | Delete `pr_doc_evaluation` rows written by the local-hybrid judge (`justification LIKE 'local:%'`). Non-local rows (Haiku, heuristic) are preserved; project-scoped via `--projects`. Run after retraining the regressor to invalidate stale local scores. |
 | `grading-sheet [--projects …] [--out PATH] [--import-weights XLSX] [--workbook-only] [--no-workbook]` | Compute 0–10 project + student grades from `grading.db`; persist grade tables; write merged `grading_sheet.xlsx` (default: `data/entregues/grading_sheet.xlsx`). `--projects` grades a subset; the workbook includes every project in `project_final_grade`, each refreshed on export. `--workbook-only` skips new grading and rebuilds the xlsx from existing grade rows. `--no-workbook` persists only. `--import-weights` updates `config/grading.toml` and exits. Deterministic — no LLM. Requires `collect` for `task_ai_usage`. |
-| `quality-flags [--projects …] [--max-holistic N] [--resume]` | **Track B stub** — feedback-only LLM quality flags; not yet implemented. Will never alter grades. |
+| `quality-flags [--projects …] [--max-holistic N] [--resume]` | Feedback-only LLM quality flags: file tier + holistic synthesis; writes `llm_quality_flag`. Backend via `[quality_llm] backend`: `claude-cli` (default), `cursor-cli`, or `ollama`. `--max-holistic 0` skips holistic. Incremental `--projects` scope; never alters grades. |
 | `diff-db DB_A DB_B [--tables …] [--derived-only] [--ignore-cols T:c1,c2] [--dump-diffs]` | Table-by-table checksum diff between two `grading.db` files; exits non-zero on mismatch. Used to verify pipeline changes don't drift. Grade + declared-AI tables are parity-exempt (see [Grading sheet](#grading-sheet-project--student-grades)). |
 
 Global flags accepted by every command:
