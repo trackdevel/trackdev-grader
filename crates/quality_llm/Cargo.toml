@@ -10,9 +10,14 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+rayon = "1.10"
 rusqlite.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 sprint-grader-core = { path = "../core" }
+sprint-grader-evaluate = { path = "../evaluate" }
+sprint-grader-evaluate-local = { path = "../evaluate_local" }
 
 [dev-dependencies]
 tempfile.workspace = true
