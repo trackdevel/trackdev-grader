@@ -26,7 +26,9 @@ pub use import_weights::{import_weights, WEIGHTS_SHEET_NAME};
 pub use modulation::{keep, keep_for_declared, keep_for_undeclared};
 pub use normalize::{load_quality_axes, quality_composite, AxisScore};
 pub use persist::{list_graded_project_ids, load_persisted_project, persist_project_grades};
-pub use workbook::{write_workbook, write_workbook_buffer, DEFINED_NAMES};
+pub use workbook::{
+    write_workbook, write_workbook_buffer, DEFINED_NAMES, LLM_FLAGS_SHEET_NAME,
+};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
