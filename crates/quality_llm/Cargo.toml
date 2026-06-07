@@ -10,4 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
 sprint-grader-core = { path = "../core" }
+
+[dev-dependencies]
+tempfile.workspace = true
