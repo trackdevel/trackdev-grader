@@ -1,0 +1,13 @@
+[package]
+name = "sprint-grader-quality-llm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+sprint-grader-core = { path = "../core" }
