@@ -1252,6 +1252,7 @@ mod tests {
     /// `None` does not clobber prior values, while TrackDev-owned fields
     /// (title, state) still receive the new value.
     #[test]
+    #[allow(clippy::type_complexity)] // pre-existing 7-tuple readback in this test
     fn upsert_pull_request_does_not_clobber_github_only_fields_on_resync() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open(&tmp.path().join("grading.db")).unwrap();
@@ -1350,5 +1351,42 @@ mod tests {
         assert_eq!(gh_email.as_deref(), Some("gh@example.test"));
         assert_eq!(merger_login.as_deref(), Some("merger-login"));
         assert_eq!(merger_email.as_deref(), Some("merger@example.test"));
+    }
+
+    /// Wave 1 (grading-sheet): the seven new grade + AI-usage + LLM-flag
+    /// tables apply cleanly on a fresh in-memory DB via `apply_schema`, and
+    /// re-applying is a no-op (additive `CREATE TABLE IF NOT EXISTS`, no
+    /// `apply_additive_migrations` entry needed). Guards against DDL typos.
+    #[test]
+    fn grading_sheet_tables_apply_additively() {
+        const NEW_TABLES: &[&str] = &[
+            "task_ai_usage",
+            "ai_usage_enum_domain",
+            "project_final_grade",
+            "student_final_grade",
+            "project_component_score",
+            "student_component_score",
+            "llm_quality_flag",
+        ];
+
+        let conn = Connection::open_in_memory().unwrap();
+        super::apply_schema(&conn).unwrap();
+        // Idempotent: every statement is `IF NOT EXISTS`, so a second apply
+        // on the same connection must still succeed.
+        super::apply_schema(&conn).unwrap();
+
+        for &t in NEW_TABLES {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [t],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                n, 1,
+                "table {t} should exist exactly once after apply_schema"
+            );
+        }
     }
 }
