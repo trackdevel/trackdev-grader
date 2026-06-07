@@ -3,8 +3,10 @@
 use rusqlite::params;
 use sprint_grader_core::Database;
 use sprint_grader_grading_xlsx::{
-    list_graded_project_ids, persist_project_grades, run, grade_project, GradingConfig, RunOpts,
+    grade_project, list_graded_project_ids, load_workbook_data, persist_project_grades, run,
+    GradingConfig, RunOpts,
 };
+use sprint_grader_quality_llm::{persist_project_flags, LlmQualityFlagRow};
 
 fn make_db() -> Database {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -123,6 +125,38 @@ fn subset_run_merges_workbook_projects_and_refreshes_existing() {
     );
 
     assert!(out.is_file(), "merged workbook should exist");
+}
+
+#[test]
+fn workbook_exports_all_llm_flags_not_only_workbook_projects() {
+    let db = make_db();
+    seed_minimal_project(&db, 1, "team-01", "Team 01", 10);
+    seed_minimal_project(&db, 2, "team-02", "Team 02", 20);
+
+    let mk = |pid: i64, summary: &str| LlmQualityFlagRow {
+        project_id: pid,
+        student_id: None,
+        sprint_id: None,
+        scope: "file".into(),
+        target_ref: Some(format!("t:{pid}")),
+        category: "other".into(),
+        severity: "INFO".into(),
+        summary: summary.into(),
+        detail: None,
+        backend: "claude-cli".into(),
+        model_id: "m".into(),
+        prompt_version: "1".into(),
+        generated_at: "2026-01-01T00:00:00Z".into(),
+    };
+    persist_project_flags(&db.conn, 1, &[mk(1, "flag-01")]).unwrap();
+    persist_project_flags(&db.conn, 2, &[mk(2, "flag-02")]).unwrap();
+
+    let cfg = GradingConfig::default();
+    let data = load_workbook_data(&db, &[1], "2026-03-01", &cfg).unwrap();
+    assert_eq!(data.llm_flag_rows.len(), 2);
+    let summaries: Vec<_> = data.llm_flag_rows.iter().map(|r| r.summary.as_str()).collect();
+    assert!(summaries.contains(&"flag-01"));
+    assert!(summaries.contains(&"flag-02"));
 }
 
 #[test]

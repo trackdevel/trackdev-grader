@@ -1922,6 +1922,7 @@ dependencies = [
  "serde",
  "sha2",
  "sprint-grader-core",
+ "sprint-grader-quality-llm",
  "tempfile",
  "toml",
  "tracing",
@@ -1998,7 +1999,10 @@ name = "sprint-grader-quality-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rusqlite",
  "sprint-grader-core",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

@@ -35,6 +35,9 @@ pub struct Config {
     pub mutation: MutationConfig,
     pub architecture: ArchitectureConfig,
     pub evaluate: EvaluateConfig,
+    /// Track B: feedback-only LLM quality flags (`quality-flags` subcommand).
+    /// Never read by the grade pipeline.
+    pub quality_llm: QualityLlmConfig,
 }
 
 /// PR-doc / task-description LLM evaluation config. Mirrors the
@@ -234,6 +237,94 @@ impl Default for ArchitectureConfig {
             claude_cli_path: "claude".to_string(),
             thinking: None,
         }
+    }
+}
+
+/// Track B: feedback-only LLM quality flags (`sprint-grader quality-flags`).
+/// Advisory context for instructors; the grade pipeline never reads
+/// `llm_quality_flag`.
+#[derive(Debug, Clone)]
+pub struct QualityLlmConfig {
+    /// Backend selector: `claude-cli` (default), `cursor-cli`,
+    /// `anthropic-api`, or `ollama`.
+    pub backend: String,
+    /// Pinned model id. Required when `quality-flags` runs; no default
+    /// (prevents silent Opus / session-model fallback).
+    pub model_id: Option<String>,
+    /// Rubric / prompt revision tag; bumps invalidate resume skips.
+    pub prompt_version: String,
+    /// Path to the quality rubric markdown, relative to `config/`.
+    pub rubric_path: String,
+    /// Default cap on holistic (per-project) LLM calls per run. The CLI
+    /// `--max-holistic` flag overrides per invocation.
+    pub max_holistic: usize,
+    /// Concurrent file / holistic judge workers.
+    pub workers: usize,
+    /// Per-call timeout (seconds).
+    pub timeout_seconds: u64,
+    pub claude_cli_path: String,
+    pub cursor_cli_path: String,
+    /// Ollama HTTP base (`backend = "ollama"`).
+    pub ollama_url: String,
+    pub ollama_model: String,
+    /// Pre-filter: max `.java` files sent to the LLM per project (`0` = unlimited).
+    pub max_files_per_project: usize,
+    /// Pre-filter: skip files with fewer fingerprinted statements than this.
+    pub min_surviving_statements: u32,
+    /// Globs matched against repo-relative paths (generated / build output).
+    pub skip_globs: Vec<String>,
+    /// When true, restrict candidates to repos linked to the project via PRs.
+    pub only_delivered_repos: bool,
+}
+
+impl Default for QualityLlmConfig {
+    fn default() -> Self {
+        Self {
+            backend: "claude-cli".to_string(),
+            model_id: None,
+            prompt_version: "1".to_string(),
+            rubric_path: "quality-llm-rubric.md".to_string(),
+            max_holistic: 1,
+            workers: 4,
+            timeout_seconds: 180,
+            claude_cli_path: "claude".to_string(),
+            cursor_cli_path: "agent".to_string(),
+            ollama_url: "http://127.0.0.1:11434".to_string(),
+            ollama_model: "claude-haiku-4-5-20251001".to_string(),
+            max_files_per_project: 40,
+            min_surviving_statements: 1,
+            skip_globs: vec![
+                "**/build/**".to_string(),
+                "**/generated/**".to_string(),
+                "**/R.java".to_string(),
+                "**/*$$*.java".to_string(),
+            ],
+            only_delivered_repos: true,
+        }
+    }
+}
+
+impl QualityLlmConfig {
+    /// Called by `quality-flags` before any LLM work starts.
+    pub fn validate_for_run(&self) -> Result<()> {
+        let id = self.model_id.as_deref().unwrap_or("").trim();
+        if id.is_empty() {
+            return Err(Error::ConfigInvalid(
+                "[quality_llm] model_id is required when running quality-flags — pin \
+                 a cheap model (e.g. \"claude-haiku-4-5-20251001\")."
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolved model id after [`validate_for_run`].
+    pub fn resolved_model_id(&self) -> &str {
+        self.model_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .expect("validate_for_run must be called first")
     }
 }
 
@@ -560,6 +651,42 @@ struct RawConfig {
     architecture: RawArchitecture,
     #[serde(default)]
     evaluate: RawEvaluate,
+    #[serde(default)]
+    quality_llm: RawQualityLlm,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawQualityLlm {
+    #[serde(default)]
+    backend: Option<String>,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    prompt_version: Option<String>,
+    #[serde(default)]
+    rubric_path: Option<String>,
+    #[serde(default)]
+    max_holistic: Option<usize>,
+    #[serde(default)]
+    workers: Option<usize>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    claude_cli_path: Option<String>,
+    #[serde(default)]
+    cursor_cli_path: Option<String>,
+    #[serde(default)]
+    ollama_url: Option<String>,
+    #[serde(default)]
+    ollama_model: Option<String>,
+    #[serde(default)]
+    max_files_per_project: Option<usize>,
+    #[serde(default)]
+    min_surviving_statements: Option<u32>,
+    #[serde(default)]
+    skip_globs: Option<Vec<String>>,
+    #[serde(default)]
+    only_delivered_repos: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -914,6 +1041,10 @@ impl Config {
             evaluate: EvaluateConfig {
                 model_id: "claude-haiku-4-5-20251001".to_string(),
                 ..EvaluateConfig::default()
+            },
+            quality_llm: QualityLlmConfig {
+                model_id: Some("claude-haiku-4-5-20251001".to_string()),
+                ..QualityLlmConfig::default()
             },
         }
     }
@@ -1429,6 +1560,70 @@ impl Config {
                         .unwrap_or(eval_defaults.cursor_cli_path),
                     thinking: eval_thinking,
                     local,
+                }
+            },
+            quality_llm: {
+                let ql_defaults = QualityLlmConfig::default();
+                QualityLlmConfig {
+                    backend: raw
+                        .quality_llm
+                        .backend
+                        .unwrap_or(ql_defaults.backend),
+                    model_id: raw.quality_llm.model_id,
+                    prompt_version: raw
+                        .quality_llm
+                        .prompt_version
+                        .unwrap_or(ql_defaults.prompt_version),
+                    rubric_path: raw
+                        .quality_llm
+                        .rubric_path
+                        .unwrap_or(ql_defaults.rubric_path),
+                    max_holistic: raw
+                        .quality_llm
+                        .max_holistic
+                        .unwrap_or(ql_defaults.max_holistic)
+                        .max(1),
+                    workers: raw
+                        .quality_llm
+                        .workers
+                        .unwrap_or(ql_defaults.workers)
+                        .max(1),
+                    timeout_seconds: raw
+                        .quality_llm
+                        .timeout_seconds
+                        .unwrap_or(ql_defaults.timeout_seconds),
+                    claude_cli_path: raw
+                        .quality_llm
+                        .claude_cli_path
+                        .unwrap_or(ql_defaults.claude_cli_path),
+                    cursor_cli_path: raw
+                        .quality_llm
+                        .cursor_cli_path
+                        .unwrap_or(ql_defaults.cursor_cli_path),
+                    ollama_url: raw
+                        .quality_llm
+                        .ollama_url
+                        .unwrap_or(ql_defaults.ollama_url),
+                    ollama_model: raw
+                        .quality_llm
+                        .ollama_model
+                        .unwrap_or(ql_defaults.ollama_model),
+                    max_files_per_project: raw
+                        .quality_llm
+                        .max_files_per_project
+                        .unwrap_or(ql_defaults.max_files_per_project),
+                    min_surviving_statements: raw
+                        .quality_llm
+                        .min_surviving_statements
+                        .unwrap_or(ql_defaults.min_surviving_statements),
+                    skip_globs: raw
+                        .quality_llm
+                        .skip_globs
+                        .unwrap_or(ql_defaults.skip_globs),
+                    only_delivered_repos: raw
+                        .quality_llm
+                        .only_delivered_repos
+                        .unwrap_or(ql_defaults.only_delivered_repos),
                 }
             },
         })

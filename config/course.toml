@@ -295,3 +295,19 @@ judge_timeout_seconds = 180
 enabled = false
 info_threshold = 0.50
 warning_threshold = 0.30
+
+# Track B — feedback-only LLM quality flags (`sprint-grader quality-flags`).
+# Advisory context for instructors; never a grade input. Optional block —
+# defaults apply when omitted, but `model_id` is required when you run
+# quality-flags (pin a cheap model; no silent session-model fallback).
+#
+# [quality_llm]
+# backend = "claude-cli"          # claude-cli | cursor-cli | anthropic-api | ollama
+# model_id = "claude-haiku-4-5-20251001"
+# prompt_version = "1"            # bump to invalidate resume cache
+# rubric_path = "quality-llm-rubric.md"
+# max_holistic = 1                # per-project holistic LLM calls (CLI --max-holistic overrides)
+# workers = 4
+# timeout_seconds = 180
+# max_files_per_project = 40
+# min_surviving_statements = 1

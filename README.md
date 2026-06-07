@@ -569,8 +569,33 @@ without running a grading pass.
 ### `quality-flags` (Track B)
 
 `sprint-grader quality-flags` will populate advisory `llm_quality_flag` rows and
-the workbook `LLM_Flags` sheet. It is **not implemented yet**; LLM output never
-feeds the grade model. `grading-sheet` does not trigger any LLM pass.
+the workbook `LLM_Flags` sheet. LLM output never feeds the grade model;
+`grading-sheet` does not trigger any LLM pass.
+
+Configuration lives in **`course.toml` `[quality_llm]`** (not `grading.toml`):
+
+| Knob | Purpose |
+|---|---|
+| `backend` | `claude-cli` (default), `cursor-cli`, `anthropic-api`, or `ollama` |
+| `model_id` | **Required** when running quality-flags — pin a cheap model |
+| `prompt_version` | Cache-bust tag for `--resume` |
+| `rubric_path` | Markdown rubric (default `quality-llm-rubric.md`) |
+| `max_holistic` | Cap on per-project holistic LLM calls (`--max-holistic` overrides) |
+| `max_files_per_project` | Pre-filter cap on file-tier calls |
+| `skip_globs` | Skip generated/build paths before LLM |
+
+Track B PA (config + prefilter + persist scaffolding) is in place; the LLM file
+pass lands in PB.
+
+**Incremental** (mirrors `grading-sheet`): `--projects` refreshes only the
+listed teams' `llm_quality_flag` rows; other teams' flags are preserved.
+`grading-sheet` always exports **all** flags on the `LLM_Flags` sheet.
+
+```bash
+sprint-grader quality-flags --projects team-01
+sprint-grader quality-flags --projects team-02   # team-01 flags kept
+sprint-grader grading-sheet --workbook-only        # LLM_Flags shows both teams
+```
 
 ## Subcommand reference
 

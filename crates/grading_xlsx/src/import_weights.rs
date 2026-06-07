@@ -178,6 +178,7 @@ mod tests {
             crit_flags: vec![],
             flag_rows: vec![],
             ai_detect_rows: vec![],
+            llm_flag_rows: vec![],
         };
         let xlsx_path = dir.path().join("sheet.xlsx");
         let buf = write_workbook_buffer(&data, &cfg).unwrap();

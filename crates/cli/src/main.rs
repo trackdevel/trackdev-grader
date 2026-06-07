@@ -593,7 +593,11 @@ enum Command {
     },
     /// Feedback-only LLM quality flags (Track B; advisory, never grade inputs).
     ///
-    /// Not yet implemented — stub dispatches to `quality_llm` for CLI parity.
+    /// Feedback-only LLM quality flags (Track B; advisory, never grade inputs).
+    ///
+    /// Incremental: `--projects` scopes the LLM pass to listed teams; other
+    /// teams' `llm_quality_flag` rows are preserved. `grading-sheet` exports
+    /// all flags on the `LLM_Flags` sheet.
     QualityFlags {
         #[command(flatten)]
         projects: ProjectsArg,

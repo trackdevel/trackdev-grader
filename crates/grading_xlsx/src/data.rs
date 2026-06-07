@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use sprint_grader_core::finding::{RuleKind, Severity};
 use sprint_grader_core::rule_attribution::load_attributed_findings_for_repo;
 use sprint_grader_core::Database;
+use sprint_grader_quality_llm::list_all_flags;
 
 use crate::aggregate::load_task_points;
 use crate::config::GradingConfig;
@@ -25,6 +26,18 @@ pub struct WorkbookData {
     pub crit_flags: Vec<CritFlagRow>,
     pub flag_rows: Vec<FlagDiagRow>,
     pub ai_detect_rows: Vec<AiDetectRow>,
+    pub llm_flag_rows: Vec<LlmFlagRow>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmFlagRow {
+    pub project_id: i64,
+    pub student_id: Option<String>,
+    pub sprint_id: Option<i64>,
+    pub scope: String,
+    pub category: String,
+    pub severity: String,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +172,19 @@ pub fn load_workbook_data_with_results(
         .map(|r| r.weights_version.clone())
         .unwrap_or_else(|| cfg.weights_version());
 
+    let llm_flag_rows = list_all_flags(conn)?
+        .into_iter()
+        .map(|f| LlmFlagRow {
+            project_id: f.project_id,
+            student_id: f.student_id,
+            sprint_id: f.sprint_id,
+            scope: f.scope,
+            category: f.category,
+            severity: f.severity,
+            summary: f.summary,
+        })
+        .collect();
+
     Ok(WorkbookData {
         generated_at,
         weights_version,
@@ -168,6 +194,7 @@ pub fn load_workbook_data_with_results(
         crit_flags,
         flag_rows,
         ai_detect_rows,
+        llm_flag_rows,
     })
 }
 

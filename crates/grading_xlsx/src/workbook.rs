@@ -93,7 +93,7 @@ fn build_workbook(data: &WorkbookData, cfg: &GradingConfig) -> Result<Workbook> 
     write_team_points_sheet(&mut workbook, data, &num_fmt)?;
     write_project_grades_sheet(&mut workbook, data, cfg, &num_fmt)?;
     write_student_grades_sheet(&mut workbook, data, cfg, &num_fmt)?;
-    write_llm_flags_sheet(&mut workbook)?;
+    write_llm_flags_sheet(&mut workbook, data)?;
     write_methodology_sheet(&mut workbook, data)?;
 
     let _ = decimals;
@@ -863,7 +863,7 @@ fn write_ai_detect_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result
     Ok(())
 }
 
-fn write_llm_flags_sheet(workbook: &mut Workbook) -> Result<()> {
+fn write_llm_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result<()> {
     let ws = workbook
         .add_worksheet()
         .set_name("LLM_Flags")
@@ -882,6 +882,20 @@ fn write_llm_flags_sheet(workbook: &mut Workbook) -> Result<()> {
     .enumerate()
     {
         ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+    }
+    for (i, row) in data.llm_flag_rows.iter().enumerate() {
+        let r = 1 + i as u32;
+        ws.write_number(r, 0, row.project_id as f64)?;
+        if let Some(sid) = &row.student_id {
+            ws.write_string(r, 1, sid)?;
+        }
+        if let Some(sid) = row.sprint_id {
+            ws.write_number(r, 2, sid as f64)?;
+        }
+        ws.write_string(r, 3, &row.scope)?;
+        ws.write_string(r, 4, &row.category)?;
+        ws.write_string(r, 5, &row.severity)?;
+        ws.write_string(r, 6, &row.summary)?;
     }
     ws.protect();
     Ok(())
