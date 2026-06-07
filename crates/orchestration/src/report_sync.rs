@@ -55,6 +55,7 @@ pub fn sync_reports_through_sprint(
             skip_repos: false,
             force_pr_refresh: false,
             repos_dir: Some(entregues_dir.to_path_buf()),
+            ai_attribute_name: None,
         };
         run_collection(config, &db, &collect_opts).context("collect failed")?;
     }
