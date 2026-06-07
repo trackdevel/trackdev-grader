@@ -863,10 +863,13 @@ fn write_ai_detect_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result
     Ok(())
 }
 
+/// Advisory LLM quality flags (Track B); never a grade input.
+pub const LLM_FLAGS_SHEET_NAME: &str = "LLM_Flags";
+
 fn write_llm_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result<()> {
     let ws = workbook
         .add_worksheet()
-        .set_name("LLM_Flags")
+        .set_name(LLM_FLAGS_SHEET_NAME)
         .map_err(xlsx_err)?;
     let hdr = header_format();
     for (i, h) in [
@@ -874,6 +877,7 @@ fn write_llm_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result
         "student_id",
         "sprint_id",
         "scope",
+        "target_ref",
         "category",
         "severity",
         "summary",
@@ -893,9 +897,12 @@ fn write_llm_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result
             ws.write_number(r, 2, sid as f64)?;
         }
         ws.write_string(r, 3, &row.scope)?;
-        ws.write_string(r, 4, &row.category)?;
-        ws.write_string(r, 5, &row.severity)?;
-        ws.write_string(r, 6, &row.summary)?;
+        if let Some(t) = &row.target_ref {
+            ws.write_string(r, 4, t)?;
+        }
+        ws.write_string(r, 5, &row.category)?;
+        ws.write_string(r, 6, &row.severity)?;
+        ws.write_string(r, 7, &row.summary)?;
     }
     ws.protect();
     Ok(())
