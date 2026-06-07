@@ -646,4 +646,34 @@ mod tests {
         // But the row-level dump hides the within-tolerance difference.
         assert!(reports[0].row_diffs.is_empty());
     }
+
+    /// Wave 1 (grading-sheet): the seven new grade + AI-usage + LLM-flag
+    /// tables are deliberately exempt from the dual-run parity contract.
+    /// Grade tables are downstream report output; AI-usage tables are
+    /// collected inputs/diagnostics. None may appear in `DERIVED_TABLES`
+    /// or `COLLECTION_TABLES`, or `diff-db` would start reporting drift on
+    /// (intentionally non-deterministic) grade output. See
+    /// `crates/grading_xlsx/SCHEMA_NOTES.md` "Parity-contract exclusion".
+    #[test]
+    fn grading_sheet_tables_are_excluded_from_parity_contract() {
+        const NEW_TABLES: &[&str] = &[
+            "task_ai_usage",
+            "ai_usage_enum_domain",
+            "project_final_grade",
+            "student_final_grade",
+            "project_component_score",
+            "student_component_score",
+            "llm_quality_flag",
+        ];
+        for t in NEW_TABLES {
+            assert!(
+                !DERIVED_TABLES.contains(t),
+                "{t} must stay OUT of DERIVED_TABLES (grade/AI tables are parity-exempt)"
+            );
+            assert!(
+                !COLLECTION_TABLES.contains(t),
+                "{t} must stay OUT of COLLECTION_TABLES (grade/AI tables are parity-exempt)"
+            );
+        }
+    }
 }
