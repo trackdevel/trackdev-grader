@@ -13,10 +13,16 @@
 //!
 //! The rubric and user message are combined into one positional prompt
 //! (the CLI has no `--append-system-prompt` analogue).
+//!
+//! **Concurrency:** each `agent` startup atomically renames
+//! `~/.cursor/cli-config.json.tmp` → `cli-config.json`. Parallel spawns
+//! race on that path and fail with `ENOENT` on the rename. All
+//! `complete()` calls therefore take a process-wide lock and
+//! [`max_parallel_invocations`] is `1` regardless of `judge_workers`.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -36,6 +42,9 @@ pub struct CursorCliClient {
 }
 
 static WORKSPACE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Serialises `agent` subprocesses — see module docs.
+static INVOCATION_LOCK: Mutex<()> = Mutex::new(());
 
 fn isolated_workspace() -> PathBuf {
     WORKSPACE
@@ -75,6 +84,11 @@ impl CursorCliClient {
         &self.model
     }
 
+    /// Upper bound for Rayon pools when this backend is selected.
+    pub fn max_parallel_invocations() -> usize {
+        1
+    }
+
     /// Build argv after the binary name. Pulled out as a pure function so
     /// tests can assert `--model` and `--mode ask` are always present.
     fn build_argv(&self, combined_prompt: &str) -> Vec<String> {
@@ -97,6 +111,10 @@ impl CursorCliClient {
     /// `user_prompt` is the PR/task payload. Returns raw stdout for JSON
     /// extraction by the caller.
     pub fn complete(&self, system: &str, user_prompt: &str) -> Result<String, CursorCliError> {
+        let _guard = INVOCATION_LOCK.lock().map_err(|e| {
+            CursorCliError::Cli(format!("cursor agent CLI invocation lock poisoned: {e}"))
+        })?;
+
         // Rubric already ends with "Reply ONLY JSON"; user turn is minimal.
         let combined = format!("{system}\n\n---\n\n{user_prompt}");
         let mut child = Command::new(&self.cli_path)
@@ -198,5 +216,10 @@ mod tests {
         assert!(!CursorCliClient::is_available(
             "/definitely/not/a/real/binary-xyz"
         ));
+    }
+
+    #[test]
+    fn max_parallel_invocations_is_one() {
+        assert_eq!(CursorCliClient::max_parallel_invocations(), 1);
     }
 }
