@@ -1999,8 +1999,13 @@ name = "sprint-grader-quality-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "rayon",
  "rusqlite",
+ "serde_json",
  "sprint-grader-core",
+ "sprint-grader-evaluate",
+ "sprint-grader-evaluate-local",
  "tempfile",
  "tracing",
 ]
