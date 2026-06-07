@@ -33,8 +33,8 @@ use serde_json::Value;
 use sprint_grader_core::Config;
 use tracing::{debug, info, warn};
 
-use crate::cli_rubric::RubricCliBackend;
 use crate::claude_cli_client::ClaudeCliClient;
+use crate::cli_rubric::RubricCliBackend;
 use crate::cursor_cli_client::CursorCliClient;
 use crate::deepseek_client::DeepseekClient;
 use crate::llm_client::{AnthropicClient, Conversation};
@@ -89,8 +89,8 @@ struct TaskEvalResponse {
 // so the binary stays self-contained, but each rubric lives in its own .md
 // file for easy per-semester tuning without touching Rust.
 
-pub use crate::prompt::{build_pr_judge_user_message, build_task_judge_user_message, RUBRIC_PR};
 use crate::prompt::RUBRIC_TASK;
+pub use crate::prompt::{build_pr_judge_user_message, build_task_judge_user_message, RUBRIC_PR};
 
 // ---- Heuristic scoring (used when no API key is set) ----
 
@@ -614,12 +614,8 @@ fn evaluate_prs_llm(
                 .unwrap_or_else(|| "N/A".to_string());
             let task_name = task_name.as_deref().unwrap_or("");
             let title_str = title.as_deref().unwrap_or("");
-            let msg = build_pr_judge_user_message(
-                task_name,
-                &parent_story,
-                title_str,
-                body.as_deref(),
-            );
+            let msg =
+                build_pr_judge_user_message(task_name, &parent_story, title_str, body.as_deref());
 
             let reply = match conv.ask(&msg) {
                 Ok(r) => r,
@@ -1198,8 +1194,7 @@ fn evaluate_tasks_via_cli<B: RubricCliBackend + Sync>(
                     .unwrap_or_else(|| "N/A".to_string()),
                 None => "N/A".to_string(),
             };
-            let user_msg =
-                build_task_judge_user_message(&task_key, &parent_name, name.as_deref());
+            let user_msg = build_task_judge_user_message(&task_key, &parent_name, name.as_deref());
             (task_id, name, user_msg)
         })
         .collect();
