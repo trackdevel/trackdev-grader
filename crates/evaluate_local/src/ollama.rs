@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sprint_grader_core::config::LocalEvaluateConfig;
+use sprint_grader_core::config::{LocalEvaluateConfig, QualityLlmConfig};
 
 /// Backend abstraction: embedding + chat. Implementations must be
 /// `Send + Sync` so the (single-threaded P1) caller and any future
@@ -78,6 +78,22 @@ impl OllamaClient {
             embed_model: cfg.embed_model.clone(),
             llm_model: cfg.llm_model.clone(),
             llm_keep_alive: cfg.llm_keep_alive.clone(),
+        })
+    }
+
+    /// Chat-only client for `quality-flags` (`backend = "ollama"`). Call
+    /// [`QualityLlmConfig::validate_for_run`] before this constructor.
+    pub fn from_quality_llm(cfg: &QualityLlmConfig) -> Result<Self, OllamaError> {
+        let http = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(cfg.timeout_seconds.max(1)))
+            .build()
+            .map_err(|e| OllamaError::Http(e.to_string()))?;
+        Ok(Self {
+            base_url: cfg.ollama_url.trim_end_matches('/').to_string(),
+            http,
+            embed_model: String::new(),
+            llm_model: cfg.resolved_model_id().to_string(),
+            llm_keep_alive: "0".to_string(),
         })
     }
 }
