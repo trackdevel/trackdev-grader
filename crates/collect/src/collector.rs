@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use sprint_grader_core::attribution::{
     merge_attribution_errors, ATTR_ERR_HTTP_FAILURE, ATTR_ERR_NULL_AUTHOR,
 };
-use sprint_grader_core::{Config, Database};
+use sprint_grader_core::{Config, Database, DEFAULT_AI_ATTRIBUTE_NAME};
 
 use crate::github_client::{ConditionalResult, GitHubClient};
 use crate::pm_client::{TrackDevClient, TrackDevError};
@@ -30,6 +30,10 @@ pub struct CollectOpts {
     pub force_pr_refresh: bool,
     /// Where cloned repos live (typically `data/entregues/`).
     pub repos_dir: Option<PathBuf>,
+    /// Override the TrackDev attribute name carrying declared AI usage.
+    /// `None` ⇒ `sprint_grader_core::DEFAULT_AI_ATTRIBUTE_NAME` ("Ús de IA");
+    /// set only when a TrackDev instance renamed the attribute.
+    pub ai_attribute_name: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +72,12 @@ pub fn run_collection(
         .cloned()
         .unwrap_or_default();
 
+    // Resolve the declared-AI attribute name once (None ⇒ the core default).
+    let ai_attribute_name = opts
+        .ai_attribute_name
+        .as_deref()
+        .unwrap_or(DEFAULT_AI_ATTRIBUTE_NAME);
+
     for project in projects {
         let project_name = project
             .get("name")
@@ -101,7 +111,14 @@ pub fn run_collection(
             continue;
         }
 
-        collect_project_via_exports(&td, db, project_id, &sprint_ids)?;
+        collect_project_via_exports(
+            &td,
+            db,
+            project_id,
+            &sprint_ids,
+            ai_attribute_name,
+            &opts.today,
+        )?;
         project_ids.push(project_id);
 
         // Stash repo list for optional cloning step below — union across all
@@ -287,6 +304,57 @@ fn upsert_student_from_value(
     Ok(())
 }
 
+/// Capture a task's declared "Ús de IA" usage from the export entry's sibling
+/// `attributeValues[]` array. The attribute is an ENUM_PAIR: slot 1 = model
+/// (`value`), slot 2 = level A–E (`valueB`); the inline `enumValues` /
+/// `enumValues2` domains are snapshotted into `ai_usage_enum_domain`. A no-op
+/// when the attribute is absent — the grader then treats the task as
+/// undeclared (assumed discount + `MISSING_AI_DECLARATION`).
+fn capture_declared_ai_usage(
+    db: &Database,
+    task_id: i64,
+    entry: &Value,
+    attr_name: &str,
+    captured_at: &str,
+) -> Result<(), CollectError> {
+    let Some(attrs) = entry.get("attributeValues").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let Some(ai) = attrs.iter().find(|a| {
+        a.get("attributeName").and_then(Value::as_str) == Some(attr_name)
+            && a.get("attributeType").and_then(Value::as_str) == Some("ENUM_PAIR")
+    }) else {
+        return Ok(());
+    };
+
+    // Blank slots collapse to None so `declared` and NULL storage agree.
+    let model = ai
+        .get("value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let level = ai
+        .get("valueB")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let declared = model.is_some() && level.is_some();
+    db.upsert_task_ai_usage(task_id, model, level, declared, captured_at)?;
+
+    // Snapshot both inline enum domains (idempotent on (slot, value)).
+    for (slot, key) in [(1i64, "enumValues"), (2i64, "enumValues2")] {
+        if let Some(domain) = ai.get(key).and_then(Value::as_array) {
+            for (ord, item) in domain.iter().enumerate() {
+                if let Some(v) = item.get("value").and_then(Value::as_str) {
+                    let desc = item.get("description").and_then(Value::as_str);
+                    db.upsert_ai_usage_enum_value(slot, v, desc, Some(ord as i64))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Collect project data via the 3 TrackDev export endpoints, upserting
 /// per-sprint rows for every sprint id in `sprint_ids`. These exports are
 /// project-wide; the three HTTP calls are made once and the payload is
@@ -299,6 +367,8 @@ fn collect_project_via_exports(
     db: &Database,
     project_id: i64,
     sprint_ids: &[i64],
+    ai_attribute_name: &str,
+    captured_at: &str,
 ) -> Result<(), CollectError> {
     if sprint_ids.is_empty() {
         return Ok(());
@@ -363,6 +433,8 @@ fn collect_project_via_exports(
                 sprint_id,
                 task.get("parentTaskId").and_then(Value::as_i64),
             )?;
+
+            capture_declared_ai_usage(db, task_id, entry, ai_attribute_name, captured_at)?;
 
             if let Some(prs) = task.get("pullRequests").and_then(Value::as_array) {
                 for pr in prs {
@@ -1546,5 +1618,117 @@ mod skip_logic_tests {
             pr_fully_collected(&db, &pr).unwrap(),
             "merged_at present + commits present + watermark matches → skip"
         );
+    }
+}
+
+#[cfg(test)]
+mod declared_ai_tests {
+    //! `capture_declared_ai_usage` parses the export entry's sibling
+    //! `attributeValues[]` ENUM_PAIR ("Ús de IA") into `task_ai_usage` +
+    //! `ai_usage_enum_domain`.
+
+    use super::*;
+    use rusqlite::Connection;
+    use sprint_grader_core::db::apply_schema;
+    use std::path::PathBuf;
+
+    fn mk_db() -> Database {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        Database {
+            db_path: PathBuf::new(),
+            conn,
+        }
+    }
+
+    #[test]
+    fn captures_declared_usage_and_enum_domains() {
+        let db = mk_db();
+        let entry = serde_json::json!({
+            "task": { "id": 42 },
+            "attributeValues": [{
+                "attributeName": "Ús de IA",
+                "attributeType": "ENUM_PAIR",
+                "value": "Cursor",
+                "valueB": "C",
+                "enumValues": [
+                    {"value": "Cap", "description": "No AI"},
+                    {"value": "Cursor", "description": "Cursor IDE"}
+                ],
+                "enumValues2": [
+                    {"value": "A", "description": "almost none"},
+                    {"value": "C", "description": "about half"}
+                ]
+            }]
+        });
+
+        capture_declared_ai_usage(&db, 42, &entry, "Ús de IA", "2026-06-07").unwrap();
+
+        let (model, level, declared): (Option<String>, Option<String>, i64) = db
+            .conn
+            .query_row(
+                "SELECT model_value, level_value, declared FROM task_ai_usage WHERE task_id = 42",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(model.as_deref(), Some("Cursor"));
+        assert_eq!(level.as_deref(), Some("C"));
+        assert_eq!(declared, 1);
+
+        let domain_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM ai_usage_enum_domain", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(domain_count, 4);
+        let model_ord: i64 = db
+            .conn
+            .query_row(
+                "SELECT ord FROM ai_usage_enum_domain WHERE slot = 1 AND value = 'Cursor'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(model_ord, 1);
+    }
+
+    #[test]
+    fn blank_second_slot_is_undeclared() {
+        let db = mk_db();
+        let entry = serde_json::json!({
+            "task": { "id": 7 },
+            "attributeValues": [{
+                "attributeName": "Ús de IA",
+                "attributeType": "ENUM_PAIR",
+                "value": "Cursor",
+                "valueB": "",
+                "enumValues": [],
+                "enumValues2": []
+            }]
+        });
+        capture_declared_ai_usage(&db, 7, &entry, "Ús de IA", "2026-06-07").unwrap();
+        let declared: i64 = db
+            .conn
+            .query_row(
+                "SELECT declared FROM task_ai_usage WHERE task_id = 7",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(declared, 0);
+    }
+
+    #[test]
+    fn absent_attribute_is_a_noop() {
+        let db = mk_db();
+        let entry = serde_json::json!({ "task": { "id": 9 }, "attributeValues": [] });
+        capture_declared_ai_usage(&db, 9, &entry, "Ús de IA", "2026-06-07").unwrap();
+        let rows: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM task_ai_usage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 }
