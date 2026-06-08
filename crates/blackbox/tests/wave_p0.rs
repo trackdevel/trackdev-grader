@@ -29,7 +29,7 @@ fn count_flags_for(conn: &rusqlite::Connection, sprint_id: i64, ftype: &str, stu
     .unwrap()
 }
 
-// ─── T-T1.1 — stage ordering: inequality flags require team_sprint_inequality ──
+// ─── T-T1.1 — inequality stage populates team_sprint_inequality ─────────────
 
 #[test]
 fn t_t1_1_stage_ordering_inequality_then_flags() {
@@ -59,10 +59,23 @@ fn t_t1_1_stage_ordering_inequality_then_flags() {
     sprint_grader_analyze::inequality::compute_all_inequality(&conn, ids::SPRINT_ID).unwrap();
     detect_flags_for_sprint_id(&conn, ids::SPRINT_ID, &Config::test_default()).unwrap();
 
-    // THEN team_inequality flag(s) exist for sprint 2 — proves the
-    // ordering is honoured (flag detection sees the populated row).
-    let n = count_flags(&conn, ids::SPRINT_ID, "TEAM_INEQUALITY");
-    assert!(n > 0, "expected ≥1 TEAM_INEQUALITY flag, got {n}");
+    // THEN team_sprint_inequality is populated (TEAM_INEQUALITY detector removed).
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM team_sprint_inequality WHERE sprint_id = ?",
+            params![ids::SPRINT_ID],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        n > 0,
+        "expected team_sprint_inequality rows after inequality stage, got {n}"
+    );
+    assert_eq!(
+        count_flags(&conn, ids::SPRINT_ID, "TEAM_INEQUALITY"),
+        0,
+        "TEAM_INEQUALITY detector is disabled"
+    );
 }
 
 // ─── T-T1.2 — heuristic doc eval populates pr_doc_evaluation without API key ──
