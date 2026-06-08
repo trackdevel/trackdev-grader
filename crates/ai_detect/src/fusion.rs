@@ -183,9 +183,6 @@ pub fn compute_heuristic_score(conn: &Connection, pr_id: &str) -> f64 {
     if set.contains("SINGLE_COMMIT_DUMP") {
         score += 0.30;
     }
-    if set.contains("NO_REVIEWS_RECEIVED") {
-        score += 0.10;
-    }
     if set.contains("EMPTY_DESCRIPTION") {
         score += 0.20;
     }
