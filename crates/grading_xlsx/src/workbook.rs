@@ -9,6 +9,7 @@ use rust_xlsxwriter::{
 
 use crate::config::GradingConfig;
 use crate::data::{ProjectAxisRaw, WorkbookData};
+use crate::excel_text::truncate_excel_cell;
 use crate::import_weights::WEIGHTS_SHEET_NAME;
 use crate::weights_layout::{K_CRIT_ROW, LEVEL_TABLE_START, MODEL_TABLE_START};
 
@@ -62,6 +63,18 @@ fn xl_row_to_excel(row: u32) -> u32 {
     row + 1
 }
 
+fn write_cell(ws: &mut Worksheet, row: u32, col: u16, s: &str) -> Result<()> {
+    ws.write_string(row, col, truncate_excel_cell(s).as_ref())
+        .map(|_| ())
+        .map_err(xlsx_err)
+}
+
+fn write_cell_fmt(ws: &mut Worksheet, row: u32, col: u16, s: &str, fmt: &Format) -> Result<()> {
+    ws.write_string_with_format(row, col, truncate_excel_cell(s).as_ref(), fmt)
+        .map(|_| ())
+        .map_err(xlsx_err)
+}
+
 pub fn write_workbook(data: &WorkbookData, cfg: &GradingConfig, out: &Path) -> Result<()> {
     let mut workbook = build_workbook(data, cfg)?;
     workbook
@@ -110,7 +123,7 @@ fn write_weights_sheet(workbook: &mut Workbook, cfg: &GradingConfig) -> Result<(
     let dv_decimal =
         DataValidation::new().allow_decimal_number(DataValidationRule::Between(0.0, 10.0));
 
-    ws.write_string_with_format(0, 0, "Grading weights & anchors", &header_format())?;
+    write_cell_fmt(ws, 0, 0, "Grading weights & anchors", &header_format())?;
 
     let scalar_rows: [(&str, f64); 22] = [
         ("w_doc (documentation)", cfg.weights_project.documentation),
@@ -139,38 +152,38 @@ fn write_weights_sheet(workbook: &mut Workbook, cfg: &GradingConfig) -> Result<(
 
     for (i, (label, value)) in scalar_rows.iter().enumerate() {
         let row = 1 + i as u32;
-        ws.write_string(row, 0, *label)?;
+        write_cell(ws, row, 0, *label)?;
         ws.write_number_with_format(row, 1, *value, &input)?;
         ws.add_data_validation(row, 1, row, 1, &dv_decimal)?;
     }
 
     let k_row = K_CRIT_ROW;
-    ws.write_string(k_row, 0, "k_crit")?;
+    write_cell(ws, k_row, 0, "k_crit")?;
     ws.write_number_with_format(k_row, 1, cfg.normalization.k_crit, &input)?;
     ws.add_data_validation(k_row, 1, k_row, 1, &dv_decimal)?;
-    ws.write_string(k_row + 1, 0, "k_warn")?;
+    write_cell(ws, k_row + 1, 0, "k_warn")?;
     ws.write_number_with_format(k_row + 1, 1, cfg.normalization.k_warn, &input)?;
     ws.add_data_validation(k_row + 1, 1, k_row + 1, 1, &dv_decimal)?;
-    ws.write_string(k_row + 2, 0, "arch_norm")?;
+    write_cell(ws, k_row + 2, 0, "arch_norm")?;
     ws.write_number_with_format(k_row + 2, 1, cfg.normalization.arch_norm, &input)?;
     ws.add_data_validation(k_row + 2, 1, k_row + 2, 1, &dv_decimal)?;
 
-    ws.write_string(MODEL_TABLE_START - 1, 0, "Model IA → m")?;
-    ws.write_string(MODEL_TABLE_START - 1, 1, "m")?;
+    write_cell(ws, MODEL_TABLE_START - 1, 0, "Model IA → m")?;
+    write_cell(ws, MODEL_TABLE_START - 1, 1, "m")?;
     let mut model_row = MODEL_TABLE_START;
     for (name, m) in &cfg.ai_usage.models {
-        ws.write_string(model_row, 0, name)?;
+        write_cell(ws, model_row, 0, name)?;
         ws.write_number_with_format(model_row, 1, *m, &input)?;
         ws.add_data_validation(model_row, 1, model_row, 1, &dv_decimal)?;
         model_row += 1;
     }
     let model_last = model_row.saturating_sub(1);
 
-    ws.write_string(LEVEL_TABLE_START - 1, 0, "Nivell IA → l")?;
-    ws.write_string(LEVEL_TABLE_START - 1, 1, "l")?;
+    write_cell(ws, LEVEL_TABLE_START - 1, 0, "Nivell IA → l")?;
+    write_cell(ws, LEVEL_TABLE_START - 1, 1, "l")?;
     let mut level_row = LEVEL_TABLE_START;
     for (level, l) in &cfg.ai_usage.levels {
-        ws.write_string(level_row, 0, level)?;
+        write_cell(ws, level_row, 0, level)?;
         ws.write_number_with_format(level_row, 1, *l, &input)?;
         ws.add_data_validation(level_row, 1, level_row, 1, &dv_decimal)?;
         level_row += 1;
@@ -260,12 +273,11 @@ fn write_one_axis_sheet(
 
 fn write_axis_headers(ws: &mut Worksheet, sheet: &str) -> Result<()> {
     let hdr = header_format();
-    let base = ["project_id", "project_name", "raw", "present", "score_0_10"];
+    let base = ["project", "raw", "present", "score_0_10"];
     match sheet {
         "Quality" => {
             for (i, h) in [
-                "project_id",
-                "project_name",
+                "project",
                 "mi_raw",
                 "cc_pct",
                 "mutation_score",
@@ -275,12 +287,12 @@ fn write_axis_headers(ws: &mut Worksheet, sheet: &str) -> Result<()> {
             .iter()
             .enumerate()
             {
-                ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+                write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
             }
         }
         _ => {
             for (i, h) in base.iter().enumerate() {
-                ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+                write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
             }
         }
     }
@@ -295,20 +307,19 @@ fn write_docs_row(
     cfg: &GradingConfig,
 ) -> Result<()> {
     let er = xl_row_to_excel(row);
-    ws.write_number(row, 0, result.project.project_id as f64)?;
-    ws.write_string(row, 1, &result.project.name)?;
+    write_cell(ws, row, 0, &result.project.name)?;
     if let Some(raw) = axis.documentation_raw {
-        ws.write_number(row, 2, raw)?;
+        ws.write_number(row, 1, raw)?;
     }
-    ws.write_number(row, 3, if axis.documentation_present { 1.0 } else { 0.0 })?;
-    let formula = format!("IF(D{er}<>0,MEDIAN(0,10*MEDIAN(0,C{er}/doc_max,1),10),\"\")");
+    ws.write_number(row, 2, if axis.documentation_present { 1.0 } else { 0.0 })?;
+    let formula = format!("IF(C{er}<>0,MEDIAN(0,10*MEDIAN(0,B{er}/doc_max,1),10),\"\")");
     let cached = axis
         .documentation_score
         .map(|v| fmt_num(v, cfg.output.decimals))
         .unwrap_or_default();
     ws.write_formula_with_format(
         row,
-        4,
+        3,
         Formula::new(formula).set_result(cached),
         &dec_format(cfg.output.decimals),
     )?;
@@ -323,20 +334,19 @@ fn write_quality_row(
     cfg: &GradingConfig,
 ) -> Result<()> {
     let er = xl_row_to_excel(row);
-    ws.write_number(row, 0, result.project.project_id as f64)?;
-    ws.write_string(row, 1, &result.project.name)?;
+    write_cell(ws, row, 0, &result.project.name)?;
     if let Some(raw) = axis.code_quality_raw {
-        ws.write_number(row, 2, raw)?;
+        ws.write_number(row, 1, raw)?;
     }
     if let Some(cc) = axis.cc_pct {
-        ws.write_number(row, 3, cc)?;
+        ws.write_number(row, 2, cc)?;
     }
     if let Some(ms) = axis.mutation_score {
-        ws.write_number(row, 4, ms)?;
+        ws.write_number(row, 3, ms)?;
     }
-    ws.write_number(row, 5, if axis.code_quality_present { 1.0 } else { 0.0 })?;
+    ws.write_number(row, 4, if axis.code_quality_present { 1.0 } else { 0.0 })?;
     let formula = format!(
-        "IF(F{er}<>0,MEDIAN(0,10*MEDIAN(0,(C{er}-mi_floor)/(mi_ceiling-mi_floor),1)-cc_penalty*(D{er}/100)+MIN(test_cap,test_bonus*E{er}),10),\"\")"
+        "IF(E{er}<>0,MEDIAN(0,10*MEDIAN(0,(B{er}-mi_floor)/(mi_ceiling-mi_floor),1)-cc_penalty*(C{er}/100)+MIN(test_cap,test_bonus*D{er}),10),\"\")"
     );
     let cached = axis
         .code_quality_score
@@ -344,7 +354,7 @@ fn write_quality_row(
         .unwrap_or_default();
     ws.write_formula_with_format(
         row,
-        6,
+        5,
         Formula::new(formula).set_result(cached),
         &dec_format(cfg.output.decimals),
     )?;
@@ -359,14 +369,13 @@ fn write_survival_row(
     cfg: &GradingConfig,
 ) -> Result<()> {
     let er = xl_row_to_excel(row);
-    ws.write_number(row, 0, result.project.project_id as f64)?;
-    ws.write_string(row, 1, &result.project.name)?;
+    write_cell(ws, row, 0, &result.project.name)?;
     if let Some(raw) = axis.survival_raw {
-        ws.write_number(row, 2, raw)?;
+        ws.write_number(row, 1, raw)?;
     }
-    ws.write_number(row, 3, if axis.survival_present { 1.0 } else { 0.0 })?;
+    ws.write_number(row, 2, if axis.survival_present { 1.0 } else { 0.0 })?;
     let formula = format!(
-        "IF(D{er}<>0,MEDIAN(0,10*MEDIAN(0,(C{er}-surv_floor)/(surv_ceiling-surv_floor),1),10),\"\")"
+        "IF(C{er}<>0,MEDIAN(0,10*MEDIAN(0,(B{er}-surv_floor)/(surv_ceiling-surv_floor),1),10),\"\")"
     );
     let cached = axis
         .survival_score
@@ -374,7 +383,7 @@ fn write_survival_row(
         .unwrap_or_default();
     ws.write_formula_with_format(
         row,
-        4,
+        3,
         Formula::new(formula).set_result(cached),
         &dec_format(cfg.output.decimals),
     )?;
@@ -389,20 +398,19 @@ fn write_arch_row(
     cfg: &GradingConfig,
 ) -> Result<()> {
     let er = xl_row_to_excel(row);
-    ws.write_number(row, 0, result.project.project_id as f64)?;
-    ws.write_string(row, 1, &result.project.name)?;
+    write_cell(ws, row, 0, &result.project.name)?;
     if let Some(density) = axis.architecture_density {
-        ws.write_number(row, 2, density)?;
+        ws.write_number(row, 1, density)?;
     }
-    ws.write_number(row, 3, if axis.architecture_present { 1.0 } else { 0.0 })?;
-    let formula = format!("IF(D{er}<>0,MEDIAN(0,10-MIN(10,C{er}),10),\"\")");
+    ws.write_number(row, 2, if axis.architecture_present { 1.0 } else { 0.0 })?;
+    let formula = format!("IF(C{er}<>0,MEDIAN(0,10-MIN(10,B{er}),10),\"\")");
     let cached = axis
         .architecture_score
         .map(|v| fmt_num(v, cfg.output.decimals))
         .unwrap_or_default();
     ws.write_formula_with_format(
         row,
-        4,
+        3,
         Formula::new(formula).set_result(cached),
         &dec_format(cfg.output.decimals),
     )?;
@@ -422,9 +430,9 @@ fn write_ai_usage_sheet(
         .map_err(xlsx_err)?;
     let hdr = header_format();
     for (i, h) in [
-        "project_id",
-        "task_id",
-        "assignee_id",
+        "project",
+        "task",
+        "assignee",
         "model",
         "level",
         "m",
@@ -436,7 +444,7 @@ fn write_ai_usage_sheet(
     .iter()
     .enumerate()
     {
-        ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
     }
 
     let w = WEIGHTS_SHEET_NAME;
@@ -448,14 +456,14 @@ fn write_ai_usage_sheet(
     for (i, task) in data.tasks.iter().enumerate() {
         let row = 1 + i as u32;
         let er = xl_row_to_excel(row);
-        ws.write_number(row, 0, task.project_id as f64)?;
-        ws.write_number(row, 1, task.task_id as f64)?;
-        ws.write_string(row, 2, &task.assignee_id)?;
+        write_cell(ws, row, 0, &data.labels.project(task.project_id))?;
+        write_cell(ws, row, 1, &data.labels.task(task.task_id))?;
+        write_cell(ws, row, 2, &data.labels.student(&task.assignee_id))?;
         if let Some(ref m) = task.model {
-            ws.write_string(row, 3, m)?;
+            write_cell(ws, row, 3, m)?;
         }
         if let Some(ref l) = task.level {
-            ws.write_string(row, 4, l)?;
+            write_cell(ws, row, 4, l)?;
         }
 
         let m_formula = if task.declared && task.model.is_some() {
@@ -492,8 +500,7 @@ fn write_team_points_sheet(
         .map_err(xlsx_err)?;
     let hdr = header_format();
     for (i, h) in [
-        "project_id",
-        "project_name",
+        "project",
         "team_size",
         "sum_raw",
         "sum_eff",
@@ -503,22 +510,21 @@ fn write_team_points_sheet(
     .iter()
     .enumerate()
     {
-        ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
     }
     for (i, result) in data.results.iter().enumerate() {
         let row = 1 + i as u32;
         let er = xl_row_to_excel(row);
-        ws.write_number(row, 0, result.project.project_id as f64)?;
-        ws.write_string(row, 1, &result.project.name)?;
-        ws.write_number(row, 2, result.project.team_size as f64)?;
+        write_cell(ws, row, 0, &result.project.name)?;
+        ws.write_number(row, 1, result.project.team_size as f64)?;
         let sum_raw = format!("SUMIFS(AI_Usage!$I:$I,AI_Usage!$A:$A,A{er})");
         let sum_eff = format!("SUMIFS(AI_Usage!$J:$J,AI_Usage!$A:$A,A{er})");
-        ws.write_formula_with_format(row, 3, sum_raw.as_str(), num_fmt)?;
-        ws.write_formula_with_format(row, 4, sum_eff.as_str(), num_fmt)?;
-        let mean_raw = format!("IF(D{er}>0,D{er}/C{er},0)");
+        ws.write_formula_with_format(row, 2, sum_raw.as_str(), num_fmt)?;
+        ws.write_formula_with_format(row, 3, sum_eff.as_str(), num_fmt)?;
+        let mean_raw = format!("IF(C{er}>0,C{er}/B{er},0)");
         ws.write_formula_with_format(
             row,
-            5,
+            4,
             Formula::new(mean_raw).set_result(fmt_num(
                 if result.project.team_size > 0 {
                     result.students.iter().map(|s| s.raw_points).sum::<f64>()
@@ -530,10 +536,10 @@ fn write_team_points_sheet(
             )),
             num_fmt,
         )?;
-        let ai_factor = format!("IF(D{er}>0,E{er}/D{er},1)");
+        let ai_factor = format!("IF(C{er}>0,D{er}/C{er},1)");
         ws.write_formula_with_format(
             row,
-            6,
+            5,
             Formula::new(ai_factor).set_result(fmt_num(result.project.ai_factor, 2)),
             num_fmt,
         )?;
@@ -554,8 +560,7 @@ fn write_project_grades_sheet(
         .map_err(xlsx_err)?;
     let hdr = header_format();
     for (i, h) in [
-        "project_id",
-        "project_name",
+        "project",
         "doc",
         "code_quality",
         "survival",
@@ -571,29 +576,28 @@ fn write_project_grades_sheet(
     .iter()
     .enumerate()
     {
-        ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
     }
     for (i, result) in data.results.iter().enumerate() {
         let row = 1 + i as u32;
         let er = xl_row_to_excel(row);
-        ws.write_number(row, 0, result.project.project_id as f64)?;
-        ws.write_string(row, 1, &result.project.name)?;
+        write_cell(ws, row, 0, &result.project.name)?;
         for (col, sheet) in [
-            (2, "Docs"),
-            (3, "Quality"),
-            (4, "Survival"),
-            (5, "Architecture"),
+            (1, "Docs"),
+            (2, "Quality"),
+            (3, "Survival"),
+            (4, "Architecture"),
         ] {
-            let score_col = if sheet == "Quality" { "G" } else { "E" };
+            let score_col = if sheet == "Quality" { "F" } else { "D" };
             let xref = format!("{sheet}!{score_col}{er}");
             ws.write_formula(row, col, xref.as_str())?;
         }
         let q_formula = format!(
-            "IFERROR((IF(Docs!D{er}<>0,Docs!E{er}*w_doc,0)+IF(Quality!F{er}<>0,Quality!G{er}*w_cq,0)+IF(Survival!D{er}<>0,Survival!E{er}*w_surv,0)+IF(Architecture!D{er}<>0,Architecture!E{er}*w_arch,0))/(IF(Docs!D{er}<>0,w_doc,0)+IF(Quality!F{er}<>0,w_cq,0)+IF(Survival!D{er}<>0,w_surv,0)+IF(Architecture!D{er}<>0,w_arch,0)),0)"
+            "IFERROR((IF(Docs!C{er}<>0,Docs!D{er}*w_doc,0)+IF(Quality!E{er}<>0,Quality!F{er}*w_cq,0)+IF(Survival!C{er}<>0,Survival!D{er}*w_surv,0)+IF(Architecture!C{er}<>0,Architecture!D{er}*w_arch,0))/(IF(Docs!C{er}<>0,w_doc,0)+IF(Quality!E{er}<>0,w_cq,0)+IF(Survival!C{er}<>0,w_surv,0)+IF(Architecture!C{er}<>0,w_arch,0)),0)"
         );
         ws.write_formula_with_format(
             row,
-            6,
+            5,
             Formula::new(q_formula)
                 .set_result(fmt_num(result.project.quality_grade, cfg.output.decimals)),
             num_fmt,
@@ -602,15 +606,15 @@ fn write_project_grades_sheet(
             format!("MIN(max_penalty_points,SUMIFS(CritFlags!$G:$G,CritFlags!$A:$A,A{er}))");
         ws.write_formula_with_format(
             row,
-            7,
+            6,
             Formula::new(pen_formula)
                 .set_result(fmt_num(result.project.project_penalty, cfg.output.decimals)),
             num_fmt,
         )?;
-        let qpen_formula = format!("MEDIAN(0,G{er}-H{er},10)");
+        let qpen_formula = format!("MEDIAN(0,F{er}-G{er},10)");
         ws.write_formula_with_format(
             row,
-            8,
+            7,
             Formula::new(qpen_formula).set_result(fmt_num(
                 result.project.quality_penalized,
                 cfg.output.decimals,
@@ -619,23 +623,23 @@ fn write_project_grades_sheet(
         )?;
         ws.write_formula(
             row,
-            9,
+            8,
             Formula::new(format!(
-                "INDEX(TeamPoints!$G:$G,MATCH(A{er},TeamPoints!$A:$A,0))"
+                "INDEX(TeamPoints!$F:$F,MATCH(A{er},TeamPoints!$A:$A,0))"
             ))
             .set_result(fmt_num(result.project.ai_factor, cfg.output.decimals)),
         )?;
-        let final_formula = format!("I{er}*J{er}");
+        let final_formula = format!("H{er}*I{er}");
         ws.write_formula_with_format(
             row,
-            10,
+            9,
             Formula::new(final_formula)
                 .set_result(fmt_num(result.project.final_grade, cfg.output.decimals)),
             num_fmt,
         )?;
-        ws.write_number(row, 11, result.project.team_size as f64)?;
+        ws.write_number(row, 10, result.project.team_size as f64)?;
         if let Some(ref gate) = result.project.review_gate {
-            ws.write_string(row, 12, gate)?;
+            write_cell(ws, row, 11, gate)?;
         }
     }
     ws.protect();
@@ -654,9 +658,8 @@ fn write_student_grades_sheet(
         .map_err(xlsx_err)?;
     let hdr = header_format();
     for (i, h) in [
-        "student_id",
-        "project_id",
-        "full_name",
+        "student",
+        "project",
         "raw_points",
         "effective_points",
         "ai_keep_factor",
@@ -669,20 +672,19 @@ fn write_student_grades_sheet(
     .iter()
     .enumerate()
     {
-        ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
     }
     let mut row = 1u32;
     for result in &data.results {
         for student in &result.students {
             let er = xl_row_to_excel(row);
-            ws.write_string(row, 0, &student.student_id)?;
-            ws.write_number(row, 1, student.project_id as f64)?;
-            ws.write_string(row, 2, &student.full_name)?;
+            write_cell(ws, row, 0, &student.full_name)?;
+            write_cell(ws, row, 1, &data.labels.project(student.project_id))?;
             let raw_f =
                 format!("SUMIFS(AI_Usage!$I:$I,AI_Usage!$A:$A,$B{er},AI_Usage!$C:$C,$A{er})");
             ws.write_formula_with_format(
                 row,
-                3,
+                2,
                 Formula::new(raw_f).set_result(fmt_num(student.raw_points, cfg.output.decimals)),
                 num_fmt,
             )?;
@@ -690,24 +692,24 @@ fn write_student_grades_sheet(
                 format!("SUMIFS(AI_Usage!$J:$J,AI_Usage!$A:$A,$B{er},AI_Usage!$C:$C,$A{er})");
             ws.write_formula_with_format(
                 row,
-                4,
+                3,
                 Formula::new(eff_f)
                     .set_result(fmt_num(student.effective_points, cfg.output.decimals)),
                 num_fmt,
             )?;
-            let keep_f = format!("IF(D{er}>0,E{er}/D{er},\"\")");
+            let keep_f = format!("IF(C{er}>0,D{er}/C{er},\"\")");
             let keep_cached = student
                 .ai_keep_factor
                 .map(|v| fmt_num(v, cfg.output.decimals))
                 .unwrap_or_default();
             ws.write_formula_with_format(
                 row,
-                5,
+                4,
                 Formula::new(keep_f).set_result(keep_cached),
                 num_fmt,
             )?;
             let contrib_f = format!(
-                "IF(INDEX(TeamPoints!$E:$E,MATCH($B{er},TeamPoints!$A:$A,0))>0,E{er}/INDEX(TeamPoints!$E:$E,MATCH($B{er},TeamPoints!$A:$A,0)),\"\")"
+                "IF(INDEX(TeamPoints!$D:$D,MATCH($B{er},TeamPoints!$A:$A,0))>0,D{er}/INDEX(TeamPoints!$D:$D,MATCH($B{er},TeamPoints!$A:$A,0)),\"\")"
             );
             let contrib_cached = student
                 .contribution_ratio
@@ -715,16 +717,16 @@ fn write_student_grades_sheet(
                 .unwrap_or_default();
             ws.write_formula_with_format(
                 row,
-                6,
+                5,
                 Formula::new(contrib_f).set_result(contrib_cached),
                 num_fmt,
             )?;
             let base_f = format!(
-                "IF(INDEX(TeamPoints!$F:$F,MATCH($B{er},TeamPoints!$A:$A,0))>0,INDEX(ProjectGrades!$I:$I,MATCH($B{er},ProjectGrades!$A:$A,0))*E{er}/INDEX(TeamPoints!$F:$F,MATCH($B{er},TeamPoints!$A:$A,0)),0)"
+                "IF(INDEX(TeamPoints!$E:$E,MATCH($B{er},TeamPoints!$A:$A,0))>0,INDEX(ProjectGrades!$H:$H,MATCH($B{er},ProjectGrades!$A:$A,0))*D{er}/INDEX(TeamPoints!$E:$E,MATCH($B{er},TeamPoints!$A:$A,0)),0)"
             );
             ws.write_formula_with_format(
                 row,
-                7,
+                6,
                 Formula::new(base_f).set_result(fmt_num(student.base_grade, cfg.output.decimals)),
                 num_fmt,
             )?;
@@ -733,20 +735,20 @@ fn write_student_grades_sheet(
             );
             ws.write_formula_with_format(
                 row,
-                8,
+                7,
                 Formula::new(pen_f)
                     .set_result(fmt_num(student.student_penalty, cfg.output.decimals)),
                 num_fmt,
             )?;
-            let final_f = format!("MEDIAN(0,H{er}-I{er},10)");
+            let final_f = format!("MEDIAN(0,G{er}-H{er},10)");
             ws.write_formula_with_format(
                 row,
-                9,
+                8,
                 Formula::new(final_f).set_result(fmt_num(student.final_grade, cfg.output.decimals)),
                 num_fmt,
             )?;
             if let Some(ref gate) = student.review_gate {
-                ws.write_string(row, 10, gate)?;
+                write_cell(ws, row, 9, gate)?;
             }
             row += 1;
         }
@@ -762,7 +764,7 @@ fn write_crit_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Resul
         .map_err(xlsx_err)?;
     let hdr = header_format();
     for (i, h) in [
-        "project_id",
+        "project",
         "repo",
         "kind",
         "rule_id",
@@ -773,17 +775,17 @@ fn write_crit_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Resul
     .iter()
     .enumerate()
     {
-        ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
     }
     for (i, f) in data.crit_flags.iter().enumerate() {
         let row = 1 + i as u32;
-        ws.write_number(row, 0, f.project_id as f64)?;
-        ws.write_string(row, 1, &f.repo_full_name)?;
-        ws.write_string(row, 2, &f.kind)?;
-        ws.write_string(row, 3, &f.rule_id)?;
-        ws.write_string(row, 4, &f.severity)?;
+        write_cell(ws, row, 0, &data.labels.project(f.project_id))?;
+        write_cell(ws, row, 1, &f.repo_full_name)?;
+        write_cell(ws, row, 2, &f.kind)?;
+        write_cell(ws, row, 3, &f.rule_id)?;
+        write_cell(ws, row, 4, &f.severity)?;
         if let Some(ref c) = f.category {
-            ws.write_string(row, 5, c)?;
+            write_cell(ws, row, 5, c)?;
         }
         ws.write_number(row, 6, f.penalty_points)?;
     }
@@ -802,9 +804,9 @@ fn write_flags_sheet(
         .map_err(xlsx_err)?;
     let hdr = header_format();
     for (i, h) in [
-        "project_id",
-        "student_id",
-        "sprint_id",
+        "project",
+        "student",
+        "sprint",
         "flag_type",
         "severity",
         "details",
@@ -813,17 +815,17 @@ fn write_flags_sheet(
     .iter()
     .enumerate()
     {
-        ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
     }
     for (i, f) in data.flag_rows.iter().enumerate() {
         let row = 1 + i as u32;
-        ws.write_number(row, 0, f.project_id as f64)?;
-        ws.write_string(row, 1, &f.student_id)?;
-        ws.write_number(row, 2, f.sprint_id as f64)?;
-        ws.write_string(row, 3, &f.flag_type)?;
-        ws.write_string(row, 4, &f.severity)?;
+        write_cell(ws, row, 0, &data.labels.project(f.project_id))?;
+        write_cell(ws, row, 1, &data.labels.student(&f.student_id))?;
+        write_cell(ws, row, 2, &data.labels.sprint(f.sprint_id))?;
+        write_cell(ws, row, 3, &f.flag_type)?;
+        write_cell(ws, row, 4, &f.severity)?;
         if let Some(ref d) = f.details {
-            ws.write_string(row, 5, d)?;
+            write_cell(ws, row, 5, d)?;
         }
         let er = xl_row_to_excel(row);
         let pen_formula = format!("IF(E{er}=\"CRITICAL\",crit_flag_points,0)");
@@ -844,19 +846,19 @@ fn write_ai_detect_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result
         .set_name("AI_Detect")
         .map_err(xlsx_err)?;
     let hdr = header_format();
-    for (i, h) in ["project_id", "student_id", "sprint_id", "risk_level"]
+    for (i, h) in ["project", "student", "sprint", "risk_level"]
         .iter()
         .enumerate()
     {
-        ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
     }
     for (i, r) in data.ai_detect_rows.iter().enumerate() {
         let row = 1 + i as u32;
-        ws.write_number(row, 0, r.project_id as f64)?;
-        ws.write_string(row, 1, &r.student_id)?;
-        ws.write_number(row, 2, r.sprint_id as f64)?;
+        write_cell(ws, row, 0, &data.labels.project(r.project_id))?;
+        write_cell(ws, row, 1, &data.labels.student(&r.student_id))?;
+        write_cell(ws, row, 2, &data.labels.sprint(r.sprint_id))?;
         if let Some(ref rl) = r.risk_level {
-            ws.write_string(row, 3, rl)?;
+            write_cell(ws, row, 3, rl)?;
         }
     }
     ws.protect();
@@ -873,9 +875,9 @@ fn write_llm_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result
         .map_err(xlsx_err)?;
     let hdr = header_format();
     for (i, h) in [
-        "project_id",
-        "student_id",
-        "sprint_id",
+        "project",
+        "student",
+        "sprint",
         "scope",
         "target_ref",
         "category",
@@ -885,24 +887,24 @@ fn write_llm_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result
     .iter()
     .enumerate()
     {
-        ws.write_string_with_format(0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
     }
     for (i, row) in data.llm_flag_rows.iter().enumerate() {
         let r = 1 + i as u32;
-        ws.write_number(r, 0, row.project_id as f64)?;
+        write_cell(ws, r, 0, &data.labels.project(row.project_id))?;
         if let Some(sid) = &row.student_id {
-            ws.write_string(r, 1, sid)?;
+            write_cell(ws, r, 1, &data.labels.student(sid))?;
         }
         if let Some(sid) = row.sprint_id {
-            ws.write_number(r, 2, sid as f64)?;
+            write_cell(ws, r, 2, &data.labels.sprint(sid))?;
         }
-        ws.write_string(r, 3, &row.scope)?;
+        write_cell(ws, r, 3, &row.scope)?;
         if let Some(t) = &row.target_ref {
-            ws.write_string(r, 4, t)?;
+            write_cell(ws, r, 4, &data.labels.humanize_target_ref(t))?;
         }
-        ws.write_string(r, 5, &row.category)?;
-        ws.write_string(r, 6, &row.severity)?;
-        ws.write_string(r, 7, &row.summary)?;
+        write_cell(ws, r, 5, &row.category)?;
+        write_cell(ws, r, 6, &row.severity)?;
+        write_cell(ws, r, 7, &row.summary)?;
     }
     ws.protect();
     Ok(())
@@ -929,7 +931,7 @@ fn write_methodology_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Resu
         &format!("weights_version: {}", data.weights_version),
     ];
     for (i, line) in lines.iter().enumerate() {
-        ws.write_string(i as u32, 0, *line)?;
+        write_cell(ws, i as u32, 0, *line)?;
     }
     ws.protect();
     Ok(())

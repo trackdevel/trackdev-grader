@@ -117,10 +117,12 @@ fn llm_flags_sheet_contains_file_and_holistic_rows() {
     );
     assert_eq!(cell_string(&range, 1, 7), Some("No unit tests in Foo".into()));
     assert_eq!(cell_string(&range, 2, 3), Some("project".into()));
-    assert_eq!(cell_string(&range, 2, 4), Some("project:1".into()));
+    assert_eq!(cell_string(&range, 2, 4), Some("project:Team 01".into()));
     assert_eq!(
         cell_string(&range, 2, 7),
         Some("Team-wide sparse test coverage".into())
     );
     assert_eq!(cell_string(&range, 2, 1), Some("alice".into()));
+    assert_eq!(cell_string(&range, 0, 0), Some("project".into()));
+    assert_eq!(cell_string(&range, 0, 2), Some("sprint".into()));
 }

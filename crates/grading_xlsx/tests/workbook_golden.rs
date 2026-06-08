@@ -118,3 +118,22 @@ fn workbook_cached_grades_match_rust_engine() {
     let buf = write_workbook_buffer(&data, &cfg).unwrap();
     assert!(buf.len() > 4096);
 }
+
+#[test]
+fn workbook_accepts_flag_details_beyond_excel_cell_limit() {
+    let db = make_db();
+    seed_worked_example(&db);
+    let huge = "x".repeat(40_000);
+    db.conn
+        .execute(
+            "INSERT INTO flags (student_id, sprint_id, flag_type, severity, details)
+             VALUES ('alice', ?, 'TEST_FLAG', 'WARNING', ?)",
+            params![SPRINT_ID, huge],
+        )
+        .unwrap();
+
+    let cfg = GradingConfig::default();
+    let data = load_workbook_data(&db, &[PROJECT_ID], "2026-03-01", &cfg).unwrap();
+    let buf = write_workbook_buffer(&data, &cfg).unwrap();
+    assert_eq!(&buf[0..2], b"PK");
+}

@@ -179,6 +179,7 @@ mod tests {
             flag_rows: vec![],
             ai_detect_rows: vec![],
             llm_flag_rows: vec![],
+            labels: crate::labels::WorkbookLabels::load(&db.conn).unwrap(),
         };
         let xlsx_path = dir.path().join("sheet.xlsx");
         let buf = write_workbook_buffer(&data, &cfg).unwrap();
