@@ -3,8 +3,7 @@
 use sprint_grader_core::{Config, Database, QualityLlmConfig};
 use sprint_grader_quality_llm::{
     delete_project_flags, file_flag_exists, list_all_flags, list_file_candidates,
-    list_flagged_project_ids, list_flags_for_projects, load_rubric, persist_project_flags,
-    run,
+    list_flagged_project_ids, list_flags_for_projects, load_rubric, persist_project_flags, run,
     LlmQualityFlagRow, QualityFlagsOpts,
 };
 use tempfile::tempdir;
@@ -56,11 +55,7 @@ model_id = "claude-haiku-4-5-20251001"
 fn quality_llm_defaults_when_block_absent() {
     let dir = tempdir().unwrap();
     std::fs::write(dir.path().join("course.toml"), minimal_course_toml(false)).unwrap();
-    std::fs::write(
-        dir.path().join("quality-llm-rubric.md"),
-        "# rubric\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join("quality-llm-rubric.md"), "# rubric\n").unwrap();
     let cfg = Config::load(dir.path()).unwrap();
     assert_eq!(cfg.quality_llm.backend, "claude-cli");
     assert_eq!(cfg.quality_llm.prompt_version, "1");
@@ -224,7 +219,10 @@ fn run_fails_without_model_id_in_config() {
     let db = Database::open(&db_path).unwrap();
     db.create_tables().unwrap();
     db.conn
-        .execute("INSERT INTO projects (id, slug, name) VALUES (1,'t','T')", [])
+        .execute(
+            "INSERT INTO projects (id, slug, name) VALUES (1,'t','T')",
+            [],
+        )
         .unwrap();
     let err = run(
         &db,
@@ -245,9 +243,11 @@ fn file_pass_errors_when_cli_missing_and_file_pending() {
 
     let dir = tempdir().unwrap();
     std::fs::write(dir.path().join("quality-llm-rubric.md"), "# r\n").unwrap();
-    let mut ql = QualityLlmConfig::default();
-    ql.model_id = Some("claude-haiku-4-5-20251001".into());
-    ql.claude_cli_path = "/nonexistent/claude-quality-flags".into();
+    let ql = QualityLlmConfig {
+        model_id: Some("claude-haiku-4-5-20251001".into()),
+        claude_cli_path: "/nonexistent/claude-quality-flags".into(),
+        ..Default::default()
+    };
     let rubric = load_rubric(dir.path(), &ql).unwrap();
 
     let entregues = dir.path().join("entregues");
@@ -262,16 +262,7 @@ fn file_pass_errors_when_cli_missing_and_file_pending() {
         file_path: "src/Foo.java".into(),
         statement_count: 1,
     };
-    let err = run_file_pass(
-        &db.conn,
-        1,
-        "T",
-        &entregues,
-        &ql,
-        &rubric,
-        &[cand],
-        false,
-    )
-    .unwrap_err();
+    let err =
+        run_file_pass(&db.conn, 1, "T", &entregues, &ql, &rubric, &[cand], false).unwrap_err();
     assert!(err.to_string().contains("claude CLI not found"));
 }
