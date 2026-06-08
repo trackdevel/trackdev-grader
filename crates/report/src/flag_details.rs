@@ -28,7 +28,7 @@ pub(crate) fn render_flag_details(flag_type: &str, details: Option<&str>) -> Ren
         ("LOW_SURVIVAL_RATE", Some(v)) => render_low_survival_rate(v),
         ("SINGLE_COMMIT_DUMP", Some(v)) => render_single_commit_dump(v),
         ("PR_DOES_NOT_COMPILE", Some(v)) => render_pr_reference("Does not compile", v, false),
-        ("APPROVED_BROKEN_PR", Some(v)) => render_pr_reference("Approved broken PR", v, false),
+        ("APPROVED_BROKEN_PR", Some(v)) => render_approved_broken_pr(v),
         ("LAST_MINUTE_PR", Some(v)) => render_last_minute_pr(v),
         ("COSMETIC_REWRITE_VICTIM", Some(v)) => render_cosmetic_rewrite_victim(v),
         ("COSMETIC_REWRITE_ACTOR", Some(v)) => render_cosmetic_rewrite_actor(v),
@@ -73,33 +73,63 @@ pub(crate) fn enrich_flag_details(
 
 fn enrich_approved_broken_pr_details(conn: &Connection, details: &str) -> Option<Value> {
     let mut parsed = serde_json::from_str::<Value>(details).ok()?;
-    if string_field(&parsed, "pr_url")
-        .filter(|u| u.starts_with("http"))
-        .is_some()
-    {
-        return None;
-    }
-    let pr_id = string_field(&parsed, "pr_id")?;
-    let (url, repo): (Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT url, repo_full_name FROM pull_requests WHERE id = ? LIMIT 1",
-            [&pr_id],
-            |r| {
-                Ok((
-                    r.get::<_, Option<String>>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                ))
-            },
-        )
-        .ok()?;
+    let mut changed = false;
     let obj = parsed.as_object_mut()?;
-    if let Some(u) = url.filter(|u| u.starts_with("http")) {
-        obj.insert("pr_url".into(), json!(u));
+
+    let has_author_name = obj
+        .get("author_name")
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty())
+        .is_some();
+    if !has_author_name {
+        if let Some(author_id) = obj
+            .get("author")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            if let Ok(name) = conn.query_row(
+                "SELECT full_name FROM students WHERE id = ? LIMIT 1",
+                [&author_id],
+                |r| r.get::<_, Option<String>>(0),
+            ) {
+                if let Some(name) = name.filter(|n| !n.is_empty()) {
+                    obj.insert("author_name".into(), json!(name));
+                    changed = true;
+                }
+            }
+        }
     }
-    if let Some(r) = repo.filter(|r| !r.is_empty()) {
-        obj.insert("repo_full_name".into(), json!(r));
+
+    let has_pr_url = obj
+        .get("pr_url")
+        .and_then(Value::as_str)
+        .filter(|u| u.starts_with("http"))
+        .is_some();
+    if !has_pr_url {
+        if let Some(pr_id) = obj.get("pr_id").and_then(Value::as_str).map(str::to_owned) {
+            if let Ok((url, repo)) = conn.query_row(
+                "SELECT url, repo_full_name FROM pull_requests WHERE id = ? LIMIT 1",
+                [&pr_id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            ) {
+                if let Some(u) = url.filter(|u| u.starts_with("http")) {
+                    obj.insert("pr_url".into(), json!(u));
+                    changed = true;
+                }
+                if let Some(r) = repo.filter(|r| !r.is_empty()) {
+                    obj.insert("repo_full_name".into(), json!(r));
+                    changed = true;
+                }
+            }
+        }
     }
-    Some(parsed)
+
+    changed.then_some(parsed)
 }
 
 fn enrich_team_inequality_details(
@@ -379,6 +409,22 @@ fn render_pr_reference(prefix: &str, v: &Value, include_repo: bool) -> RenderedF
     let (plain_pr, md_pr, url) = pr_reference(v, include_repo);
     let plain = format!("{prefix}: {plain_pr}.");
     let markdown = format!("{}: {}.", md_escape(prefix), md_pr);
+    RenderedFlagDetails::new(plain, markdown, url)
+}
+
+fn render_approved_broken_pr(v: &Value) -> RenderedFlagDetails {
+    let (plain_pr, md_pr, url) = pr_reference(v, false);
+    let author = string_field(v, "author_name").filter(|n| !n.is_empty());
+    let (plain, markdown) = match author {
+        Some(name) => (
+            format!("Author {name}: {plain_pr}."),
+            format!("Author {}: {}.", md_escape(&name), md_pr),
+        ),
+        None => (
+            format!("Approved broken PR: {plain_pr}."),
+            format!("Approved broken PR: {}.", md_pr),
+        ),
+    };
     RenderedFlagDetails::new(plain, markdown, url)
 }
 
@@ -1126,6 +1172,15 @@ mod tests {
     }
 
     #[test]
+    fn approved_broken_pr_shows_author_name_when_enriched() {
+        let details = r#"{"pr_id":"raw-123","pr_number":9,"author":"student-1","author_name":"Alice Example"}"#;
+        let rendered = render_flag_details("APPROVED_BROKEN_PR", Some(details));
+        assert_eq!(rendered.plain, "Author Alice Example: PR #9.");
+        assert!(!rendered.plain.contains("student-1"));
+        assert!(!rendered.plain.contains("raw-123"));
+    }
+
+    #[test]
     fn approved_broken_pr_embeds_url_when_present() {
         let details = r#"{"pr_id":"raw-123","pr_number":31,"author":"alice","pr_url":"https://github.com/org/repo/pull/31"}"#;
         let rendered = render_flag_details("APPROVED_BROKEN_PR", Some(details));
@@ -1180,7 +1235,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE pull_requests (id TEXT PRIMARY KEY, url TEXT, repo_full_name TEXT);
-             INSERT INTO pull_requests VALUES ('pr-uuid-1', 'https://github.com/org/repo/pull/31', 'org/repo');",
+             CREATE TABLE students (id TEXT PRIMARY KEY, full_name TEXT);
+             INSERT INTO pull_requests VALUES ('pr-uuid-1', 'https://github.com/org/repo/pull/31', 'org/repo');
+             INSERT INTO students VALUES ('alice', 'Alice Example');",
         )
         .unwrap();
         let details = r#"{"pr_id":"pr-uuid-1","pr_number":31,"author":"alice"}"#;
@@ -1188,8 +1245,12 @@ mod tests {
             super::enrich_flag_details(&conn, 1, "alice", "APPROVED_BROKEN_PR", Some(details));
         let rendered = render_flag_details("APPROVED_BROKEN_PR", enriched.as_deref());
         assert_eq!(
+            rendered.plain,
+            "Author Alice Example: PR #31."
+        );
+        assert_eq!(
             rendered.markdown,
-            "Approved broken PR: [PR #31](https://github.com/org/repo/pull/31)."
+            "Author Alice Example: [PR #31](https://github.com/org/repo/pull/31)."
         );
         assert_eq!(
             rendered.url.as_deref(),
