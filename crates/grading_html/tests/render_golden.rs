@@ -109,7 +109,9 @@ fn page_wires_all_25_knobs_and_core_structure() {
         html.contains("id=\"parity-banner\""),
         "missing parity banner"
     );
-    assert!(html.contains("const VIEWS"), "missing VIEWS registry");
+    assert!(html.contains("id=\"main-nav\""), "missing main navigation");
+    assert!(html.contains("parseRoute"), "missing hash router");
+    assert!(html.contains("explainStudent"), "missing grade explanation tree");
     assert!(html.contains("initSqlJs("), "missing sql.js init call");
     assert!(
         html.contains("wasmBinary"),
