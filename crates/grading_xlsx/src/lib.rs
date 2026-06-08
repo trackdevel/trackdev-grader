@@ -5,8 +5,8 @@ mod config;
 mod data;
 mod excel_text;
 mod grade;
-mod labels;
 mod import_weights;
+mod labels;
 mod modulation;
 mod normalize;
 mod penalty;
@@ -22,15 +22,15 @@ pub use config::{
     AiUsageConfig, GateConfig, GradingConfig, NormalizationConfig, OutputConfig, PenaltyConfig,
     WeightsProject,
 };
-pub use data::{load_workbook_data, load_workbook_data_with_results, WorkbookData};
+pub use data::{
+    load_workbook_data, load_workbook_data_with_results, ArtifactFlagRow, WorkbookData,
+};
 pub use grade::{grade_project, ComponentScore, GradingResult, ProjectGradeRow, StudentGradeRow};
 pub use import_weights::{import_weights, WEIGHTS_SHEET_NAME};
 pub use modulation::{keep, keep_for_declared, keep_for_undeclared};
 pub use normalize::{load_quality_axes, quality_composite, AxisScore};
 pub use persist::{list_graded_project_ids, load_persisted_project, persist_project_grades};
-pub use workbook::{
-    write_workbook, write_workbook_buffer, DEFINED_NAMES, LLM_FLAGS_SHEET_NAME,
-};
+pub use workbook::{write_workbook, write_workbook_buffer, DEFINED_NAMES, LLM_FLAGS_SHEET_NAME};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -68,27 +68,61 @@ pub fn run(db: &Database, cfg_dir: &Path, opts: &RunOpts) -> Result<PathBuf> {
         .clone()
         .unwrap_or_else(|| PathBuf::from("grading_sheet.xlsx"));
 
-    let filter_ids = if opts.workbook_only {
+    if opts.no_workbook {
+        // Persist grades only; skip the workbook build. Mirrors the historical
+        // path: grade the (workbook_only-guarded) filter and return.
+        let filter_ids = if opts.workbook_only {
+            Vec::new()
+        } else {
+            resolve_project_ids(db, opts.project_filter.as_deref())?
+        };
+        for &project_id in &filter_ids {
+            grade_and_persist(db, project_id, today, &cfg)?;
+        }
+        return Ok(out);
+    }
+
+    let wb_data = grade_persist_and_load(
+        db,
+        &cfg,
+        today,
+        opts.project_filter.as_deref(),
+        opts.workbook_only,
+    )?;
+    write_workbook(&wb_data, &cfg, &out)?;
+    Ok(out)
+}
+
+/// Grade + persist the filtered projects (empty set when `workbook_only`), then
+/// grade + persist any remaining `list_graded_project_ids` not in the filter,
+/// and build `WorkbookData` from ALL graded ids (reusing the precomputed
+/// results so there is no second `grade_project` pass).
+///
+/// Shared by `grading-sheet` (workbook export) and `grading-html` (snapshot) so
+/// both flow through the identical grade+persist path — persisted grade rows are
+/// the same regardless of which command runs.
+pub fn grade_persist_and_load(
+    db: &Database,
+    cfg: &GradingConfig,
+    today: &str,
+    project_filter: Option<&[String]>,
+    workbook_only: bool,
+) -> Result<WorkbookData> {
+    let filter_ids = if workbook_only {
         Vec::new()
     } else {
-        resolve_project_ids(db, opts.project_filter.as_deref())?
+        resolve_project_ids(db, project_filter)?
     };
 
     let mut graded: HashMap<i64, GradingResult> = HashMap::new();
     for &project_id in &filter_ids {
-        let result = grade_and_persist(db, project_id, today, &cfg)?;
+        let result = grade_and_persist(db, project_id, today, cfg)?;
         graded.insert(project_id, result);
-    }
-
-    if opts.no_workbook {
-        return Ok(out);
     }
 
     let workbook_ids = list_graded_project_ids(&db.conn)?;
     if workbook_ids.is_empty() {
-        bail!(
-            "no graded projects in grading.db; run grading-sheet for at least one project first"
-        );
+        bail!("no graded projects in grading.db; run grading-sheet for at least one project first");
     }
 
     let mut workbook_results = Vec::with_capacity(workbook_ids.len());
@@ -96,15 +130,12 @@ pub fn run(db: &Database, cfg_dir: &Path, opts: &RunOpts) -> Result<PathBuf> {
         let result = if let Some(r) = graded.get(&project_id) {
             r.clone()
         } else {
-            grade_and_persist(db, project_id, today, &cfg)?
+            grade_and_persist(db, project_id, today, cfg)?
         };
         workbook_results.push(result);
     }
 
-    let wb_data =
-        load_workbook_data_with_results(db, &workbook_ids, today, &cfg, Some(&workbook_results))?;
-    write_workbook(&wb_data, &cfg, &out)?;
-    Ok(out)
+    load_workbook_data_with_results(db, &workbook_ids, today, cfg, Some(&workbook_results))
 }
 
 fn grade_and_persist(
@@ -138,12 +169,14 @@ fn resolve_project_ids(db: &Database, filter: Option<&[String]>) -> Result<Vec<i
         Some(names) => {
             let mut out = Vec::new();
             for name in names {
-                let id: i64 = db.conn.query_row(
-                    "SELECT id FROM projects WHERE name = ? OR slug = ?",
-                    rusqlite::params![name, name],
-                    |r| r.get(0),
-                )
-                .with_context(|| format!("project not found in grading.db: {name}"))?;
+                let id: i64 = db
+                    .conn
+                    .query_row(
+                        "SELECT id FROM projects WHERE name = ? OR slug = ?",
+                        rusqlite::params![name, name],
+                        |r| r.get(0),
+                    )
+                    .with_context(|| format!("project not found in grading.db: {name}"))?;
                 out.push(id);
             }
             Ok(out)
