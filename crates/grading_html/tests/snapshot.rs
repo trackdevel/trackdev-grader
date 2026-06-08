@@ -193,3 +193,64 @@ fn snapshot_meta_and_views_are_queryable() {
         )
         .unwrap();
 }
+
+#[test]
+fn snapshot_views_use_human_readable_labels() {
+    let db = make_db();
+    seed_worked_example(&db);
+    let cfg = GradingConfig::default();
+    let data = load_workbook_data(&db, &[PROJECT_ID], "2026-03-01", &cfg).unwrap();
+    let bytes = build_snapshot_bytes(&data, &cfg).unwrap();
+    let (snap, _tf) = open_snapshot(&bytes);
+
+    let (team, student, sprint): (String, String, Option<String>) = snap
+        .query_row(
+            "SELECT team, student, sprint FROM v_flag WHERE source = 'sprint'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(team, "Team 01");
+    assert_eq!(student, "Alice");
+    assert_eq!(sprint.as_deref(), Some("1"));
+
+    let (art_team, art_student, art_sprint): (String, String, Option<String>) = snap
+        .query_row(
+            "SELECT team, student, sprint FROM v_flag WHERE source = 'artifact'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(art_team, "Team 01");
+    assert_eq!(art_student, "Alice");
+    assert!(art_sprint.is_none());
+
+    let grade_student: String = snap
+        .query_row(
+            "SELECT full_name FROM v_student WHERE student_id = 'alice'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(grade_student, "Alice");
+}
+
+#[test]
+fn snapshot_task_carries_ai_model_and_level() {
+    let db = make_db();
+    seed_worked_example(&db);
+    let cfg = GradingConfig::default();
+    let data = load_workbook_data(&db, &[PROJECT_ID], "2026-03-01", &cfg).unwrap();
+    let bytes = build_snapshot_bytes(&data, &cfg).unwrap();
+    let (snap, _tf) = open_snapshot(&bytes);
+
+    let (model, level): (Option<String>, Option<String>) = snap
+        .query_row(
+            "SELECT ai_model, ai_level FROM task WHERE task_id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(model.as_deref(), Some("Cap"));
+    assert_eq!(level.as_deref(), Some("A"));
+}

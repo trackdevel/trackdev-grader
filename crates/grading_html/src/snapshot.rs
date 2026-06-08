@@ -33,6 +33,7 @@ pub fn build_snapshot_bytes(data: &WorkbookData, cfg: &GradingConfig) -> Result<
         insert_ai_detect(&conn, data)?;
         insert_llm_flags(&conn, data)?;
         insert_reference(&conn, data)?;
+        insert_label_lookups(&conn, data)?;
         create_views(&conn)?;
     } // drop connection: flushes + removes the rollback journal, leaving one file.
 
@@ -61,7 +62,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
          CREATE TABLE student (student_id TEXT, project_id INTEGER, full_name TEXT);
          CREATE TABLE task (
             project_id INTEGER, task_id INTEGER, assignee_id TEXT,
-            raw_points REAL, model TEXT, level TEXT, declared INTEGER
+            raw_points REAL, ai_model TEXT, ai_level TEXT, declared INTEGER,
+            captured_at TEXT
          );
          CREATE TABLE crit_flag (
             project_id INTEGER, repo_full_name TEXT, kind TEXT,
@@ -85,7 +87,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
          CREATE TABLE reference_project (
             project_id INTEGER, quality_grade REAL, quality_penalized REAL,
             ai_factor REAL, final_grade REAL, review_gate TEXT
-         );",
+         );
+         CREATE TABLE label_sprint (sprint_id INTEGER PRIMARY KEY, label TEXT);
+         CREATE TABLE label_target (target_ref TEXT PRIMARY KEY, label TEXT);
+         CREATE TABLE label_task (task_id INTEGER PRIMARY KEY, label TEXT);",
     )
     .context("create snapshot schema")?;
     Ok(())
@@ -223,8 +228,8 @@ fn insert_students(conn: &Connection, data: &WorkbookData) -> Result<()> {
 
 fn insert_tasks(conn: &Connection, data: &WorkbookData) -> Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT INTO task (project_id, task_id, assignee_id, raw_points, model, level, declared)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO task (project_id, task_id, assignee_id, raw_points, ai_model, ai_level, declared, captured_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     for t in &data.tasks {
         stmt.execute(params![
@@ -235,6 +240,7 @@ fn insert_tasks(conn: &Connection, data: &WorkbookData) -> Result<()> {
             t.model,
             t.level,
             t.declared,
+            t.captured_at,
         ])?;
     }
     Ok(())
@@ -366,6 +372,33 @@ fn insert_reference(conn: &Connection, data: &WorkbookData) -> Result<()> {
     Ok(())
 }
 
+/// Sprint numbers and LLM `target_ref` strings resolved at snapshot build time
+/// (same `WorkbookLabels` helpers as the XLSX export).
+fn insert_label_lookups(conn: &Connection, data: &WorkbookData) -> Result<()> {
+    let mut sprint_stmt =
+        conn.prepare("INSERT INTO label_sprint (sprint_id, label) VALUES (?, ?)")?;
+    for (id, label) in &data.labels.sprints {
+        sprint_stmt.execute(params![id, label])?;
+    }
+
+    let mut target_stmt =
+        conn.prepare("INSERT INTO label_target (target_ref, label) VALUES (?, ?)")?;
+    let mut seen = std::collections::HashSet::new();
+    for row in &data.llm_flag_rows {
+        if let Some(ref t) = row.target_ref {
+            if seen.insert(t.clone()) {
+                target_stmt.execute(params![t, data.labels.humanize_target_ref(t)])?;
+            }
+        }
+    }
+
+    let mut task_stmt = conn.prepare("INSERT INTO label_task (task_id, label) VALUES (?, ?)")?;
+    for (id, label) in &data.labels.tasks {
+        task_stmt.execute(params![id, label])?;
+    }
+    Ok(())
+}
+
 fn create_views(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE VIEW v_student AS
@@ -384,7 +417,40 @@ fn create_views(conn: &Connection) -> Result<()> {
                 rp.final_grade, rp.review_gate,
                 (SELECT COUNT(*) FROM student s WHERE s.project_id = p.project_id) AS enrolled
          FROM project p
-         LEFT JOIN reference_project rp ON rp.project_id = p.project_id;",
+         LEFT JOIN reference_project rp ON rp.project_id = p.project_id;
+
+         CREATE VIEW v_flag AS
+         SELECT p.name AS team, s.full_name AS student, f.source,
+                ls.label AS sprint, f.flag_type, f.severity, f.details
+         FROM flag f
+         JOIN project p ON p.project_id = f.project_id
+         JOIN student s ON s.student_id = f.student_id AND s.project_id = f.project_id
+         LEFT JOIN label_sprint ls ON ls.sprint_id = f.sprint_id;
+
+         CREATE VIEW v_llm_flag AS
+         SELECT p.name AS team, s.full_name AS student, ls.label AS sprint,
+                l.scope, COALESCE(lt.label, l.target_ref) AS target,
+                l.category, l.severity, l.summary
+         FROM llm_flag l
+         JOIN project p ON p.project_id = l.project_id
+         LEFT JOIN student s
+                ON s.student_id = l.student_id AND s.project_id = l.project_id
+         LEFT JOIN label_sprint ls ON ls.sprint_id = l.sprint_id
+         LEFT JOIN label_target lt ON lt.target_ref = l.target_ref;
+
+         CREATE VIEW v_ai_detect AS
+         SELECT p.name AS team, s.full_name AS student, ls.label AS sprint,
+                a.risk_level
+         FROM ai_detect a
+         JOIN project p ON p.project_id = a.project_id
+         JOIN student s ON s.student_id = a.student_id AND s.project_id = a.project_id
+         LEFT JOIN label_sprint ls ON ls.sprint_id = a.sprint_id;
+
+         CREATE VIEW v_crit_flag AS
+         SELECT p.name AS team, c.repo_full_name AS repo, c.kind,
+                c.rule_id, c.severity, c.category
+         FROM crit_flag c
+         JOIN project p ON p.project_id = c.project_id;",
     )
     .context("create snapshot views")?;
     Ok(())
