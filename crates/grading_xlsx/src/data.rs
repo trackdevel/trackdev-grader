@@ -10,6 +10,7 @@ use sprint_grader_quality_llm::list_all_flags;
 use crate::aggregate::load_task_points;
 use crate::config::GradingConfig;
 use crate::grade::{grade_project, GradingResult};
+use crate::labels::WorkbookLabels;
 use crate::normalize::{
     code_quality_raw, documentation_raw, project_repos, score_architecture, score_code_quality,
     score_documentation, score_survival, survival_raw,
@@ -27,6 +28,7 @@ pub struct WorkbookData {
     pub flag_rows: Vec<FlagDiagRow>,
     pub ai_detect_rows: Vec<AiDetectRow>,
     pub llm_flag_rows: Vec<LlmFlagRow>,
+    pub labels: WorkbookLabels,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +175,7 @@ pub fn load_workbook_data_with_results(
         .map(|r| r.weights_version.clone())
         .unwrap_or_else(|| cfg.weights_version());
 
+    let labels = WorkbookLabels::load(conn)?;
     let llm_flag_rows = list_all_flags(conn)?
         .into_iter()
         .map(|f| LlmFlagRow {
@@ -197,6 +200,7 @@ pub fn load_workbook_data_with_results(
         flag_rows,
         ai_detect_rows,
         llm_flag_rows,
+        labels,
     })
 }
 
