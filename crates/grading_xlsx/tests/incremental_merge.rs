@@ -92,10 +92,7 @@ fn subset_run_merges_workbook_projects_and_refreshes_existing() {
 
     // Mutate team-01 evidence; second run targets only team-02 but must refresh team-01 too.
     db.conn
-        .execute(
-            "UPDATE tasks SET estimation_points = 20 WHERE id = 100",
-            [],
-        )
+        .execute("UPDATE tasks SET estimation_points = 20 WHERE id = 100", [])
         .unwrap();
 
     run(
@@ -113,12 +110,15 @@ fn subset_run_merges_workbook_projects_and_refreshes_existing() {
     let graded = list_graded_project_ids(&db.conn).unwrap();
     assert_eq!(graded, vec![1, 2]);
 
-    let team1_raw: f64 = db.conn.query_row(
-        "SELECT raw_points FROM student_final_grade
+    let team1_raw: f64 = db
+        .conn
+        .query_row(
+            "SELECT raw_points FROM student_final_grade
          WHERE project_id = 1 AND student_id = 's1'",
-        [],
-        |r| r.get(0),
-    ).unwrap();
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert!(
         (team1_raw - 20.0).abs() < 1e-9,
         "team-01 should be refreshed on merged export, got {team1_raw}"
@@ -154,7 +154,11 @@ fn workbook_exports_all_llm_flags_not_only_workbook_projects() {
     let cfg = GradingConfig::default();
     let data = load_workbook_data(&db, &[1], "2026-03-01", &cfg).unwrap();
     assert_eq!(data.llm_flag_rows.len(), 2);
-    let summaries: Vec<_> = data.llm_flag_rows.iter().map(|r| r.summary.as_str()).collect();
+    let summaries: Vec<_> = data
+        .llm_flag_rows
+        .iter()
+        .map(|r| r.summary.as_str())
+        .collect();
     assert!(summaries.contains(&"flag-01"));
     assert!(summaries.contains(&"flag-02"));
 }
@@ -184,5 +188,8 @@ fn no_workbook_persists_without_export() {
     .expect("no-workbook run");
 
     assert_eq!(list_graded_project_ids(&db.conn).unwrap(), vec![1]);
-    assert!(!out.exists(), "workbook should not be written with --no-workbook");
+    assert!(
+        !out.exists(),
+        "workbook should not be written with --no-workbook"
+    );
 }
