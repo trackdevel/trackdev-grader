@@ -95,7 +95,10 @@ fn read_model_table(range: &calamine::Range<Data>) -> Result<BTreeMap<String, f6
         row += 1;
     }
     if out.is_empty() {
-        bail!("Weights sheet has no model→m table starting at row {}", MODEL_TABLE_START + 1);
+        bail!(
+            "Weights sheet has no model→m table starting at row {}",
+            MODEL_TABLE_START + 1
+        );
     }
     Ok(out)
 }
@@ -177,6 +180,7 @@ mod tests {
             tasks: vec![],
             crit_flags: vec![],
             flag_rows: vec![],
+            artifact_flag_rows: vec![],
             ai_detect_rows: vec![],
             llm_flag_rows: vec![],
             labels: crate::labels::WorkbookLabels::load(&db.conn).unwrap(),
