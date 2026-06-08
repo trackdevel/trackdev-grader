@@ -92,9 +92,12 @@ pub fn format_holistic_context(
         lines.push("Holistic focus: whole team (all repositories)".to_string());
     }
     lines.push(String::new());
-    lines.push("File-tier findings already collected (synthesize — do not repeat verbatim):".into());
+    lines
+        .push("File-tier findings already collected (synthesize — do not repeat verbatim):".into());
     if file_flags.is_empty() {
-        lines.push("  (none — note if the delivered codebase looks clean or under-reviewed.)".into());
+        lines.push(
+            "  (none — note if the delivered codebase looks clean or under-reviewed.)".into(),
+        );
     } else {
         for f in file_flags {
             lines.push(format!(
