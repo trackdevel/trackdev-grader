@@ -56,6 +56,8 @@ pub struct TaskRow {
     pub level: Option<String>,
     pub declared: bool,
     pub raw_points: f64,
+    /// `task_ai_usage.captured_at` when present (proxy for last AI-declaration update).
+    pub captured_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,13 +159,19 @@ pub fn load_workbook_data_with_results(
         project_axes.push(project_axis_raw(conn, project_id, &sprint_ids, cfg)?);
 
         for t in load_task_points(conn, project_id, &sprint_ids, cfg)? {
-            let (model, level, declared): (Option<String>, Option<String>, i64) = conn
+            let (model, level, declared, captured_at): (
+                Option<String>,
+                Option<String>,
+                i64,
+                Option<String>,
+            ) = conn
                 .query_row(
-                    "SELECT model_value, level_value, declared FROM task_ai_usage WHERE task_id = ?",
+                    "SELECT model_value, level_value, declared, captured_at
+                     FROM task_ai_usage WHERE task_id = ?",
                     params![t.task_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
-                .unwrap_or((None, None, 0));
+                .unwrap_or((None, None, 0, None));
             tasks.push(TaskRow {
                 project_id,
                 project_name: name.clone(),
@@ -173,6 +181,7 @@ pub fn load_workbook_data_with_results(
                 level,
                 declared: declared == 1,
                 raw_points: t.raw,
+                captured_at,
             });
         }
 
