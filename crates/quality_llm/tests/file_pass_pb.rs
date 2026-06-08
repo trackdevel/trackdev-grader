@@ -46,7 +46,10 @@ fn file_pass_with_no_candidates_skips_cli_check() {
     let db = Database::open(&dir.path().join("g.db")).unwrap();
     db.create_tables().unwrap();
     db.conn
-        .execute("INSERT INTO projects (id, slug, name) VALUES (1,'t','T')", [])
+        .execute(
+            "INSERT INTO projects (id, slug, name) VALUES (1,'t','T')",
+            [],
+        )
         .unwrap();
 
     let stats = run_file_pass(
