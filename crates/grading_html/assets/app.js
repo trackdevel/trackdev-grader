@@ -731,7 +731,7 @@
     html += '<section class="detail-section" id="tasks-section"><h3>Tasks</h3>';
     html += '<p class="hint">Default order: last AI-declaration capture date (newest first), then task key. Click headers to re-sort.</p>';
     html += '<div id="tasks-table-host"></div></section>';
-    html += sectionBlock('Flags', tableHTML(flags.columns, flags.rows));
+    html += sectionBlock('Flags', flagsTableHTML(flags));
     html += sectionBlock('AI detection', tableHTML(ai.columns, ai.rows));
     html += sectionBlock('LLM quality flags', tableHTML(llm.columns, llm.rows));
     html += '</div>';
@@ -842,6 +842,217 @@
     html += sectionBlock('LLM quality flags', tableHTML(llm.columns, llm.rows));
     html += '</div>';
     container.innerHTML = html;
+  }
+
+  // ---- flag details (human-readable; mirrors report::flag_details) ----
+  function sqlEscLit(s) {
+    return String(s).replace(/'/g, "''");
+  }
+
+  function studentDisplayName(studentId) {
+    if (!studentId) return null;
+    const rows = query(
+      "SELECT full_name FROM student WHERE student_id = '" + sqlEscLit(studentId) + "' LIMIT 1"
+    ).rows;
+    return rows.length && rows[0][0] ? rows[0][0] : null;
+  }
+
+  function isInternalFlagKey(key) {
+    return (
+      key.startsWith('threshold') ||
+      [
+        'z_score',
+        'gini',
+        'hoover',
+        'cv',
+        'regularity_score',
+        'stderr_preview',
+        'exit_code',
+        'pr_id',
+        'flagged_student',
+        'author',
+        'author_name',
+      ].includes(key)
+    );
+  }
+
+  function labelFlagKey(key) {
+    const labels = {
+      pr_number: 'PR',
+      number: 'PR',
+      repo: 'Repository',
+      repo_full_name: 'Repository',
+      counterpart_user_id: 'Teammate',
+      rewriter: 'Rewriter',
+      student_id: 'Student',
+      points: 'Task points',
+      share: 'Share',
+      expected: 'Equal team share',
+      total_lines: 'Total lines',
+      statements_affected: 'Statements affected',
+      file: 'File',
+      change_type: 'Change type',
+    };
+    return labels[key] || key.replace(/_/g, ' ');
+  }
+
+  function fmtFlagNum(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    return Number.isInteger(n) ? String(n) : String(round2(n));
+  }
+
+  function looksLikePr(v) {
+    return (
+      v &&
+      typeof v === 'object' &&
+      (v.pr_number != null || v.number != null || v.pr_title || (v.title && (v.url || v.pr_url)))
+    );
+  }
+
+  function prReference(obj, includeRepo) {
+    const number = obj.pr_number != null ? obj.pr_number : obj.number;
+    const title = obj.pr_title || obj.title || '';
+    const repo = obj.repo || obj.repo_full_name || '';
+    let url = obj.pr_url || obj.url || '';
+    if (!url && repo && number != null && String(repo).includes('/')) {
+      url = 'https://github.com/' + repo + '/pull/' + Math.round(Number(number));
+    }
+    let label;
+    if (number != null && title) label = 'PR #' + fmtFlagNum(number) + ': ' + title;
+    else if (number != null) label = 'PR #' + fmtFlagNum(number);
+    else if (title) label = title;
+    else label = 'PR';
+    if (includeRepo && repo) label = repo + ' ' + label;
+    const html =
+      url && String(url).startsWith('http')
+        ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(label) + '</a>'
+        : esc(label);
+    return { plain: label, html, url };
+  }
+
+  function resolveAuthorName(obj) {
+    if (obj.author_name) return obj.author_name;
+    if (obj.author) return studentDisplayName(obj.author);
+    return null;
+  }
+
+  function resolveStudentField(value) {
+    if (typeof value !== 'string' || !value) return null;
+    return studentDisplayName(value) || value;
+  }
+
+  function formatFlagScalar(key, value, parent) {
+    if (value == null) return '';
+    if (typeof value === 'object') {
+      if (looksLikePr(value)) return prReference(value, true).plain;
+      return '';
+    }
+    if (['author', 'counterpart_user_id', 'student_id', 'rewriter'].includes(key)) {
+      const name = resolveStudentField(value);
+      return name || '';
+    }
+    if ((key === 'pr_url' || key === 'url') && String(value).startsWith('http')) return '';
+    if ((key === 'pr_number' || key === 'number') && (parent.pr_url || parent.url)) return '';
+    return String(value);
+  }
+
+  function formatFlagScalarHtml(key, value, parent) {
+    const plain = formatFlagScalar(key, value, parent);
+    if (!plain) return '';
+    if ((key === 'pr_url' || key === 'url') && String(value).startsWith('http')) {
+      return '<a href="' + esc(value) + '" target="_blank" rel="noopener">' + esc(plain) + '</a>';
+    }
+    return esc(plain);
+  }
+
+  function renderFlagDetailsCell(flagType, detailsRaw) {
+    if (detailsRaw == null || detailsRaw === '') return { plain: '', html: '' };
+    let v;
+    try {
+      v = JSON.parse(detailsRaw);
+    } catch {
+      return { plain: String(detailsRaw), html: esc(detailsRaw) };
+    }
+    if (!v || typeof v !== 'object' || Array.isArray(v)) {
+      return { plain: String(detailsRaw), html: esc(detailsRaw) };
+    }
+
+    if (flagType === 'APPROVED_BROKEN_PR' || flagType === 'PR_DOES_NOT_COMPILE') {
+      const prefix = flagType === 'APPROVED_BROKEN_PR' ? 'Approved broken PR' : 'Does not compile';
+      const author = flagType === 'APPROVED_BROKEN_PR' ? resolveAuthorName(v) : null;
+      const pr = prReference(v, false);
+      if (author) {
+        return {
+          plain: 'Author ' + author + ': ' + pr.plain + '.',
+          html: 'Author ' + esc(author) + ': ' + pr.html + '.',
+        };
+      }
+      return {
+        plain: prefix + ': ' + pr.plain + '.',
+        html: esc(prefix) + ': ' + pr.html + '.',
+      };
+    }
+
+    if (flagType === 'SINGLE_COMMIT_DUMP') {
+      const pr = prReference(v, true);
+      const lines = v.total_lines != null ? ' (' + fmtFlagNum(v.total_lines) + ' total lines)' : '';
+      return {
+        plain: 'Single-commit dump: ' + pr.plain + lines + '.',
+        html: 'Single-commit dump: ' + pr.html + esc(lines) + '.',
+      };
+    }
+
+    if (looksLikePr(v) && (v.pr_url || v.url || v.repo || v.repo_full_name)) {
+      const pr = prReference(v, !!(v.repo || v.repo_full_name));
+      const author = resolveAuthorName(v);
+      if (author) {
+        return {
+          plain: 'Author ' + author + ': ' + pr.plain + '.',
+          html: 'Author ' + esc(author) + ': ' + pr.html + '.',
+        };
+      }
+    }
+
+    const parts = [];
+    const htmlParts = [];
+    if (v.message) {
+      parts.push(v.message);
+      htmlParts.push(esc(v.message));
+    }
+    for (const key of Object.keys(v)) {
+      if (key === 'message' || isInternalFlagKey(key)) continue;
+      const plain = formatFlagScalar(key, v[key], v);
+      const html = formatFlagScalarHtml(key, v[key], v);
+      if (!plain) continue;
+      parts.push(labelFlagKey(key) + ': ' + plain);
+      htmlParts.push(esc(labelFlagKey(key)) + ': ' + html);
+    }
+    return { plain: parts.join('; '), html: htmlParts.join('; ') || esc('') };
+  }
+
+  function flagsTableHTML(flags) {
+    const columns = flags.columns;
+    const detailsIdx = columns.indexOf('details');
+    const flagTypeIdx = columns.indexOf('flag_type');
+    let h = '<table><thead><tr>';
+    for (const c of columns) h += '<th>' + esc(c) + '</th>';
+    h += '</tr></thead><tbody>';
+    for (const r of flags.rows) {
+      h += '<tr>';
+      for (let i = 0; i < r.length; i++) {
+        if (i === detailsIdx) {
+          const flagType = flagTypeIdx >= 0 ? r[flagTypeIdx] : '';
+          h += '<td>' + renderFlagDetailsCell(flagType, r[i]).html + '</td>';
+        } else {
+          h += '<td>' + fmt(r[i]) + '</td>';
+        }
+      }
+      h += '</tr>';
+    }
+    h += '</tbody></table>';
+    if (!flags.rows.length) h += '<p class="hint">no rows</p>';
+    return h;
   }
 
   // ---- renderers ----
