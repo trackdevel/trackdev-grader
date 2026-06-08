@@ -2,14 +2,17 @@
 
 use sprint_grader_core::{Database, QualityLlmConfig};
 use sprint_grader_quality_llm::{
-    holistic_flag_exists, insert_flag, load_file_flag_summaries, load_rubric,
-    run_holistic_pass, LlmQualityFlagRow,
+    holistic_flag_exists, insert_flag, load_file_flag_summaries, load_rubric, run_holistic_pass,
+    LlmQualityFlagRow,
 };
 use tempfile::tempdir;
 
 fn seed_project(db: &Database) {
     db.conn
-        .execute("INSERT INTO projects (id, slug, name) VALUES (1, 't', 'Team 01')", [])
+        .execute(
+            "INSERT INTO projects (id, slug, name) VALUES (1, 't', 'Team 01')",
+            [],
+        )
         .unwrap();
     db.conn
         .execute(
@@ -52,8 +55,10 @@ fn seed_project(db: &Database) {
 fn holistic_skipped_when_cap_zero() {
     let dir = tempdir().unwrap();
     std::fs::write(dir.path().join("quality-llm-rubric.md"), "# r\n").unwrap();
-    let mut ql = QualityLlmConfig::default();
-    ql.model_id = Some("m".into());
+    let ql = QualityLlmConfig {
+        model_id: Some("m".into()),
+        ..Default::default()
+    };
     let rubric = load_rubric(dir.path(), &ql).unwrap();
     let db = Database::open(&dir.path().join("g.db")).unwrap();
     db.create_tables().unwrap();
@@ -68,8 +73,10 @@ fn holistic_skipped_when_cap_zero() {
 fn holistic_resume_skips_existing_project_row() {
     let dir = tempdir().unwrap();
     std::fs::write(dir.path().join("quality-llm-rubric.md"), "# r\n").unwrap();
-    let mut ql = QualityLlmConfig::default();
-    ql.model_id = Some("claude-haiku-4-5-20251001".into());
+    let ql = QualityLlmConfig {
+        model_id: Some("claude-haiku-4-5-20251001".into()),
+        ..Default::default()
+    };
     let rubric = load_rubric(dir.path(), &ql).unwrap();
     let db = Database::open(&dir.path().join("g.db")).unwrap();
     db.create_tables().unwrap();
@@ -113,8 +120,11 @@ fn holistic_resume_skips_existing_project_row() {
 fn load_file_flags_filters_by_repo_prefix() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     sprint_grader_core::db::apply_schema(&conn).unwrap();
-    conn.execute("INSERT INTO projects (id, slug, name) VALUES (1, 't', 'T')", [])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO projects (id, slug, name) VALUES (1, 't', 'T')",
+        [],
+    )
+    .unwrap();
     for (target, summary) in [
         ("org/android:src/A.java", "android issue"),
         ("org/spring:src/B.java", "spring issue"),
