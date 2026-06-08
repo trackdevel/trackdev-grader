@@ -33,7 +33,10 @@ mod tests {
     #[test]
     fn at_limit_passes_through() {
         let s: String = "a".repeat(EXCEL_MAX_CELL_CHARS);
-        assert_eq!(truncate_excel_cell(&s).chars().count(), EXCEL_MAX_CELL_CHARS);
+        assert_eq!(
+            truncate_excel_cell(&s).chars().count(),
+            EXCEL_MAX_CELL_CHARS
+        );
     }
 
     #[test]
