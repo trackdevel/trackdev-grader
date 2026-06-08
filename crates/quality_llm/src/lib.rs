@@ -18,15 +18,15 @@ use rusqlite::params;
 use sprint_grader_core::{Config, Database};
 use tracing::info;
 
+pub use context::{list_project_repos, load_file_flag_summaries};
+pub use file_pass::{run_file_pass, FilePassStats};
 pub use flag::LlmQualityFlagRow;
+pub use holistic_pass::{run_holistic_pass, HolisticPassStats};
+pub use parse::{parse_quality_flags_json, ParsedFlag};
 pub use persist::{
     delete_project_flags, file_flag_exists, holistic_flag_exists, insert_flag, list_all_flags,
     list_flagged_project_ids, list_flags_for_projects, persist_project_flags,
 };
-pub use context::{list_project_repos, load_file_flag_summaries};
-pub use file_pass::{run_file_pass, FilePassStats};
-pub use holistic_pass::{run_holistic_pass, HolisticPassStats};
-pub use parse::{parse_quality_flags_json, ParsedFlag};
 pub use prefilter::{list_file_candidates, FileCandidate};
 pub use rubric::{load_rubric, QualityRubric};
 
@@ -49,9 +49,7 @@ pub fn run(db: &Database, cfg_dir: &Path, opts: &QualityFlagsOpts) -> Result<()>
     let course = Config::load(cfg_dir).context("load course.toml for quality-flags")?;
     course.quality_llm.validate_for_run()?;
     let rubric = load_rubric(cfg_dir, &course.quality_llm)?;
-    let holistic_cap = opts
-        .max_holistic
-        .unwrap_or(course.quality_llm.max_holistic);
+    let holistic_cap = opts.max_holistic.unwrap_or(course.quality_llm.max_holistic);
 
     let project_ids = resolve_project_ids(db, opts.project_filter.as_deref())?;
     if project_ids.is_empty() {
@@ -148,12 +146,14 @@ fn resolve_project_ids(db: &Database, filter: Option<&[String]>) -> Result<Vec<i
         Some(names) => {
             let mut out = Vec::new();
             for name in names {
-                let id: i64 = db.conn.query_row(
-                    "SELECT id FROM projects WHERE name = ? OR slug = ?",
-                    rusqlite::params![name, name],
-                    |r| r.get(0),
-                )
-                .with_context(|| format!("project not found in grading.db: {name}"))?;
+                let id: i64 = db
+                    .conn
+                    .query_row(
+                        "SELECT id FROM projects WHERE name = ? OR slug = ?",
+                        rusqlite::params![name, name],
+                        |r| r.get(0),
+                    )
+                    .with_context(|| format!("project not found in grading.db: {name}"))?;
                 out.push(id);
             }
             Ok(out)

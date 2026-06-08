@@ -112,7 +112,9 @@ mod tests {
 
     #[test]
     fn empty_flags_is_ok() {
-        assert!(parse_quality_flags_json(r#"{"flags":[]}"#).unwrap().is_empty());
+        assert!(parse_quality_flags_json(r#"{"flags":[]}"#)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

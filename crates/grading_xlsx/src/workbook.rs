@@ -152,7 +152,7 @@ fn write_weights_sheet(workbook: &mut Workbook, cfg: &GradingConfig) -> Result<(
 
     for (i, (label, value)) in scalar_rows.iter().enumerate() {
         let row = 1 + i as u32;
-        write_cell(ws, row, 0, *label)?;
+        write_cell(ws, row, 0, label)?;
         ws.write_number_with_format(row, 1, *value, &input)?;
         ws.add_data_validation(row, 1, row, 1, &dv_decimal)?;
     }
@@ -287,12 +287,12 @@ fn write_axis_headers(ws: &mut Worksheet, sheet: &str) -> Result<()> {
             .iter()
             .enumerate()
             {
-                write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+                write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
             }
         }
         _ => {
             for (i, h) in base.iter().enumerate() {
-                write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+                write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
             }
         }
     }
@@ -444,7 +444,7 @@ fn write_ai_usage_sheet(
     .iter()
     .enumerate()
     {
-        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
     }
 
     let w = WEIGHTS_SHEET_NAME;
@@ -510,7 +510,7 @@ fn write_team_points_sheet(
     .iter()
     .enumerate()
     {
-        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
     }
     for (i, result) in data.results.iter().enumerate() {
         let row = 1 + i as u32;
@@ -576,7 +576,7 @@ fn write_project_grades_sheet(
     .iter()
     .enumerate()
     {
-        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
     }
     for (i, result) in data.results.iter().enumerate() {
         let row = 1 + i as u32;
@@ -672,7 +672,7 @@ fn write_student_grades_sheet(
     .iter()
     .enumerate()
     {
-        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
     }
     let mut row = 1u32;
     for result in &data.results {
@@ -775,7 +775,7 @@ fn write_crit_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Resul
     .iter()
     .enumerate()
     {
-        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
     }
     for (i, f) in data.crit_flags.iter().enumerate() {
         let row = 1 + i as u32;
@@ -815,7 +815,7 @@ fn write_flags_sheet(
     .iter()
     .enumerate()
     {
-        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
     }
     for (i, f) in data.flag_rows.iter().enumerate() {
         let row = 1 + i as u32;
@@ -850,7 +850,7 @@ fn write_ai_detect_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result
         .iter()
         .enumerate()
     {
-        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
     }
     for (i, r) in data.ai_detect_rows.iter().enumerate() {
         let row = 1 + i as u32;
@@ -887,7 +887,7 @@ fn write_llm_flags_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Result
     .iter()
     .enumerate()
     {
-        write_cell_fmt(ws, 0, i as u16, *h, &hdr)?;
+        write_cell_fmt(ws, 0, i as u16, h, &hdr)?;
     }
     for (i, row) in data.llm_flag_rows.iter().enumerate() {
         let r = 1 + i as u32;
@@ -931,7 +931,7 @@ fn write_methodology_sheet(workbook: &mut Workbook, data: &WorkbookData) -> Resu
         &format!("weights_version: {}", data.weights_version),
     ];
     for (i, line) in lines.iter().enumerate() {
-        write_cell(ws, i as u32, 0, *line)?;
+        write_cell(ws, i as u32, 0, line)?;
     }
     ws.protect();
     Ok(())

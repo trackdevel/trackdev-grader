@@ -115,7 +115,10 @@ fn llm_flags_sheet_contains_file_and_holistic_rows() {
         cell_string(&range, 1, 4),
         Some("org/spring:src/Foo.java".into())
     );
-    assert_eq!(cell_string(&range, 1, 7), Some("No unit tests in Foo".into()));
+    assert_eq!(
+        cell_string(&range, 1, 7),
+        Some("No unit tests in Foo".into())
+    );
     assert_eq!(cell_string(&range, 2, 3), Some("project".into()));
     assert_eq!(cell_string(&range, 2, 4), Some("project:Team 01".into()));
     assert_eq!(

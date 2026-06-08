@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>grading.html — interactive grade model</title>
+<style>/*__APP_CSS__*/</style>
+</head>
+<body>
+<div id="parity-banner" class="banner tuned">Loading the embedded grade model…</div>
+<header class="topbar">
+  <h1>grading.html</h1>
+  <div class="meta" id="meta-line"></div>
+  <button id="reset-knobs" type="button">Reset knobs</button>
+</header>
+<main>
+  <aside id="knobs-panel" aria-label="Grading knobs"></aside>
+  <section class="content">
+    <details id="formula-section">
+      <summary>Formula box — what-if preview (non-authoritative)</summary>
+      <div id="formula-box"></div>
+    </details>
+    <div id="views"></div>
+  </section>
+</main>
+
+<!-- Default knob vector (from config), used to seed the panel and "Reset". -->
+<script id="default-knobs" type="application/json">/*__DEFAULT_KNOBS_JSON__*/</script>
+<!-- Base64 payloads decoded at boot; no network, no localStorage. -->
+<script>
+  window.__SQL_WASM_B64__ = "/*__SQL_WASM_B64__*/";
+  window.__SNAPSHOT_B64__ = "/*__SNAPSHOT_B64__*/";
+</script>
+<!-- Vendored libraries + engine + app, all inlined (offline single file). -->
+<script>/*__SQL_WASM_JS__*/</script>
+<script>/*__MATHJS__*/</script>
+<script>/*__ENGINE_JS__*/</script>
+<script>/*__APP_JS__*/</script>
+</body>
+</html>

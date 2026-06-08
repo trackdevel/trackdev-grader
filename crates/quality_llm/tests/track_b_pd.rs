@@ -45,25 +45,32 @@ fn setup_db(dir: &tempfile::TempDir) -> Database {
     let db = Database::open(&dir.path().join("g.db")).unwrap();
     db.create_tables().unwrap();
     db.conn
-        .execute("INSERT INTO projects (id, slug, name) VALUES (1,'t','T')", [])
+        .execute(
+            "INSERT INTO projects (id, slug, name) VALUES (1,'t','T')",
+            [],
+        )
         .unwrap();
     db
 }
 
 #[test]
 fn validate_rejects_anthropic_api_backend() {
-    let mut ql = QualityLlmConfig::default();
-    ql.model_id = Some("claude-haiku-4-5-20251001".into());
-    ql.backend = "anthropic-api".into();
+    let ql = QualityLlmConfig {
+        model_id: Some("claude-haiku-4-5-20251001".into()),
+        backend: "anthropic-api".into(),
+        ..Default::default()
+    };
     let err = ql.validate_for_run().unwrap_err().to_string();
     assert!(err.contains("anthropic-api"));
 }
 
 #[test]
 fn validate_rejects_unknown_backend() {
-    let mut ql = QualityLlmConfig::default();
-    ql.model_id = Some("m".into());
-    ql.backend = "openai-api".into();
+    let ql = QualityLlmConfig {
+        model_id: Some("m".into()),
+        backend: "openai-api".into(),
+        ..Default::default()
+    };
     let err = ql.validate_for_run().unwrap_err().to_string();
     assert!(err.contains("unknown backend"));
 }

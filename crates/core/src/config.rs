@@ -1580,10 +1580,7 @@ impl Config {
             quality_llm: {
                 let ql_defaults = QualityLlmConfig::default();
                 QualityLlmConfig {
-                    backend: raw
-                        .quality_llm
-                        .backend
-                        .unwrap_or(ql_defaults.backend),
+                    backend: raw.quality_llm.backend.unwrap_or(ql_defaults.backend),
                     model_id: raw.quality_llm.model_id,
                     prompt_version: raw
                         .quality_llm
@@ -1614,10 +1611,7 @@ impl Config {
                         .quality_llm
                         .cursor_cli_path
                         .unwrap_or(ql_defaults.cursor_cli_path),
-                    ollama_url: raw
-                        .quality_llm
-                        .ollama_url
-                        .unwrap_or(ql_defaults.ollama_url),
+                    ollama_url: raw.quality_llm.ollama_url.unwrap_or(ql_defaults.ollama_url),
                     ollama_model: raw
                         .quality_llm
                         .ollama_model
@@ -1630,10 +1624,7 @@ impl Config {
                         .quality_llm
                         .min_surviving_statements
                         .unwrap_or(ql_defaults.min_surviving_statements),
-                    skip_globs: raw
-                        .quality_llm
-                        .skip_globs
-                        .unwrap_or(ql_defaults.skip_globs),
+                    skip_globs: raw.quality_llm.skip_globs.unwrap_or(ql_defaults.skip_globs),
                     only_delivered_repos: raw
                         .quality_llm
                         .only_delivered_repos

@@ -44,7 +44,10 @@ fn run_completes_without_llm_when_no_candidates_and_holistic_off() {
     let db = Database::open(&dir.path().join("g.db")).unwrap();
     db.create_tables().unwrap();
     db.conn
-        .execute("INSERT INTO projects (id, slug, name) VALUES (1,'t','Team 01')", [])
+        .execute(
+            "INSERT INTO projects (id, slug, name) VALUES (1,'t','Team 01')",
+            [],
+        )
         .unwrap();
 
     let course = sprint_grader_core::Config::load(dir.path()).unwrap();

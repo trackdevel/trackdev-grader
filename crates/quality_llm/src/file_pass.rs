@@ -86,14 +86,14 @@ pub fn run_file_pass(
             continue;
         }
 
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         if bytes.is_empty() {
             stats.skipped_empty += 1;
             continue;
         }
         let truncated = bytes.len() > MAX_FILE_BYTES;
-        let mut source = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_FILE_BYTES)]).into_owned();
+        let mut source =
+            String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_FILE_BYTES)]).into_owned();
         if truncated {
             source.push_str("\n\n[... truncated for LLM context limit ...]");
         }

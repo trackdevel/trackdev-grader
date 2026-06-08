@@ -1796,6 +1796,7 @@ dependencies = [
  "sprint-grader-curriculum",
  "sprint-grader-evaluate",
  "sprint-grader-evaluate-local",
+ "sprint-grader-grading-html",
  "sprint-grader-grading-xlsx",
  "sprint-grader-orchestration",
  "sprint-grader-process",
@@ -1907,6 +1908,22 @@ dependencies = [
  "sprint-grader-evaluate",
  "tempfile",
  "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "sprint-grader-grading-html"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sprint-grader-core",
+ "sprint-grader-grading-xlsx",
+ "tempfile",
  "tracing",
 ]
 

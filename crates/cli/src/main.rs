@@ -14,12 +14,15 @@ use tracing_subscriber::EnvFilter;
 
 use sprint_grader_collect::{run_collection, CollectOpts};
 use sprint_grader_core::{Config, Database};
-use sprint_grader_grading_xlsx::{RunOpts as GradingSheetOpts, GradingConfig as SheetGradingConfig};
+use sprint_grader_grading_html::{run_html, HtmlOpts};
+use sprint_grader_grading_xlsx::{
+    GradingConfig as SheetGradingConfig, RunOpts as GradingSheetOpts,
+};
 use sprint_grader_orchestration::pipeline::resolve_all_sprint_tuples;
-use sprint_grader_quality_llm::{QualityFlagsOpts, run as run_quality_flags};
 use sprint_grader_orchestration::{
     android_repo_root, publish_report_updates, repo_has_report_changes,
 };
+use sprint_grader_quality_llm::{run as run_quality_flags, QualityFlagsOpts};
 
 fn parse_project_filter(projects: Option<String>) -> Option<Vec<String>> {
     projects.map(|s| {
@@ -590,6 +593,20 @@ enum Command {
         /// Grade and persist only; do not write or refresh the merged workbook.
         #[arg(long)]
         no_workbook: bool,
+    },
+    /// Emit a single, offline, SQL-queryable `grading.html`: an interactive view
+    /// of the same grade model as `grading-sheet`, with live knob tuning and an
+    /// always-on JS/Rust parity self-test. Shares the grade+persist path, so
+    /// persisted grades are identical. No `--import-weights` (use `grading-sheet`).
+    GradingHtml {
+        #[command(flatten)]
+        projects: ProjectsArg,
+        /// Output `.html` path (default: `<data-dir>/entregues/grading.html`)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Rebuild from all graded projects without a new `--projects` pass.
+        #[arg(long)]
+        workbook_only: bool,
     },
     /// Feedback-only LLM quality flags (Track B; advisory, never grade inputs).
     ///
@@ -1583,9 +1600,36 @@ fn main() -> Result<()> {
                 workbook_only,
                 no_workbook,
             };
-            let written =
-                sprint_grader_grading_xlsx::run(&db, &config_dir, &opts).context("grading-sheet failed")?;
+            let written = sprint_grader_grading_xlsx::run(&db, &config_dir, &opts)
+                .context("grading-sheet failed")?;
             info!(path = %written.display(), "grading-sheet complete");
+        }
+        Command::GradingHtml {
+            projects,
+            out,
+            workbook_only,
+        } => {
+            let filter = parse_project_filter(projects.projects);
+            if !workbook_only {
+                resolve_all_sprint_tuples(&db, &today, filter.as_deref())
+                    .context("grading-html project resolution failed")?;
+            }
+            if !config_dir.join("grading.toml").is_file() {
+                SheetGradingConfig::default().write_to_dir(&config_dir)?;
+                info!(
+                    path = %config_dir.join("grading.toml").display(),
+                    "wrote default config/grading.toml"
+                );
+            }
+            let default_out = entregues_dir.join("grading.html");
+            let opts = HtmlOpts {
+                project_filter: filter,
+                out: out.or(Some(default_out)),
+                today: today.clone(),
+                workbook_only,
+            };
+            let written = run_html(&db, &config_dir, &opts).context("grading-html failed")?;
+            info!(path = %written.display(), "grading-html complete");
         }
         Command::QualityFlags {
             projects,
@@ -1780,6 +1824,7 @@ mod tests {
             .map(|c| c.get_name().to_string())
             .collect();
         assert!(subs.iter().any(|s| s == "grading-sheet"));
+        assert!(subs.iter().any(|s| s == "grading-html"));
         assert!(subs.iter().any(|s| s == "quality-flags"));
     }
 }
