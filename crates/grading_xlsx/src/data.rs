@@ -12,8 +12,8 @@ use crate::config::GradingConfig;
 use crate::grade::{grade_project, GradingResult};
 use crate::labels::WorkbookLabels;
 use crate::normalize::{
-    code_quality_raw, documentation_raw, project_repos, score_architecture, score_code_quality,
-    score_documentation, score_survival, survival_raw,
+    architecture_counts, code_quality_raw, documentation_raw, project_repos, score_architecture,
+    score_code_quality, score_documentation, score_survival, survival_raw,
 };
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,9 @@ pub struct WorkbookData {
     pub tasks: Vec<TaskRow>,
     pub crit_flags: Vec<CritFlagRow>,
     pub flag_rows: Vec<FlagDiagRow>,
+    /// CRITICAL-or-not `student_artifact_flags`; unioned into the snapshot
+    /// `flag` table so the HTML engine can reproduce student penalties.
+    pub artifact_flag_rows: Vec<ArtifactFlagRow>,
     pub ai_detect_rows: Vec<AiDetectRow>,
     pub llm_flag_rows: Vec<LlmFlagRow>,
     pub labels: WorkbookLabels,
@@ -74,6 +77,18 @@ pub struct FlagDiagRow {
     pub flag_type: String,
     pub severity: String,
     pub details: Option<String>,
+}
+
+/// A `student_artifact_flags` row for a real student on a project. These are
+/// project-scoped (no sprint) and are counted as CRITICAL student penalties by
+/// `penalty.rs::student_penalty` alongside sprint flags — but they are absent
+/// from `flag_rows`, so the snapshot unions both to close the parity gap.
+#[derive(Debug, Clone)]
+pub struct ArtifactFlagRow {
+    pub project_id: i64,
+    pub student_id: String,
+    pub flag_type: String,
+    pub severity: String,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +140,7 @@ pub fn load_workbook_data_with_results(
     let mut tasks = Vec::new();
     let mut crit_flags = Vec::new();
     let mut flag_rows = Vec::new();
+    let mut artifact_flag_rows = Vec::new();
     let mut ai_detect_rows = Vec::new();
 
     for (i, &project_id) in project_ids.iter().enumerate() {
@@ -162,6 +178,7 @@ pub fn load_workbook_data_with_results(
 
         crit_flags.extend(load_crit_flags(conn, project_id, cfg)?);
         flag_rows.extend(load_flag_diag(conn, project_id, &sprint_ids)?);
+        artifact_flag_rows.extend(load_artifact_flags(conn, project_id)?);
         ai_detect_rows.extend(load_ai_detect(conn, project_id, &sprint_ids)?);
         results.push(result);
     }
@@ -198,6 +215,7 @@ pub fn load_workbook_data_with_results(
         tasks,
         crit_flags,
         flag_rows,
+        artifact_flag_rows,
         ai_detect_rows,
         llm_flag_rows,
         labels,
@@ -215,6 +233,7 @@ pub fn project_axis_raw(
     let (cq, cc, mutation) = code_quality_raw(conn, project_id, sprint_ids)?;
     let surv = survival_raw(conn, project_id, sprint_ids)?;
     let arch = score_architecture(conn, project_id, &cfg.normalization)?;
+    let (arch_crit_count, arch_warn_count) = architecture_counts(conn, project_id)?;
 
     Ok(ProjectAxisRaw {
         documentation_raw: doc.raw_value,
@@ -226,6 +245,8 @@ pub fn project_axis_raw(
         survival_raw: surv.raw_value,
         survival_present: surv.present,
         architecture_density: arch.raw_value,
+        arch_crit_count,
+        arch_warn_count,
         architecture_present: arch.present,
         // Rust-side scores for parity tests / cached formula results.
         documentation_score: score_documentation(&doc, &cfg.normalization).score_0_10,
@@ -246,6 +267,8 @@ pub struct ProjectAxisRaw {
     pub survival_raw: Option<f64>,
     pub survival_present: bool,
     pub architecture_density: Option<f64>,
+    pub arch_crit_count: u32,
+    pub arch_warn_count: u32,
     pub architecture_present: bool,
     pub documentation_score: Option<f64>,
     pub code_quality_score: Option<f64>,
@@ -354,6 +377,42 @@ fn load_flag_diag(
                 details,
             });
         }
+    }
+    Ok(out)
+}
+
+/// Project-scoped `student_artifact_flags` for real students (excludes
+/// synthetic `PROJECT_%` ids, matching `load_flag_diag`). All severities are
+/// loaded; the engine filters CRITICAL when summing penalties.
+fn load_artifact_flags(
+    conn: &Connection,
+    project_id: i64,
+) -> rusqlite::Result<Vec<ArtifactFlagRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT student_id, flag_type, severity
+         FROM student_artifact_flags
+         WHERE project_id = ?
+           AND student_id NOT LIKE 'PROJECT_%'",
+    )?;
+    let rows = stmt.query_map(params![project_id], |r| {
+        Ok((
+            r.get::<_, Option<String>>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (student_id, flag_type, severity) = row?;
+        let Some(student_id) = student_id else {
+            continue;
+        };
+        out.push(ArtifactFlagRow {
+            project_id,
+            student_id,
+            flag_type: flag_type.unwrap_or_default(),
+            severity: severity.unwrap_or_default(),
+        });
     }
     Ok(out)
 }
