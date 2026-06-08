@@ -62,13 +62,7 @@ pub fn holistic_flag_exists(
         "SELECT COUNT(*) FROM llm_quality_flag
          WHERE project_id = ? AND scope = 'project' AND target_ref = ?
            AND backend = ? AND model_id = ? AND prompt_version = ?",
-        params![
-            project_id,
-            target_ref,
-            backend,
-            model_id,
-            prompt_version
-        ],
+        params![project_id, target_ref, backend, model_id, prompt_version],
         |r| r.get(0),
     )?;
     Ok(n > 0)
@@ -141,7 +135,8 @@ pub fn list_flags_for_projects(
          ORDER BY project_id, scope, target_ref, id"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut params: Vec<rusqlite::types::Value> = project_ids.iter().map(|id| (*id).into()).collect();
+    let mut params: Vec<rusqlite::types::Value> =
+        project_ids.iter().map(|id| (*id).into()).collect();
     let rows = stmt.query_map(rusqlite::params_from_iter(params.drain(..)), map_flag_row)?;
     let mut out = Vec::new();
     for row in rows {
