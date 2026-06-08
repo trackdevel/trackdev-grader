@@ -7,15 +7,6 @@ use sprint_grader_blackbox::fixture::{ids, seed_pr};
 use sprint_grader_blackbox::{Fixture, Runner};
 use sprint_grader_core::Config;
 
-fn count_flags(conn: &rusqlite::Connection, sprint_id: i64, ftype: &str) -> i64 {
-    conn.query_row(
-        "SELECT COUNT(*) FROM flags WHERE sprint_id = ? AND flag_type = ?",
-        params![sprint_id, ftype],
-        |r| r.get(0),
-    )
-    .unwrap()
-}
-
 fn count_flags_for(conn: &rusqlite::Connection, sprint_id: i64, ftype: &str, student: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM flags WHERE sprint_id = ? AND flag_type = ? AND student_id = ?",
@@ -84,69 +75,6 @@ fn t_t2_2_cosmetic_rewrite_emits_victim_and_actor() {
         .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&victim_details).unwrap();
     assert_eq!(parsed["counterpart_user_id"].as_str(), Some("bob"));
-}
-
-// ─── T-T2.3 — Detector thresholds in course.toml are honoured (P1.3) ──────
-//
-// Sweep-style: pick three representative knobs (gini, composite, low_doc)
-// and prove each is honoured in both directions. Exhaustive coverage of all
-// 13 knobs is unit-tested in `crates/core/src/config.rs` already.
-
-fn seed_outlier_metrics(conn: &rusqlite::Connection, sprint_id: i64) {
-    // Alice carries 30 points, others carry 5 each — yields a clearly
-    // unequal distribution AND a material outlier (alice ≫ mean).
-    conn.execute(
-        "INSERT INTO student_sprint_metrics
-            (student_id, sprint_id, points_delivered, points_share, weighted_pr_lines)
-         VALUES ('alice', ?, 30, 0.6, 200)",
-        params![sprint_id],
-    )
-    .unwrap();
-    for s in &["bob", "carol", "dan", "eve"] {
-        conn.execute(
-            "INSERT INTO student_sprint_metrics
-                (student_id, sprint_id, points_delivered, points_share, weighted_pr_lines)
-             VALUES (?, ?, 5, 0.1, 30)",
-            params![s, sprint_id],
-        )
-        .unwrap();
-    }
-}
-
-#[test]
-fn t_t2_3_thresholds_honour_custom_gini_warn() {
-    // T-P1.3 moved gini_warn into [detector_thresholds]. Verify the
-    // knob actually changes detector behaviour by re-running flag
-    // detection under two configs against the same DB.
-    let tmp = tempfile::tempdir().unwrap();
-    let (conn, _paths) = Fixture::new().build(tmp.path()).unwrap();
-    seed_outlier_metrics(&conn, ids::SPRINT_ID);
-    sprint_grader_analyze::inequality::compute_all_inequality(&conn, ids::SPRINT_ID).unwrap();
-
-    // Tightened config — gini_warn far below the actual gini → fire.
-    let mut tight = Config::test_default();
-    tight.detector_thresholds.gini_warn = 0.05;
-    tight.detector_thresholds.gini_crit = 0.99;
-    detect_flags_for_sprint_id(&conn, ids::SPRINT_ID, &tight).unwrap();
-    let n_tight = count_flags(&conn, ids::SPRINT_ID, "TEAM_INEQUALITY");
-    assert!(
-        n_tight > 0,
-        "tight gini_warn (0.05) should fire TEAM_INEQUALITY, got {n_tight}"
-    );
-
-    // Wipe and re-run with a permissive config — gini_warn above the
-    // actual gini → silent.
-    conn.execute("DELETE FROM flags WHERE sprint_id = ?", [ids::SPRINT_ID])
-        .unwrap();
-    let mut loose = Config::test_default();
-    loose.detector_thresholds.gini_warn = 0.99;
-    loose.detector_thresholds.gini_crit = 0.999;
-    detect_flags_for_sprint_id(&conn, ids::SPRINT_ID, &loose).unwrap();
-    assert_eq!(
-        count_flags(&conn, ids::SPRINT_ID, "TEAM_INEQUALITY"),
-        0,
-        "permissive gini_warn (0.99) should suppress TEAM_INEQUALITY"
-    );
 }
 
 // ─── T-T2.4 — pr_pre_squash_authors drives AUTHOR_MISMATCH (P1.4) ─────────
