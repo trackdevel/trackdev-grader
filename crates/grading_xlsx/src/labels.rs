@@ -156,9 +156,6 @@ mod tests {
         assert_eq!(labels.sprint(10), "1");
         assert_eq!(labels.sprint(11), "2");
         assert_eq!(labels.task(5), "T-101");
-        assert_eq!(
-            labels.humanize_target_ref("project:1"),
-            "project:pds26-1a"
-        );
+        assert_eq!(labels.humanize_target_ref("project:1"), "project:pds26-1a");
     }
 }
