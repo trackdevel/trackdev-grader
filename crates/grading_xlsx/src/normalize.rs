@@ -252,11 +252,11 @@ pub fn score_survival(raw: &AxisRaw, norm: &NormalizationConfig) -> AxisScore {
     }
 }
 
-pub fn score_architecture(
-    conn: &Connection,
-    project_id: i64,
-    norm: &NormalizationConfig,
-) -> rusqlite::Result<AxisScore> {
+/// Count `(critical, warning)` architecture-rule violations across a project's
+/// repos. Exposed so the HTML snapshot can store the raw counts and recompute
+/// `arch_density` live as `k_crit`/`k_warn`/`arch_norm` are tuned — the workbook
+/// bakes only the final density, but the HTML page keeps these knobs live.
+pub fn architecture_counts(conn: &Connection, project_id: i64) -> rusqlite::Result<(u32, u32)> {
     let repos = project_repos(conn, project_id)?;
     let mut crit = 0u32;
     let mut warn = 0u32;
@@ -270,6 +270,15 @@ pub fn score_architecture(
             }
         }
     }
+    Ok((crit, warn))
+}
+
+pub fn score_architecture(
+    conn: &Connection,
+    project_id: i64,
+    norm: &NormalizationConfig,
+) -> rusqlite::Result<AxisScore> {
+    let repos = project_repos(conn, project_id)?;
     if repos.is_empty() {
         return Ok(AxisScore {
             key: "architecture",
@@ -278,6 +287,7 @@ pub fn score_architecture(
             present: false,
         });
     }
+    let (crit, warn) = architecture_counts(conn, project_id)?;
     let arch_density = (norm.k_crit * crit as f64 + norm.k_warn * warn as f64) / norm.arch_norm;
     let score = clamp_0_10(10.0 - arch_density.min(10.0));
     Ok(AxisScore {
