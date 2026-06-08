@@ -53,7 +53,8 @@ impl QualityBackend {
                 }
             }
             "ollama" => {
-                let client = OllamaClient::from_quality_llm(ql).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let client =
+                    OllamaClient::from_quality_llm(ql).map_err(|e| anyhow::anyhow!("{e}"))?;
                 if !client.is_available() {
                     bail!(
                         "ollama not reachable at `{}` — start the daemon or set \
@@ -95,16 +96,20 @@ mod tests {
 
     #[test]
     fn cursor_backend_caps_workers_at_one() {
-        let mut ql = QualityLlmConfig::default();
-        ql.backend = "cursor-cli".into();
-        ql.workers = 8;
+        let ql = QualityLlmConfig {
+            backend: "cursor-cli".into(),
+            workers: 8,
+            ..Default::default()
+        };
         assert_eq!(QualityBackend::worker_count(&ql), 1);
     }
 
     #[test]
     fn claude_backend_uses_configured_workers() {
-        let mut ql = QualityLlmConfig::default();
-        ql.workers = 6;
+        let ql = QualityLlmConfig {
+            workers: 6,
+            ..Default::default()
+        };
         assert_eq!(QualityBackend::worker_count(&ql), 6);
     }
 }
