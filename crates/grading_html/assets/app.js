@@ -857,49 +857,51 @@
     return rows.length && rows[0][0] ? rows[0][0] : null;
   }
 
-  function isInternalFlagKey(key) {
+  function flagCell(plain, html) {
+    return { plain, html: html != null ? html : esc(plain) };
+  }
+
+  function externalLink(url, label) {
     return (
-      key.startsWith('threshold') ||
-      [
-        'z_score',
-        'gini',
-        'hoover',
-        'cv',
-        'regularity_score',
-        'stderr_preview',
-        'exit_code',
-        'pr_id',
-        'flagged_student',
-        'author',
-        'author_name',
-      ].includes(key)
+      '<a class="entity-link external" href="' +
+      esc(url) +
+      '" target="_blank" rel="noopener noreferrer">' +
+      esc(label) +
+      '</a>'
     );
   }
 
-  function labelFlagKey(key) {
-    const labels = {
-      pr_number: 'PR',
-      number: 'PR',
-      repo: 'Repository',
-      repo_full_name: 'Repository',
-      counterpart_user_id: 'Teammate',
-      rewriter: 'Rewriter',
-      student_id: 'Student',
-      points: 'Task points',
-      share: 'Share',
-      expected: 'Equal team share',
-      total_lines: 'Total lines',
-      statements_affected: 'Statements affected',
-      file: 'File',
-      change_type: 'Change type',
-    };
-    return labels[key] || key.replace(/_/g, ' ');
+  function numField(v, key) {
+    if (!v || v[key] == null) return null;
+    const n = Number(v[key]);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function strField(v, key) {
+    if (!v || v[key] == null) return '';
+    return String(v[key]);
   }
 
   function fmtFlagNum(v) {
     const n = Number(v);
     if (!Number.isFinite(n)) return String(v);
     return Number.isInteger(n) ? String(n) : String(round2(n));
+  }
+
+  function fmtPercent(n) {
+    return fmtFlagNum(n * 100) + '%';
+  }
+
+  function fmtHours(h) {
+    const n = Math.abs(Number(h));
+    if (Math.abs(n - 1) < 0.05) return '1 hour';
+    return fmtFlagNum(n) + ' hours';
+  }
+
+  function deadlineDelta(hoursBeforeDeadline) {
+    const h = Number(hoursBeforeDeadline);
+    if (h < -0.05) return fmtHours(h) + ' after the deadline';
+    return fmtHours(h) + ' before the deadline';
   }
 
   function looksLikePr(v) {
@@ -924,10 +926,7 @@
     else if (title) label = title;
     else label = 'PR';
     if (includeRepo && repo) label = repo + ' ' + label;
-    const html =
-      url && String(url).startsWith('http')
-        ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(label) + '</a>'
-        : esc(label);
+    const html = url && String(url).startsWith('http') ? externalLink(url, label) : esc(label);
     return { plain: label, html, url };
   }
 
@@ -939,96 +938,479 @@
 
   function resolveStudentField(value) {
     if (typeof value !== 'string' || !value) return null;
-    return studentDisplayName(value) || value;
+    return studentDisplayName(value) || null;
   }
 
-  function formatFlagScalar(key, value, parent) {
-    if (value == null) return '';
-    if (typeof value === 'object') {
-      if (looksLikePr(value)) return prReference(value, true).plain;
-      return '';
-    }
-    if (['author', 'counterpart_user_id', 'student_id', 'rewriter'].includes(key)) {
-      const name = resolveStudentField(value);
-      return name || '';
-    }
-    if ((key === 'pr_url' || key === 'url') && String(value).startsWith('http')) return '';
-    if ((key === 'pr_number' || key === 'number') && (parent.pr_url || parent.url)) return '';
-    return String(value);
+  function stmtCountLabel(n) {
+    return Math.abs(n - 1) < 0.05 ? '1 statement' : fmtFlagNum(n) + ' statements';
   }
 
-  function formatFlagScalarHtml(key, value, parent) {
-    const plain = formatFlagScalar(key, value, parent);
-    if (!plain) return '';
-    if ((key === 'pr_url' || key === 'url') && String(value).startsWith('http')) {
-      return '<a href="' + esc(value) + '" target="_blank" rel="noopener">' + esc(plain) + '</a>';
+  function renderApprovedBrokenPr(v) {
+    const author = resolveAuthorName(v);
+    const pr = prReference(v, false);
+    if (author) return flagCell('Author ' + author + ': ' + pr.plain + '.', 'Author ' + esc(author) + ': ' + pr.html + '.');
+    return flagCell('Approved broken PR: ' + pr.plain + '.', 'Approved broken PR: ' + pr.html + '.');
+  }
+
+  function renderPrDoesNotCompile(v) {
+    const pr = prReference(v, false);
+    return flagCell('Does not compile: ' + pr.plain + '.', 'Does not compile: ' + pr.html + '.');
+  }
+
+  function renderSingleCommitDump(v) {
+    const pr = prReference(v, true);
+    const lines = v.total_lines != null ? ' (' + fmtFlagNum(v.total_lines) + ' total lines)' : '';
+    return flagCell('Single-commit dump: ' + pr.plain + lines + '.', 'Single-commit dump: ' + pr.html + esc(lines) + '.');
+  }
+
+  function renderLastMinutePr(v) {
+    const pr = prReference(v, false);
+    const hours = numField(v, 'hours_before_deadline');
+    const mergedAt = strField(v, 'merged_at');
+    let plain;
+    let html;
+    if (hours != null && mergedAt) {
+      plain = 'Merged ' + deadlineDelta(hours) + ' (' + mergedAt + '): ' + pr.plain + '.';
+      html = 'Merged ' + esc(deadlineDelta(hours)) + ' (' + esc(mergedAt) + '): ' + pr.html + '.';
+    } else if (hours != null) {
+      plain = 'Merged ' + deadlineDelta(hours) + ': ' + pr.plain + '.';
+      html = 'Merged ' + esc(deadlineDelta(hours)) + ': ' + pr.html + '.';
+    } else if (mergedAt) {
+      plain = 'Merged at ' + mergedAt + ': ' + pr.plain + '.';
+      html = 'Merged at ' + esc(mergedAt) + ': ' + pr.html + '.';
+    } else {
+      plain = 'Last-minute merge: ' + pr.plain + '.';
+      html = 'Last-minute merge: ' + pr.html + '.';
     }
-    return esc(plain);
+    return flagCell(plain, html);
+  }
+
+  function renderLowMutationScore(v) {
+    const pr = prReference(v, false);
+    const score = numField(v, 'mutation_score');
+    const killed = numField(v, 'mutants_killed');
+    const total = numField(v, 'mutants_total');
+    let tail = '';
+    if (score != null && killed != null && total != null) {
+      tail = ' (mutation score ' + fmtPercent(score) + ', ' + fmtFlagNum(killed) + '/' + fmtFlagNum(total) + ' mutants killed)';
+    } else if (score != null) {
+      tail = ' (mutation score ' + fmtPercent(score) + ')';
+    }
+    return flagCell('Low mutation score on ' + pr.plain + tail + '.', 'Low mutation score on ' + pr.html + esc(tail) + '.');
+  }
+
+  function renderOrphanPr(v) {
+    const pr = prReference(v, true);
+    const msg = strField(v, 'message') || 'Merged PR not linked to any task in TrackDev';
+    return flagCell(msg + ': ' + pr.plain + '.', esc(msg) + ': ' + pr.html + '.');
+  }
+
+  function renderAuthorMismatch(v) {
+    const pr = prReference(v, true);
+    const prAuthor = strField(v, 'pr_author');
+    const commits = Array.isArray(v.commit_authors) ? v.commit_authors.join(', ') : '';
+    const plain =
+      'On ' +
+      pr.plain +
+      ': commit author(s) (' +
+      commits +
+      ') differ from PR author' +
+      (prAuthor ? ' (' + prAuthor + ')' : '') +
+      '.';
+    const html =
+      'On ' +
+      pr.html +
+      ': commit author(s) (' +
+      esc(commits) +
+      ') differ from PR author' +
+      (prAuthor ? ' (' + esc(prAuthor) + ')' : '') +
+      '.';
+    return flagCell(plain, html);
+  }
+
+  function renderForeignMerge(v) {
+    const pr = prReference(v, true);
+    const taskKey = strField(v, 'task_key') || 'task';
+    const owner = resolveStudentField(strField(v, 'task_owner'));
+    const author = resolveStudentField(strField(v, 'pr_author'));
+    let plain = 'Task ' + taskKey + ' was completed via ' + pr.plain;
+    let html = 'Task ' + esc(taskKey) + ' was completed via ' + pr.html;
+    if (owner && author) {
+      plain += ', but the task assignee (' + owner + ') is not the PR author (' + author + ')';
+      html += ', but the task assignee (' + esc(owner) + ') is not the PR author (' + esc(author) + ')';
+    }
+    return flagCell(plain + '.', html + '.');
+  }
+
+  function renderBulkRenamePr(v) {
+    const pr = prReference(v, true);
+    const ratio = numField(v, 'add_del_ratio');
+    const tail = ratio != null ? ' (add/del ratio ' + fmtFlagNum(ratio) + ')' : '';
+    return flagCell('Likely bulk rename on ' + pr.plain + tail + '.', 'Likely bulk rename on ' + pr.html + esc(tail) + '.');
+  }
+
+  function renderCosmeticHeavyPr(v) {
+    const pr = prReference(v, true);
+    const share = numField(v, 'cosmetic_share');
+    const tail = share != null ? fmtPercent(share) + ' cosmetic changes' : 'mostly cosmetic changes';
+    return flagCell(pr.plain + ': ' + tail + '.', pr.html + ': ' + esc(tail) + '.');
+  }
+
+  function renderCosmeticRewriteVictim(v) {
+    const actor = resolveStudentField(strField(v, 'counterpart_user_id')) || 'A teammate';
+    const stmts = numField(v, 'statements_affected') || 0;
+    const plain = actor + ' cosmetically rewrote ' + stmtCountLabel(stmts) + ' you originally authored. No action needed.';
+    return flagCell(plain);
+  }
+
+  function renderCosmeticRewriteActor(v) {
+    const victim = resolveStudentField(strField(v, 'counterpart_user_id')) || 'a teammate';
+    const stmts = numField(v, 'statements_affected') || 0;
+    const plain =
+      'Cosmetically rewrote ' + stmtCountLabel(stmts) + ' originally authored by ' + victim + '. Avoid churn-only changes.';
+    return flagCell(plain);
+  }
+
+  function renderCosmeticRewriteLegacy(v) {
+    const rewriter = resolveStudentField(strField(v, 'rewriter')) || 'a teammate';
+    const stmts = numField(v, 'statements_affected') || 0;
+    return flagCell(rewriter + ' cosmetically rewrote ' + stmtCountLabel(stmts) + ' originally authored by this student.');
+  }
+
+  function renderContributionImbalance(v) {
+    const share = numField(v, 'share');
+    const expected = numField(v, 'expected');
+    if (share != null && expected != null) {
+      const direction = share >= expected ? 'above' : 'below';
+      return flagCell(
+        'Contribution share is ' + fmtPercent(share) + ', ' + direction + ' the equal team share of ' + fmtPercent(expected) + '.'
+      );
+    }
+    if (share != null) return flagCell('Contribution share is ' + fmtPercent(share) + '.');
+    return flagCell('Contribution differs noticeably from the rest of the team.');
+  }
+
+  function renderGhostContributor(v) {
+    const tasks = numField(v, 'tasks_assigned') || 0;
+    const composite = numField(v, 'composite') || 0;
+    const code = numField(v, 'code_signal') || 0;
+    const taskText = Math.abs(tasks - 1) < 0.05 ? '1 assigned task' : fmtFlagNum(tasks) + ' assigned tasks';
+    let signal =
+      code <= 0.001 && composite <= 0.001
+        ? 'the sprint data shows no visible contribution attached to that work'
+        : code <= 0.05 && composite <= 0.05
+          ? 'the sprint data shows almost no visible contribution attached to that work'
+          : 'the sprint data shows much less visible contribution than expected for that assigned work';
+    return flagCell('Student has ' + taskText + ', but ' + signal + '.');
+  }
+
+  function renderLowCompositeScore(v) {
+    const code = numField(v, 'code') || 0;
+    const review = numField(v, 'review') || 0;
+    const task = numField(v, 'task') || 0;
+    const process = numField(v, 'process') || 0;
+    const composite = numField(v, 'composite') || 0;
+    if (composite <= 0.001 && code <= 0.001 && review <= 0.001 && task <= 0.001 && process <= 0.001) {
+      return flagCell(
+        'Overall contribution signal for this sprint is effectively absent: no meaningful activity appears in code, task delivery, reviews, or process data.'
+      );
+    }
+    const weak = [];
+    if (code <= 0.05) weak.push('code work');
+    if (task <= 0.05) weak.push('task delivery');
+    if (review <= 0.05) weak.push('reviews');
+    if (process <= 0.05) weak.push('process activity');
+    if (!weak.length) return flagCell('Overall contribution signal for this sprint is very low.');
+    return flagCell('Overall contribution signal for this sprint is very low, especially in ' + weak.join(', ') + '.');
+  }
+
+  function renderLowSurvivalRate(v) {
+    const rate = numField(v, 'rate');
+    const teamAvg = numField(v, 'team_avg');
+    if (rate != null && teamAvg != null) {
+      return flagCell(
+        'Only ' + fmtPercent(rate) + " of this student's added code survived the sprint, versus " + fmtPercent(teamAvg) + ' for the team on average.'
+      );
+    }
+    if (rate != null) {
+      return flagCell('Only ' + fmtPercent(rate) + " of this student's added code survived the sprint.");
+    }
+    return flagCell("A much smaller share of this student's added code survived the sprint than expected.");
+  }
+
+  function renderHotspot(kind, v, tail) {
+    const weighted = numField(v, 'weighted');
+    const min = numField(v, 'min_weighted');
+    let lead;
+    if (kind === 'complexity') {
+      const score = numField(v, 'score');
+      const warn = numField(v, 'warn_threshold');
+      const crit = numField(v, 'crit_threshold');
+      if (score != null && crit != null && score >= crit) lead = 'Complexity hotspot score ' + fmtFlagNum(score) + ' crosses the critical band (' + fmtFlagNum(crit) + ').';
+      else if (score != null && warn != null) lead = 'Complexity hotspot score ' + fmtFlagNum(score) + ' crosses the warning band (' + fmtFlagNum(warn) + ').';
+      else if (score != null) lead = 'Complexity hotspot score ' + fmtFlagNum(score) + '.';
+      else lead = 'Complexity hotspot threshold reached.';
+    } else if (weighted != null && min != null) {
+      const label = kind === 'architecture' ? 'Architecture weighted contribution' : 'Static-analysis weighted findings';
+      lead = label + ' reached ' + fmtFlagNum(weighted) + ' (threshold ' + fmtFlagNum(min) + ').';
+    } else if (weighted != null) {
+      const label = kind === 'architecture' ? 'Architecture weighted contribution' : 'Static-analysis weighted findings';
+      lead = label + ' reached ' + fmtFlagNum(weighted) + '.';
+    } else {
+      lead = kind === 'architecture' ? 'Architecture hotspot threshold reached.' : 'Static-analysis threshold reached.';
+    }
+    return flagCell(lead + tail);
+  }
+
+  function renderUnknownContributor(v) {
+    const login = strField(v, 'github_login') || 'unknown';
+    const name = strField(v, 'github_name');
+    const who = name ? login + ' (' + name + ')' : login;
+    const occs = Array.isArray(v.occurrences) ? v.occurrences : [];
+    const prBits = occs.slice(0, 5).map(function (occ) {
+      const pr = prReference(occ, true);
+      const role = strField(occ, 'role').replace(/_/g, ' ');
+      return role ? role + ' on ' + pr.plain : pr.plain;
+    });
+    const prBitsHtml = occs.slice(0, 5).map(function (occ) {
+      const pr = prReference(occ, true);
+      const role = strField(occ, 'role').replace(/_/g, ' ');
+      return role ? esc(role) + ' on ' + pr.html : pr.html;
+    });
+    const plain = 'Unknown GitHub contributor ' + who + (prBits.length ? ': ' + prBits.join('; ') : '') + '.';
+    const html = 'Unknown GitHub contributor ' + esc(who) + (prBitsHtml.length ? ': ' + prBitsHtml.join('; ') : '') + '.';
+    return flagCell(plain, html);
+  }
+
+  function renderGenericFlag(v) {
+    if (v.message && Object.keys(v).length <= 3) {
+      return flagCell(strField(v, 'message'));
+    }
+    if (looksLikePr(v) && (v.pr_number != null || v.number != null)) {
+      const pr = prReference(v, !!(v.repo || v.repo_full_name));
+      const author = resolveAuthorName(v);
+      if (author) return flagCell('Author ' + author + ': ' + pr.plain + '.', 'Author ' + esc(author) + ': ' + pr.html + '.');
+      return flagCell(pr.plain + '.', pr.html + '.');
+    }
+    const parts = [];
+    const htmlParts = [];
+    if (v.message) {
+      parts.push(strField(v, 'message'));
+      htmlParts.push(esc(strField(v, 'message')));
+    }
+    const skip = new Set([
+      'message',
+      'pr_id',
+      'threshold',
+      'repo',
+      'repo_full_name',
+      'pr_url',
+      'url',
+      'pr_number',
+      'number',
+      'pr_title',
+      'title',
+      'author',
+      'author_name',
+    ]);
+    for (const key of Object.keys(v)) {
+      if (skip.has(key) || key.startsWith('threshold')) continue;
+      const val = v[key];
+      if (val == null) continue;
+      if (looksLikePr(val)) {
+        const pr = prReference(val, true);
+        parts.push(pr.plain);
+        htmlParts.push(pr.html);
+        continue;
+      }
+      if (typeof val === 'string' && val.startsWith('http')) {
+        parts.push(val);
+        htmlParts.push(externalLink(val, val));
+        continue;
+      }
+      if (typeof val === 'object') continue;
+      const label = key.replace(/_/g, ' ');
+      parts.push(label + ': ' + String(val));
+      htmlParts.push(esc(label) + ': ' + esc(String(val)));
+    }
+    if (!parts.length) return flagCell(JSON.stringify(v));
+    return flagCell(parts.join('; '), htmlParts.join('; '));
+  }
+
+  function renderFlagByType(flagType, v) {
+    switch (flagType) {
+      case 'APPROVED_BROKEN_PR':
+        return renderApprovedBrokenPr(v);
+      case 'PR_DOES_NOT_COMPILE':
+        return renderPrDoesNotCompile(v);
+      case 'SINGLE_COMMIT_DUMP':
+        return renderSingleCommitDump(v);
+      case 'LAST_MINUTE_PR':
+        return renderLastMinutePr(v);
+      case 'LOW_MUTATION_SCORE':
+        return renderLowMutationScore(v);
+      case 'ORPHAN_PR':
+        return renderOrphanPr(v);
+      case 'AUTHOR_MISMATCH':
+        return renderAuthorMismatch(v);
+      case 'FOREIGN_MERGE':
+        return renderForeignMerge(v);
+      case 'BULK_RENAME_PR':
+        return renderBulkRenamePr(v);
+      case 'COSMETIC_HEAVY_PR':
+        return renderCosmeticHeavyPr(v);
+      case 'COSMETIC_REWRITE_VICTIM':
+        return renderCosmeticRewriteVictim(v);
+      case 'COSMETIC_REWRITE_ACTOR':
+        return renderCosmeticRewriteActor(v);
+      case 'COSMETIC_REWRITE':
+        return renderCosmeticRewriteLegacy(v);
+      case 'CONTRIBUTION_IMBALANCE':
+        return renderContributionImbalance(v);
+      case 'GHOST_CONTRIBUTOR':
+        return renderGhostContributor(v);
+      case 'LOW_COMPOSITE_SCORE':
+        return renderLowCompositeScore(v);
+      case 'LOW_SURVIVAL_RATE':
+        return renderLowSurvivalRate(v);
+      case 'COMPLEXITY_HOTSPOT':
+        return renderHotspot('complexity', v, ' See the Complexity & testability block in this dashboard for the offending methods.');
+      case 'ARCHITECTURE_HOTSPOT':
+        return renderHotspot('architecture', v, ' See the Architecture violations block in this dashboard for the attributed offenders.');
+      case 'STATIC_ANALYSIS_HOTSPOT':
+        return renderHotspot('static', v, ' See the Static analysis block in this dashboard for the attributed findings.');
+      case 'UNKNOWN_CONTRIBUTOR':
+        return renderUnknownContributor(v);
+      case 'ZERO_TASKS':
+        return flagCell(strField(v, 'message') || 'Student completed 0 tasks this sprint.');
+      case 'MISSING_AI_DECLARATION': {
+        const keys = Array.isArray(v.task_keys) ? v.task_keys.join(', ') : '';
+        const count = numField(v, 'count');
+        const base = strField(v, 'message') || "Declared AI usage ('Ús de IA') missing on DONE tasks";
+        const tail = count != null ? ' (' + fmtFlagNum(count) + ' tasks: ' + keys + ')' : keys ? ' (' + keys + ')' : '';
+        return flagCell(base + tail + '.', esc(base) + esc(tail) + '.');
+      }
+      case 'CARRYING_TEAM': {
+        const pts = numField(v, 'points');
+        const total = numField(v, 'team_total');
+        const share = numField(v, 'share');
+        if (pts != null && total != null && share != null) {
+          return flagCell('Delivered ' + fmtFlagNum(pts) + ' task points (' + fmtPercent(share) + ' of team total ' + fmtFlagNum(total) + ').');
+        }
+        return renderGenericFlag(v);
+      }
+      case 'LOW_CODE_HIGH_POINTS': {
+        const pts = numField(v, 'points');
+        const lines = numField(v, 'weighted_lines');
+        if (pts != null && lines != null) {
+          return flagCell('High task points (' + fmtFlagNum(pts) + ') with relatively low changed lines (' + fmtFlagNum(lines) + ').');
+        }
+        return renderGenericFlag(v);
+      }
+      case 'POINT_CODE_MISMATCH': {
+        const pts = numField(v, 'points_share');
+        const code = numField(v, 'code_share');
+        const gap = numField(v, 'gap');
+        if (pts != null && code != null && gap != null) {
+          return flagCell(
+            'Task-points share (' + fmtPercent(pts) + ') and code share (' + fmtPercent(code) + ') diverge by ' + fmtPercent(gap) + '.'
+          );
+        }
+        return renderGenericFlag(v);
+      }
+      case 'CRAMMING': {
+        const ratio = numField(v, 'cramming_ratio');
+        if (ratio != null) return flagCell(fmtPercent(ratio) + ' of commits landed in the final cramming window.');
+        return renderGenericFlag(v);
+      }
+      case 'MICRO_PRS': {
+        const micro = numField(v, 'micro_prs');
+        const total = numField(v, 'total_prs');
+        const maxLines = numField(v, 'threshold_lines');
+        if (micro != null && total != null) {
+          const tail = maxLines != null ? ' (≤' + fmtFlagNum(maxLines) + ' lines each)' : '';
+          return flagCell(fmtFlagNum(micro) + ' of ' + fmtFlagNum(total) + ' PRs are micro' + tail + '.');
+        }
+        return renderGenericFlag(v);
+      }
+      case 'RAW_NORMALIZED_DIVERGENCE': {
+        const raw = numField(v, 'raw_rate');
+        const norm = numField(v, 'normalized_rate');
+        const div = numField(v, 'divergence');
+        if (raw != null && norm != null && div != null) {
+          return flagCell(
+            'Normalized survival (' + fmtPercent(norm) + ') exceeds raw survival (' + fmtPercent(raw) + ') by ' + fmtPercent(div) + ' — possible cosmetic rewrite pattern.'
+          );
+        }
+        return renderGenericFlag(v);
+      }
+      case 'CROSS_TEAM_SIMILARITY': {
+        const method = strField(v, 'method') || 'code';
+        const fileA = strField(v, 'file_a');
+        const fileB = strField(v, 'file_b');
+        return flagCell('Cross-team ' + method + ' similarity' + (fileA && fileB ? ' between ' + fileA + ' and ' + fileB : '') + '.');
+      }
+      case 'LOW_DOC_SCORE': {
+        const score = numField(v, 'avg_score');
+        if (score != null) return flagCell('Average PR documentation score is ' + fmtFlagNum(score) + '.');
+        return renderGenericFlag(v);
+      }
+      case 'HIDDEN_CONTRIBUTOR': {
+        const composite = numField(v, 'composite');
+        const code = numField(v, 'code_signal');
+        const task = numField(v, 'task_signal');
+        if (composite != null && code != null && task != null) {
+          return flagCell(
+            'Strong code signal (' + fmtFlagNum(code) + ') but weak task signal (' + fmtFlagNum(task) + '); composite ' + fmtFlagNum(composite) + '.'
+          );
+        }
+        return renderGenericFlag(v);
+      }
+      case 'HIGH_COMPILE_FAILURE_RATE': {
+        const failed = numField(v, 'failed');
+        const total = numField(v, 'total');
+        const rate = numField(v, 'fail_rate');
+        if (failed != null && total != null && rate != null) {
+          return flagCell(fmtFlagNum(failed) + ' of ' + fmtFlagNum(total) + ' PR builds failed (' + fmtPercent(rate) + ').');
+        }
+        return renderGenericFlag(v);
+      }
+      case 'ALL_PRS_LATE': {
+        const avg = numField(v, 'avg_regularity');
+        const count = numField(v, 'pr_count');
+        if (avg != null && count != null) {
+          return flagCell('Average PR regularity is ' + fmtFlagNum(avg) + ' across ' + fmtFlagNum(count) + ' PRs — all merges were late.');
+        }
+        return renderGenericFlag(v);
+      }
+      case 'REGULARITY_DECLINING': {
+        const drop = numField(v, 'drop');
+        const count = numField(v, 'pr_count');
+        const prev = numField(v, 'previous_pr_count');
+        if (drop != null && count != null) {
+          let plain = 'PR regularity dropped by ' + fmtFlagNum(drop);
+          if (prev != null) plain += ' (now ' + fmtFlagNum(count) + ' PRs vs ' + fmtFlagNum(prev) + ' previously)';
+          return flagCell(plain + '.');
+        }
+        return renderGenericFlag(v);
+      }
+      default:
+        return renderGenericFlag(v);
+    }
   }
 
   function renderFlagDetailsCell(flagType, detailsRaw) {
-    if (detailsRaw == null || detailsRaw === '') return { plain: '', html: '' };
+    if (detailsRaw == null || detailsRaw === '') return flagCell('');
     let v;
     try {
       v = JSON.parse(detailsRaw);
     } catch {
-      return { plain: String(detailsRaw), html: esc(detailsRaw) };
+      return flagCell(String(detailsRaw));
     }
     if (!v || typeof v !== 'object' || Array.isArray(v)) {
-      return { plain: String(detailsRaw), html: esc(detailsRaw) };
+      return flagCell(String(detailsRaw));
     }
-
-    if (flagType === 'APPROVED_BROKEN_PR' || flagType === 'PR_DOES_NOT_COMPILE') {
-      const prefix = flagType === 'APPROVED_BROKEN_PR' ? 'Approved broken PR' : 'Does not compile';
-      const author = flagType === 'APPROVED_BROKEN_PR' ? resolveAuthorName(v) : null;
-      const pr = prReference(v, false);
-      if (author) {
-        return {
-          plain: 'Author ' + author + ': ' + pr.plain + '.',
-          html: 'Author ' + esc(author) + ': ' + pr.html + '.',
-        };
-      }
-      return {
-        plain: prefix + ': ' + pr.plain + '.',
-        html: esc(prefix) + ': ' + pr.html + '.',
-      };
-    }
-
-    if (flagType === 'SINGLE_COMMIT_DUMP') {
-      const pr = prReference(v, true);
-      const lines = v.total_lines != null ? ' (' + fmtFlagNum(v.total_lines) + ' total lines)' : '';
-      return {
-        plain: 'Single-commit dump: ' + pr.plain + lines + '.',
-        html: 'Single-commit dump: ' + pr.html + esc(lines) + '.',
-      };
-    }
-
-    if (looksLikePr(v) && (v.pr_url || v.url || v.repo || v.repo_full_name)) {
-      const pr = prReference(v, !!(v.repo || v.repo_full_name));
-      const author = resolveAuthorName(v);
-      if (author) {
-        return {
-          plain: 'Author ' + author + ': ' + pr.plain + '.',
-          html: 'Author ' + esc(author) + ': ' + pr.html + '.',
-        };
-      }
-    }
-
-    const parts = [];
-    const htmlParts = [];
-    if (v.message) {
-      parts.push(v.message);
-      htmlParts.push(esc(v.message));
-    }
-    for (const key of Object.keys(v)) {
-      if (key === 'message' || isInternalFlagKey(key)) continue;
-      const plain = formatFlagScalar(key, v[key], v);
-      const html = formatFlagScalarHtml(key, v[key], v);
-      if (!plain) continue;
-      parts.push(labelFlagKey(key) + ': ' + plain);
-      htmlParts.push(esc(labelFlagKey(key)) + ': ' + html);
-    }
-    return { plain: parts.join('; '), html: htmlParts.join('; ') || esc('') };
+    return renderFlagByType(flagType, v);
   }
 
   function flagsTableHTML(flags) {
