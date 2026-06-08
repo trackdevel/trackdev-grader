@@ -3,7 +3,9 @@
 mod aggregate;
 mod config;
 mod data;
+mod excel_text;
 mod grade;
+mod labels;
 mod import_weights;
 mod modulation;
 mod normalize;
