@@ -87,6 +87,7 @@ runnable and testable.
 | [`static_analysis`](crates/static_analysis) | 5c | Java static-analysis stage. Shells PMD / Checkstyle (T6 adds SpotBugs + FindSecBugs), parses SARIF 2.1.0, normalises severity per analyzer, and writes `static_analysis_findings` + `static_analysis_finding_attribution` (per-student blame weights). Gated on `config/static_analysis.toml`; absent file → silent skip. |
 | [`report`](crates/report) | 8 | Per-sprint Excel workbooks (one per team + cross-team summary) and a multi-sprint Markdown `REPORT.md` committed back into each team's Android repo with inline SVG sparklines. |
 | [`grading_xlsx`](crates/grading_xlsx) | sheet | Read-mostly `grading-sheet` command: computes 0–10 project + student grades from evidence already in `grading.db`, persists `project_final_grade` / `student_final_grade`, and writes a self-recalculating `grading_sheet.xlsx`. |
+| [`grading_html`](crates/grading_html) | sheet | `grading-html` command: emits a single, offline, SQL-queryable `grading.html` over the same computed grades, with live knob tuning and an in-browser JS/Rust parity self-test. Presents only — shares `grading_xlsx`'s grade+persist path. |
 | [`quality_llm`](crates/quality_llm) | sheet (Track B) | `quality-flags` command: file-tier + holistic LLM advisory flags into `llm_quality_flag`; never a grade input. |
 | [`orchestration`](crates/orchestration) | glue | The three full-pipeline variants (`run-all`, `go`, `go-quick`), parallel sprint execution via `rayon`, cache purge, the `diff-db` table-by-table dual-run checker, and the `sync-reports` publisher. |
 | [`cli`](crates/cli) | binary | The `sprint-grader` clap CLI exposing every stage as its own subcommand plus the full-pipeline aggregates. |
@@ -565,6 +566,52 @@ sprint-grader grading-sheet --import-weights data/entregues/grading_sheet.xlsx
 
 Reads the `Weights` sheet via calamine and overwrites `config/grading.toml`
 without running a grading pass.
+
+### Interactive grading (`grading-html`)
+
+`sprint-grader grading-html` is a presentation sibling of `grading-sheet`: it
+runs the **same** grade+persist path (so persisted grades are byte-identical and
+running one after the other is a no-op for `diff-db --derived-only`) and emits
+one double-clickable, fully offline `data/entregues/grading.html`.
+
+```bash
+# Whole cohort
+sprint-grader grading-html
+
+# One team — the snapshot is scoped to the named teams (safe for handouts)
+sprint-grader grading-html --projects team-01
+
+# Rebuild from all graded projects without a new grade pass
+sprint-grader grading-html --workbook-only
+```
+
+What the page adds over the XLSX:
+
+- **Live knob tuning.** All 25 scalar knobs (weights, AI modulation, penalty
+  points, normalization anchors) plus the model/level maps and a `penalty_mode`
+  selector recompute every project/student grade **in the browser**, instantly,
+  with no pipeline re-run. The architecture knobs (`k_crit` / `k_warn` /
+  `arch_norm`) are live too — the snapshot carries the raw crit/warn counts.
+- **SQL-native exploration.** The page embeds a small denormalized SQLite
+  snapshot (via sql.js) that it — and any reviewing agent — queries directly.
+  New visualizations are added by appending one entry to the `VIEWS` registry
+  (SQL + chart kind); the agent guide is `crates/grading_html/SCHEMA_NOTES.md`.
+- **An always-on parity self-test.** On load (default knobs) the in-browser
+  arithmetic must reproduce the Rust-computed grades within
+  `0.5·10⁻ᵈᵉᶜⁱᵐᵃˡˢ`, or a red banner declares parity broken. Tuning a knob turns
+  the banner neutral ("what-if, not the official grades"); **Reset knobs**
+  restores defaults and re-verifies.
+
+The file is **single-file, offline, no-network**: sql.js (wasm) and math.js are
+vendored and base64-embedded, and the wasm runs via `wasmBinary` — nothing is
+fetched, nothing is written to `localStorage`. The header shows `weights_version`
+(a SHA-256 of the config) so you can tell which knob vector built a given file.
+
+Treat it as **faculty-internal**: it embeds the whole cohort's grades, flags and
+AI-detection signals behind a live SQL console. For per-team handouts use
+`--projects`, which scopes the snapshot to the named teams. `grading-html` does
+not implement `--import-weights`; if you edited knobs in the XLSX, run
+`grading-sheet --import-weights …` first.
 
 ### `quality-flags` (Track B)
 
