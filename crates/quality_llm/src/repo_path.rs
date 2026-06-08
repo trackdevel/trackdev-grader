@@ -4,10 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// Local clone directory: `{entregues}/{project}/{repo_short_name}/`.
 pub fn local_repo_dir(entregues_dir: &Path, project_name: &str, repo_full_name: &str) -> PathBuf {
-    let repo_short = repo_full_name
-        .rsplit('/')
-        .next()
-        .unwrap_or(repo_full_name);
+    let repo_short = repo_full_name.rsplit('/').next().unwrap_or(repo_full_name);
     entregues_dir.join(project_name).join(repo_short)
 }
 
