@@ -45,11 +45,7 @@ pub fn list_file_candidates(
     let mut out = Vec::new();
     for row in rows {
         let (repo, path, count) = row?;
-        if cfg
-            .skip_globs
-            .iter()
-            .any(|g| simple_glob_match(g, &path))
-        {
+        if cfg.skip_globs.iter().any(|g| simple_glob_match(g, &path)) {
             continue;
         }
         out.push(FileCandidate {
