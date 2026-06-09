@@ -66,3 +66,79 @@ describe("validateSpec", () => {
     expect(vars.has("doc_axis")).toBe(true);
   });
 });
+
+describe("validateSpec — manual fields", () => {
+  function withField(name: string, value = 0): GradeSpec {
+    const spec = structuredClone(loadBundledDefault());
+    spec.manual_fields = { defs: [{ name, value, description: "" }], values: {} };
+    return spec;
+  }
+
+  it("accepts a defined manual field referenced in a student formula", () => {
+    const spec = withField("oral_presentation");
+    const base = spec.formulas.student.find((f) => f.name === "student_base")!;
+    base.expr = {
+      op: "mul",
+      factors: [
+        { op: "var", name: "student_eff" },
+        { op: "var", name: "oral_presentation" },
+      ],
+    };
+    expect(validateSpec(spec).ok).toBe(true);
+  });
+
+  it("accepts a defined manual field referenced in a project formula", () => {
+    const spec = withField("team_bonus");
+    spec.formulas.project[0].expr = { op: "var", name: "team_bonus" };
+    expect(validateSpec(spec).ok).toBe(true);
+  });
+
+  it("rejects a manual field referenced in a task formula (project scope only)", () => {
+    const spec = withField("oral_presentation");
+    spec.formulas.task[0].expr = { op: "var", name: "oral_presentation" };
+    const result = validateSpec(spec);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("oral_presentation");
+  });
+
+  it("rejects a field name that collides with a weight", () => {
+    const result = validateSpec(withField("w_doc"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("reserved");
+  });
+
+  it("rejects a field name that collides with a structural variable", () => {
+    const result = validateSpec(withField("mean_raw"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("reserved");
+  });
+
+  it("rejects a field name that collides with a formula output name", () => {
+    const result = validateSpec(withField("quality_composite"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("reserved");
+  });
+
+  it("rejects an invalid identifier", () => {
+    // Caught by the schema `pattern` and/or the lint's identifier check.
+    for (const bad of ["2bad", "has space", "with-dash", ""]) {
+      const result = validateSpec(withField(bad));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.message).toMatch(/identifier|pattern/);
+    }
+  });
+
+  it("rejects duplicate field names", () => {
+    const spec = structuredClone(loadBundledDefault());
+    spec.manual_fields = {
+      defs: [
+        { name: "oral", value: 0, description: "" },
+        { name: "oral", value: 1, description: "" },
+      ],
+      values: {},
+    };
+    const result = validateSpec(spec);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("Duplicate");
+  });
+});

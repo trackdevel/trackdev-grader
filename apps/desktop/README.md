@@ -118,6 +118,21 @@ The status banner at the top shows whether you are on the bundled standard spec,
 
 When using the unmodified bundled spec, the banner confirms grades match the reference baseline. After editing weights or formulas, it switches to a “tuned” state so you know results differ from the shipped standard.
 
+### 5. Manual fields
+
+Some grade components are entered by hand rather than computed from the database — for example an oral-defense grade or a peer-evaluation adjustment. The **Manual fields** tab (top navigation) lets you:
+
+- **Define fields** (shared across all teams). Each field has a `name` — used directly as a variable in formulas, so it must be a valid identifier (letters, digits, underscore; not starting with a digit) and must not clash with an existing weight, scope variable, or formula name — a default `value`, and a `description`.
+- **Enter per-project values** in the grid: one row per team, one column per field. A blank cell inherits the field's default.
+
+Every field becomes a variable available in the **project** and **student** formulas, so you can fold it into the final grade, for example:
+
+```
+student_final = clamp(0.8*student_base + 0.2*oral_presentation - student_penalty, 0, 10)
+```
+
+Definitions and values are stored in the grading spec JSON under `manual_fields`, so **Save spec…** persists them and they travel with the file. **Reset to bundled default** restores the standard formulas but **keeps** your manual fields (they are data, not logic). Deleting a field that already has entered values asks for confirmation first.
+
 ## Developer commands
 
 All commands run from `apps/desktop/`:

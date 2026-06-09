@@ -91,7 +91,12 @@ export function useGrader(rawProjects: RawProject[]): GraderState {
   }, []);
 
   const resetSpec = useCallback(() => {
-    setSpecState(loadBundledDefault());
+    // Reset restores the bundled grading *logic* but preserves professor-entered
+    // manual fields (definitions + per-project values), which are data, not logic.
+    setSpecState((prev) => {
+      const d = loadBundledDefault();
+      return { ...d, manual_fields: prev.manual_fields ?? d.manual_fields };
+    });
     setSpecPath(null);
   }, []);
 

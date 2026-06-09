@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 export type AppRoute =
   | { page: "students" }
   | { page: "projects" }
+  | { page: "manual-fields" }
   | { page: "student"; projectId: number; studentId: string }
   | { page: "project"; projectId: number };
 
@@ -11,6 +12,7 @@ function parseHash(hash: string): AppRoute {
   const parts = raw.split("/").filter(Boolean);
   if (!parts.length || parts[0] === "students") return { page: "students" };
   if (parts[0] === "projects") return { page: "projects" };
+  if (parts[0] === "manual-fields") return { page: "manual-fields" };
   if (parts[0] === "student" && parts.length >= 3) {
     return {
       page: "student",
