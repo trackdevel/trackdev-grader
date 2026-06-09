@@ -43,7 +43,7 @@ pub struct QualityFlagsOpts {
 /// adds the LLM file pass.
 ///
 /// Incremental: `--projects` scopes which teams are (re)processed; other
-/// projects' `llm_quality_flag` rows are left untouched. `grading-sheet`
+/// projects' `llm_quality_flag` rows are left untouched.
 /// exports every flag in the DB on the `LLM_Flags` sheet.
 pub fn run(db: &Database, cfg_dir: &Path, opts: &QualityFlagsOpts) -> Result<()> {
     let course = Config::load(cfg_dir).context("load course.toml for quality-flags")?;
