@@ -1,0 +1,183 @@
+/** Mirrors `grade_core` input structs (serde snake_case). */
+
+import type { ProjectDiagnostics } from "./diagnostics";
+
+export type LoadedDb = {
+  path: string;
+  projects: RawProject[];
+  diagnostics: Map<number, ProjectDiagnostics>;
+};
+
+export type AxisInputs = {
+  documentation_raw: number;
+  doc_present: boolean;
+  code_quality_raw: number;
+  cc_pct: number;
+  mutation_score: number;
+  cq_present: boolean;
+  survival_raw: number;
+  surv_present: boolean;
+  arch_crit_count: number;
+  arch_warn_count: number;
+  arch_present: boolean;
+};
+
+export type RawTask = {
+  assignee_id: string;
+  raw_points: number;
+  ai_model: string | null;
+  ai_level: string | null;
+  declared: boolean;
+};
+
+export type RawStudent = {
+  student_id: string;
+  full_name: string;
+};
+
+export type FindingKind = "static_analysis" | "complexity";
+
+export type CritFinding = {
+  kind: FindingKind;
+  category: string | null;
+};
+
+export type StudentFlag = {
+  student_id: string;
+  severity: string;
+  source: string;
+};
+
+export type RawProject = {
+  project_id: number;
+  name: string;
+  team_size: number;
+  axis: AxisInputs;
+  tasks: RawTask[];
+  students: RawStudent[];
+  crit_findings: CritFinding[];
+  student_flags: StudentFlag[];
+};
+
+export type StudentScope = {
+  student_id: string;
+  student_eff: number;
+  ai_keep: number | null;
+  contribution: number | null;
+  student_critical_count: number;
+};
+
+export type ProjectScopes = {
+  sum_raw: number;
+  sum_eff: number;
+  mean_raw: number;
+  ai_factor: number;
+  crit_sa_count: number;
+  crit_security_count: number;
+  crit_cx_count: number;
+  penalty_on: number;
+  students: StudentScope[];
+};
+
+export type StructuralMeta = {
+  penalty_mode: string;
+  decimals?: number;
+  quantize_final?: number;
+  final_outputs?: string[];
+};
+
+export type FormulaDef = {
+  name: string;
+  infix: string;
+  expr: unknown;
+};
+
+export type GradeSpec = {
+  meta: StructuralMeta;
+  weights: Record<string, number>;
+  models: Record<string, number>;
+  levels: Record<string, number>;
+  formulas: {
+    task: FormulaDef[];
+    project: FormulaDef[];
+    student: FormulaDef[];
+  };
+};
+
+/** @deprecated use GradeSpec */
+export type StructuralSpec = GradeSpec;
+
+export type StructuralOutput = {
+  scopes: ProjectScopes;
+};
+
+export type GradeOutput = {
+  grades: ProjectGrades;
+  trees: GradeTrees;
+};
+
+export type ProjectGrades = {
+  project_id: number;
+  quality_grade: number;
+  quality_penalized: number;
+  project_penalty: number;
+  ai_factor: number;
+  project_final: number;
+  team_size: number;
+  axes: AxisGrade[];
+  students: StudentGrades[];
+};
+
+export type AxisGrade = {
+  key: string;
+  raw: number | null;
+  score: number | null;
+  present: boolean;
+};
+
+export type StudentGrades = {
+  student_id: string;
+  raw_points: number;
+  effective_points: number;
+  ai_keep: number | null;
+  contribution: number | null;
+  base_grade: number;
+  student_penalty: number;
+  student_final: number;
+};
+
+export type GradeTrees = {
+  project: NamedNode[];
+  students: StudentTree[];
+  tasks: TaskTree[];
+};
+
+export type NamedNode = {
+  name: string;
+  node: ExplainNode;
+};
+
+export type StudentTree = {
+  student_id: string;
+  formulas: NamedNode[];
+};
+
+export type TaskTree = {
+  assignee_id: string;
+  raw_points: number;
+  keep: number;
+  node: ExplainNode;
+};
+
+export type ExplainNode = {
+  label: string;
+  expr: string;
+  value: number;
+  children: ExplainNode[];
+};
+
+/** Minimal SQL executor — implemented by Tauri plugin-sql and better-sqlite3 in tests. */
+export type SqlExecutor = {
+  select<T>(sql: string, bind?: unknown[]): Promise<T[]>;
+  queryRow<T>(sql: string, bind?: unknown[]): Promise<T | undefined>;
+};

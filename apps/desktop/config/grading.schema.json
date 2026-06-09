@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trackdev.org/grading.standard.schema.json",
+  "title": "TrackDev grading spec",
+  "type": "object",
+  "required": ["meta", "weights", "models", "levels", "formulas"],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "string" },
+    "title": { "type": "string" },
+    "notes": { "type": "array", "items": { "type": "string" } },
+    "meta": {
+      "type": "object",
+      "required": ["penalty_mode", "decimals", "final_outputs"],
+      "properties": {
+        "decimals": { "type": "integer", "minimum": 0, "maximum": 6 },
+        "quantize_final": { "type": "number", "minimum": 0 },
+        "penalty_mode": { "type": "string", "enum": ["subtractive", "off"] },
+        "final_outputs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "weights": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "number" }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+    },
+    "levels": {
+      "type": "object",
+      "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+    },
+    "inputs": { "type": "object", "additionalProperties": true },
+    "formulas": {
+      "type": "object",
+      "required": ["task", "project", "student"],
+      "properties": {
+        "task": { "$ref": "#/$defs/formulaList" },
+        "project": { "$ref": "#/$defs/formulaList" },
+        "student": { "$ref": "#/$defs/formulaList" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "formulaList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/formulaDef" }
+    },
+    "formulaDef": {
+      "type": "object",
+      "required": ["name", "infix", "expr"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "infix": { "type": "string" },
+        "expr": { "$ref": "#/$defs/expr" }
+      },
+      "additionalProperties": false
+    },
+    "expr": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["op", "value"],
+          "properties": {
+            "op": { "const": "num" },
+            "value": { "type": "number" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["op", "name"],
+          "properties": {
+            "op": { "const": "var" },
+            "name": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["op", "terms"],
+          "properties": {
+            "op": { "const": "add" },
+            "terms": { "type": "array", "items": { "$ref": "#/$defs/expr" }, "minItems": 1 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["op", "lhs", "rhs"],
+          "properties": {
+            "op": { "const": "sub" },
+            "lhs": { "$ref": "#/$defs/expr" },
+            "rhs": { "$ref": "#/$defs/expr" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["op", "factors"],
+          "properties": {
+            "op": { "const": "mul" },
+            "factors": { "type": "array", "items": { "$ref": "#/$defs/expr" }, "minItems": 1 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["op", "num", "den"],
+          "properties": {
+            "op": { "const": "div" },
+            "num": { "$ref": "#/$defs/expr" },
+            "den": { "$ref": "#/$defs/expr" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["op", "args"],
+          "properties": {
+            "op": { "const": "min" },
+            "args": { "type": "array", "items": { "$ref": "#/$defs/expr" }, "minItems": 1 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["op", "args"],
+          "properties": {
+            "op": { "const": "max" },
+            "args": { "type": "array", "items": { "$ref": "#/$defs/expr" }, "minItems": 1 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["op", "x", "lo", "hi"],
+          "properties": {
+            "op": { "const": "clamp" },
+            "x": { "$ref": "#/$defs/expr" },
+            "lo": { "$ref": "#/$defs/expr" },
+            "hi": { "$ref": "#/$defs/expr" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,775 @@
+{
+  "$schema": "./grading.schema.json",
+  "version": "1.1.0",
+  "title": "Standard grading logic — reproduces the canonical trackdev-grader grade model",
+  "notes": [
+    "This file is the SINGLE source of grading logic for the desktop app: all weights, AI multiplier maps, and the full composition (per-task keep -> axis scores -> composite -> penalties -> final) live here as data. Editing it changes grading without recompiling.",
+    "Formulas are an AST (grade_core::Expr): a tagged union keyed by 'op'. Node types: num{value}, var{name}, add{terms[]}, sub{lhs,rhs}, mul{factors[]}, div{num,den}, min{args[]}, max{args[]}, clamp{x,lo,hi}.",
+    "Each formula entry carries an 'infix' string for human review only; the evaluator reads 'expr'. The two must agree (a future infix parser can assert this).",
+    "Evaluation is staged in THREE levels, in array order within each: (1) 'task' formulas evaluate once per task (keep); (2) build_scope aggregates effective points (raw_points * keep) into student_eff/sum_eff and derives mean_raw, ai_factor, ai_keep, contribution; (3) 'project' formulas evaluate once per project; (4) 'student' formulas evaluate per student into a scope that inherits the project outputs plus that student's structural vars. Array order IS dependency order.",
+    "The AI keep formula is FULLY EDITABLE. build_scope resolves each task's ai_model/ai_level STRINGS to the scalars model_m/level_l via the models/levels maps, applying the declared gate (declared==1 AND model present AND level present, else undeclared_model_m/undeclared_level_l). The keep formula then uses model_m/level_l, so the modulation ARITHMETIC is editable while string resolution + the declared gate stay structural (they are lookups, not arithmetic).",
+    "Presence is a 0/1 multiplicative MASK, not a conditional: build_scope binds each absent raw input and absent axis score to 0 and sets the *_present flags to 0/1. quality_composite is therefore the present-axis renormalized weighted mean expressed with mul/add/div alone (verified equal to the gated form).",
+    "penalty_on is 1 iff meta.penalty_mode == 'subtractive', else 0; multiplying penalties by it reproduces penalty_mode toggling without a conditional.",
+    "Div semantics: 0/0 -> 0 (domain-justified: a team with zero delivery has mean_raw=0 AND student_eff=0, so student_base is 0); x/0 with x!=0 raises EvalError (cannot legitimately occur).",
+    "student_final reproduces the NO_DELIVERY guard via clamp: student_eff=0 => student_base=0 => student_base - student_penalty <= 0 => clamp to 0.",
+    "Rounding/quantization is an ENGINE post-step applied ONLY to meta.final_outputs using meta.decimals and meta.quantize_final; formulas produce continuous (pre-round) values.",
+    "Variable provenance: raw = read from the DB (inputs.raw); task = per-task values resolved by build_scope (inputs.task); weights/models/levels = this file (editable); structural = aggregated by build_scope (inputs.structural); plus prior formula outputs (task output 'keep' feeds aggregation; project outputs are visible to student formulas).",
+    "The Wave-3 parity test asserts this file reproduces the canonical Rust grade_core oracle on tests/fixtures/reference.db within 0.5*10^-decimals. Editing weights/formulas in the app moves grades into 'what-if' territory (banner: edited); 'Reset' restores this file."
+  ],
+  "meta": {
+    "decimals": 2,
+    "quantize_final": 0.0,
+    "penalty_mode": "subtractive",
+    "final_outputs": [
+      "project_final",
+      "student_final"
+    ]
+  },
+  "weights": {
+    "w_doc": 0.25,
+    "w_cq": 0.3,
+    "w_surv": 0.2,
+    "w_arch": 0.25,
+    "ai_strength": 1.0,
+    "floor_keep": 0.2,
+    "undeclared_model_m": 1.0,
+    "undeclared_level_l": 0.5,
+    "max_penalty_points": 2.0,
+    "student_penalty_cap": 1.0,
+    "crit_sa_points": 0.5,
+    "crit_cx_points": 0.5,
+    "crit_flag_points": 0.75,
+    "security_extra": 0.5,
+    "doc_max": 6.0,
+    "mi_floor": 50.0,
+    "mi_ceiling": 85.0,
+    "cc_penalty": 2.0,
+    "test_bonus": 1.0,
+    "test_cap": 0.5,
+    "surv_floor": 0.5,
+    "surv_ceiling": 0.95,
+    "k_crit": 2.0,
+    "k_warn": 0.5,
+    "arch_norm": 4.0
+  },
+  "models": {
+    "Cap": 0.0,
+    "Copilot-Auto": 0.7,
+    "Cursor": 0.9,
+    "Kimi-2.6": 0.85,
+    "DeepSeek-v4": 0.85,
+    "Sonnet-4.6": 0.9,
+    "Gemini-3.1": 1.0,
+    "Opus-4.6-4.7": 1.0,
+    "GPT-5.5": 1.0,
+    "GPT-5.4": 1.0,
+    "GPT-5.3-codex": 1.0,
+    "GPT-5.2-codex": 1.0
+  },
+  "levels": {
+    "A": 0.0,
+    "B": 0.25,
+    "C": 0.5,
+    "D": 0.75,
+    "E": 1.0
+  },
+  "inputs": {
+    "raw": [
+      "documentation_raw",
+      "code_quality_raw",
+      "cc_pct",
+      "mutation_score",
+      "survival_raw",
+      "arch_crit_count",
+      "arch_warn_count",
+      "team_size",
+      "doc_present",
+      "cq_present",
+      "surv_present",
+      "arch_present"
+    ],
+    "task": [
+      "raw_points",
+      "model_m",
+      "level_l",
+      "declared"
+    ],
+    "structural": [
+      "sum_raw",
+      "sum_eff",
+      "student_eff",
+      "mean_raw",
+      "ai_factor",
+      "ai_keep",
+      "contribution",
+      "crit_sa_count",
+      "crit_cx_count",
+      "crit_security_count",
+      "student_critical_count",
+      "penalty_on"
+    ]
+  },
+  "formulas": {
+    "task": [
+      {
+        "name": "keep",
+        "infix": "1 - (1 - floor_keep) * ai_strength * model_m * level_l",
+        "expr": {
+          "op": "sub",
+          "lhs": {
+            "op": "num",
+            "value": 1
+          },
+          "rhs": {
+            "op": "mul",
+            "factors": [
+              {
+                "op": "sub",
+                "lhs": {
+                  "op": "num",
+                  "value": 1
+                },
+                "rhs": {
+                  "op": "var",
+                  "name": "floor_keep"
+                }
+              },
+              {
+                "op": "var",
+                "name": "ai_strength"
+              },
+              {
+                "op": "var",
+                "name": "model_m"
+              },
+              {
+                "op": "var",
+                "name": "level_l"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "project": [
+      {
+        "name": "doc_axis",
+        "infix": "clamp(10 * clamp(documentation_raw / doc_max, 0, 1), 0, 10)",
+        "expr": {
+          "op": "clamp",
+          "x": {
+            "op": "mul",
+            "factors": [
+              {
+                "op": "num",
+                "value": 10
+              },
+              {
+                "op": "clamp",
+                "x": {
+                  "op": "div",
+                  "num": {
+                    "op": "var",
+                    "name": "documentation_raw"
+                  },
+                  "den": {
+                    "op": "var",
+                    "name": "doc_max"
+                  }
+                },
+                "lo": {
+                  "op": "num",
+                  "value": 0
+                },
+                "hi": {
+                  "op": "num",
+                  "value": 1
+                }
+              }
+            ]
+          },
+          "lo": {
+            "op": "num",
+            "value": 0
+          },
+          "hi": {
+            "op": "num",
+            "value": 10
+          }
+        }
+      },
+      {
+        "name": "cq_axis",
+        "infix": "clamp(10*clamp((code_quality_raw - mi_floor)/(mi_ceiling - mi_floor), 0, 1) - cc_penalty*(cc_pct/100) + min(test_cap, test_bonus*mutation_score), 0, 10)",
+        "expr": {
+          "op": "clamp",
+          "x": {
+            "op": "add",
+            "terms": [
+              {
+                "op": "sub",
+                "lhs": {
+                  "op": "mul",
+                  "factors": [
+                    {
+                      "op": "num",
+                      "value": 10
+                    },
+                    {
+                      "op": "clamp",
+                      "x": {
+                        "op": "div",
+                        "num": {
+                          "op": "sub",
+                          "lhs": {
+                            "op": "var",
+                            "name": "code_quality_raw"
+                          },
+                          "rhs": {
+                            "op": "var",
+                            "name": "mi_floor"
+                          }
+                        },
+                        "den": {
+                          "op": "sub",
+                          "lhs": {
+                            "op": "var",
+                            "name": "mi_ceiling"
+                          },
+                          "rhs": {
+                            "op": "var",
+                            "name": "mi_floor"
+                          }
+                        }
+                      },
+                      "lo": {
+                        "op": "num",
+                        "value": 0
+                      },
+                      "hi": {
+                        "op": "num",
+                        "value": 1
+                      }
+                    }
+                  ]
+                },
+                "rhs": {
+                  "op": "mul",
+                  "factors": [
+                    {
+                      "op": "var",
+                      "name": "cc_penalty"
+                    },
+                    {
+                      "op": "div",
+                      "num": {
+                        "op": "var",
+                        "name": "cc_pct"
+                      },
+                      "den": {
+                        "op": "num",
+                        "value": 100
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "op": "min",
+                "args": [
+                  {
+                    "op": "var",
+                    "name": "test_cap"
+                  },
+                  {
+                    "op": "mul",
+                    "factors": [
+                      {
+                        "op": "var",
+                        "name": "test_bonus"
+                      },
+                      {
+                        "op": "var",
+                        "name": "mutation_score"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "lo": {
+            "op": "num",
+            "value": 0
+          },
+          "hi": {
+            "op": "num",
+            "value": 10
+          }
+        }
+      },
+      {
+        "name": "surv_axis",
+        "infix": "clamp(10 * clamp((survival_raw - surv_floor)/(surv_ceiling - surv_floor), 0, 1), 0, 10)",
+        "expr": {
+          "op": "clamp",
+          "x": {
+            "op": "mul",
+            "factors": [
+              {
+                "op": "num",
+                "value": 10
+              },
+              {
+                "op": "clamp",
+                "x": {
+                  "op": "div",
+                  "num": {
+                    "op": "sub",
+                    "lhs": {
+                      "op": "var",
+                      "name": "survival_raw"
+                    },
+                    "rhs": {
+                      "op": "var",
+                      "name": "surv_floor"
+                    }
+                  },
+                  "den": {
+                    "op": "sub",
+                    "lhs": {
+                      "op": "var",
+                      "name": "surv_ceiling"
+                    },
+                    "rhs": {
+                      "op": "var",
+                      "name": "surv_floor"
+                    }
+                  }
+                },
+                "lo": {
+                  "op": "num",
+                  "value": 0
+                },
+                "hi": {
+                  "op": "num",
+                  "value": 1
+                }
+              }
+            ]
+          },
+          "lo": {
+            "op": "num",
+            "value": 0
+          },
+          "hi": {
+            "op": "num",
+            "value": 10
+          }
+        }
+      },
+      {
+        "name": "arch_axis",
+        "infix": "clamp(10 - min(10, (k_crit*arch_crit_count + k_warn*arch_warn_count)/arch_norm), 0, 10)",
+        "expr": {
+          "op": "clamp",
+          "x": {
+            "op": "sub",
+            "lhs": {
+              "op": "num",
+              "value": 10
+            },
+            "rhs": {
+              "op": "min",
+              "args": [
+                {
+                  "op": "num",
+                  "value": 10
+                },
+                {
+                  "op": "div",
+                  "num": {
+                    "op": "add",
+                    "terms": [
+                      {
+                        "op": "mul",
+                        "factors": [
+                          {
+                            "op": "var",
+                            "name": "k_crit"
+                          },
+                          {
+                            "op": "var",
+                            "name": "arch_crit_count"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "mul",
+                        "factors": [
+                          {
+                            "op": "var",
+                            "name": "k_warn"
+                          },
+                          {
+                            "op": "var",
+                            "name": "arch_warn_count"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "den": {
+                    "op": "var",
+                    "name": "arch_norm"
+                  }
+                }
+              ]
+            }
+          },
+          "lo": {
+            "op": "num",
+            "value": 0
+          },
+          "hi": {
+            "op": "num",
+            "value": 10
+          }
+        }
+      },
+      {
+        "name": "quality_composite",
+        "infix": "(w_doc*doc_present*doc_axis + w_cq*cq_present*cq_axis + w_surv*surv_present*surv_axis + w_arch*arch_present*arch_axis) / (w_doc*doc_present + w_cq*cq_present + w_surv*surv_present + w_arch*arch_present)",
+        "expr": {
+          "op": "div",
+          "num": {
+            "op": "add",
+            "terms": [
+              {
+                "op": "mul",
+                "factors": [
+                  {
+                    "op": "var",
+                    "name": "w_doc"
+                  },
+                  {
+                    "op": "var",
+                    "name": "doc_present"
+                  },
+                  {
+                    "op": "var",
+                    "name": "doc_axis"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "factors": [
+                  {
+                    "op": "var",
+                    "name": "w_cq"
+                  },
+                  {
+                    "op": "var",
+                    "name": "cq_present"
+                  },
+                  {
+                    "op": "var",
+                    "name": "cq_axis"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "factors": [
+                  {
+                    "op": "var",
+                    "name": "w_surv"
+                  },
+                  {
+                    "op": "var",
+                    "name": "surv_present"
+                  },
+                  {
+                    "op": "var",
+                    "name": "surv_axis"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "factors": [
+                  {
+                    "op": "var",
+                    "name": "w_arch"
+                  },
+                  {
+                    "op": "var",
+                    "name": "arch_present"
+                  },
+                  {
+                    "op": "var",
+                    "name": "arch_axis"
+                  }
+                ]
+              }
+            ]
+          },
+          "den": {
+            "op": "add",
+            "terms": [
+              {
+                "op": "mul",
+                "factors": [
+                  {
+                    "op": "var",
+                    "name": "w_doc"
+                  },
+                  {
+                    "op": "var",
+                    "name": "doc_present"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "factors": [
+                  {
+                    "op": "var",
+                    "name": "w_cq"
+                  },
+                  {
+                    "op": "var",
+                    "name": "cq_present"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "factors": [
+                  {
+                    "op": "var",
+                    "name": "w_surv"
+                  },
+                  {
+                    "op": "var",
+                    "name": "surv_present"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "factors": [
+                  {
+                    "op": "var",
+                    "name": "w_arch"
+                  },
+                  {
+                    "op": "var",
+                    "name": "arch_present"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "project_penalty",
+        "infix": "penalty_on * min(max_penalty_points, crit_sa_points*crit_sa_count + crit_cx_points*crit_cx_count + security_extra*crit_security_count)",
+        "expr": {
+          "op": "mul",
+          "factors": [
+            {
+              "op": "var",
+              "name": "penalty_on"
+            },
+            {
+              "op": "min",
+              "args": [
+                {
+                  "op": "var",
+                  "name": "max_penalty_points"
+                },
+                {
+                  "op": "add",
+                  "terms": [
+                    {
+                      "op": "mul",
+                      "factors": [
+                        {
+                          "op": "var",
+                          "name": "crit_sa_points"
+                        },
+                        {
+                          "op": "var",
+                          "name": "crit_sa_count"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "mul",
+                      "factors": [
+                        {
+                          "op": "var",
+                          "name": "crit_cx_points"
+                        },
+                        {
+                          "op": "var",
+                          "name": "crit_cx_count"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "mul",
+                      "factors": [
+                        {
+                          "op": "var",
+                          "name": "security_extra"
+                        },
+                        {
+                          "op": "var",
+                          "name": "crit_security_count"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "name": "quality_penalized",
+        "infix": "clamp(quality_composite - project_penalty, 0, 10)",
+        "expr": {
+          "op": "clamp",
+          "x": {
+            "op": "sub",
+            "lhs": {
+              "op": "var",
+              "name": "quality_composite"
+            },
+            "rhs": {
+              "op": "var",
+              "name": "project_penalty"
+            }
+          },
+          "lo": {
+            "op": "num",
+            "value": 0
+          },
+          "hi": {
+            "op": "num",
+            "value": 10
+          }
+        }
+      },
+      {
+        "name": "project_final",
+        "infix": "quality_penalized * ai_factor",
+        "expr": {
+          "op": "mul",
+          "factors": [
+            {
+              "op": "var",
+              "name": "quality_penalized"
+            },
+            {
+              "op": "var",
+              "name": "ai_factor"
+            }
+          ]
+        }
+      }
+    ],
+    "student": [
+      {
+        "name": "student_penalty",
+        "infix": "penalty_on * min(student_penalty_cap, crit_flag_points*student_critical_count)",
+        "expr": {
+          "op": "mul",
+          "factors": [
+            {
+              "op": "var",
+              "name": "penalty_on"
+            },
+            {
+              "op": "min",
+              "args": [
+                {
+                  "op": "var",
+                  "name": "student_penalty_cap"
+                },
+                {
+                  "op": "mul",
+                  "factors": [
+                    {
+                      "op": "var",
+                      "name": "crit_flag_points"
+                    },
+                    {
+                      "op": "var",
+                      "name": "student_critical_count"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "name": "student_base",
+        "infix": "quality_penalized * student_eff / mean_raw",
+        "expr": {
+          "op": "div",
+          "num": {
+            "op": "mul",
+            "factors": [
+              {
+                "op": "var",
+                "name": "quality_penalized"
+              },
+              {
+                "op": "var",
+                "name": "student_eff"
+              }
+            ]
+          },
+          "den": {
+            "op": "var",
+            "name": "mean_raw"
+          }
+        }
+      },
+      {
+        "name": "student_final",
+        "infix": "clamp(student_base - student_penalty, 0, 10)",
+        "expr": {
+          "op": "clamp",
+          "x": {
+            "op": "sub",
+            "lhs": {
+              "op": "var",
+              "name": "student_base"
+            },
+            "rhs": {
+              "op": "var",
+              "name": "student_penalty"
+            }
+          },
+          "lo": {
+            "op": "num",
+            "value": 0
+          },
+          "hi": {
+            "op": "num",
+            "value": 10
+          }
+        }
+      }
+    ]
+  }
+}

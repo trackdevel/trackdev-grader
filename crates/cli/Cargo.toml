@@ -33,6 +33,4 @@ sprint-grader-report = { path = "../report" }
 sprint-grader-orchestration = { path = "../orchestration" }
 sprint-grader-architecture = { path = "../architecture" }
 sprint-grader-static-analysis = { path = "../static_analysis" }
-sprint-grader-grading-xlsx = { path = "../grading_xlsx" }
-sprint-grader-grading-html = { path = "../grading_html" }
 sprint-grader-quality-llm = { path = "../quality_llm" }

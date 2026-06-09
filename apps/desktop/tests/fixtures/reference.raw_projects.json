@@ -1,0 +1,179 @@
+[
+  {
+    "project_id": 1,
+    "name": "Team 01",
+    "team_size": 2,
+    "axis": {
+      "documentation_raw": 4.0,
+      "doc_present": true,
+      "code_quality_raw": 0.0,
+      "cc_pct": 0.0,
+      "mutation_score": 0.0,
+      "cq_present": false,
+      "survival_raw": 0.0,
+      "surv_present": false,
+      "arch_crit_count": 0.0,
+      "arch_warn_count": 0.0,
+      "arch_present": true
+    },
+    "tasks": [
+      {
+        "assignee_id": "alice",
+        "raw_points": 10.0,
+        "ai_model": "Cap",
+        "ai_level": "A",
+        "declared": true
+      },
+      {
+        "assignee_id": "alice",
+        "raw_points": 5.0,
+        "ai_model": "Cursor",
+        "ai_level": null,
+        "declared": true
+      },
+      {
+        "assignee_id": "bob",
+        "raw_points": 10.0,
+        "ai_model": "GPT-5.5",
+        "ai_level": "E",
+        "declared": true
+      }
+    ],
+    "students": [
+      {
+        "student_id": "alice",
+        "full_name": "Alice"
+      },
+      {
+        "student_id": "bob",
+        "full_name": "Bob"
+      }
+    ],
+    "crit_findings": [],
+    "student_flags": [
+      {
+        "student_id": "bob",
+        "severity": "CRITICAL",
+        "source": "sprint"
+      }
+    ]
+  },
+  {
+    "project_id": 2,
+    "name": "Team 02",
+    "team_size": 1,
+    "axis": {
+      "documentation_raw": 0.0,
+      "doc_present": false,
+      "code_quality_raw": 0.0,
+      "cc_pct": 0.0,
+      "mutation_score": 0.0,
+      "cq_present": false,
+      "survival_raw": 0.0,
+      "surv_present": false,
+      "arch_crit_count": 0.0,
+      "arch_warn_count": 0.0,
+      "arch_present": false
+    },
+    "tasks": [
+      {
+        "assignee_id": "carol",
+        "raw_points": 10.0,
+        "ai_model": "Cap",
+        "ai_level": "A",
+        "declared": true
+      }
+    ],
+    "students": [
+      {
+        "student_id": "carol",
+        "full_name": "Carol"
+      }
+    ],
+    "crit_findings": [],
+    "student_flags": []
+  },
+  {
+    "project_id": 3,
+    "name": "Team 03",
+    "team_size": 2,
+    "axis": {
+      "documentation_raw": 0.0,
+      "doc_present": false,
+      "code_quality_raw": 0.0,
+      "cc_pct": 0.0,
+      "mutation_score": 0.0,
+      "cq_present": false,
+      "survival_raw": 0.0,
+      "surv_present": false,
+      "arch_crit_count": 0.0,
+      "arch_warn_count": 0.0,
+      "arch_present": false
+    },
+    "tasks": [
+      {
+        "assignee_id": "dave",
+        "raw_points": 8.0,
+        "ai_model": "Cap",
+        "ai_level": "A",
+        "declared": true
+      }
+    ],
+    "students": [
+      {
+        "student_id": "dave",
+        "full_name": "Dave"
+      },
+      {
+        "student_id": "eve",
+        "full_name": "Eve"
+      }
+    ],
+    "crit_findings": [],
+    "student_flags": []
+  },
+  {
+    "project_id": 4,
+    "name": "Team 04",
+    "team_size": 1,
+    "axis": {
+      "documentation_raw": 5.0,
+      "doc_present": true,
+      "code_quality_raw": 0.0,
+      "cc_pct": 0.0,
+      "mutation_score": 0.0,
+      "cq_present": false,
+      "survival_raw": 0.0,
+      "surv_present": false,
+      "arch_crit_count": 0.0,
+      "arch_warn_count": 0.0,
+      "arch_present": true
+    },
+    "tasks": [
+      {
+        "assignee_id": "frank",
+        "raw_points": 10.0,
+        "ai_model": "Cap",
+        "ai_level": "A",
+        "declared": true
+      }
+    ],
+    "students": [
+      {
+        "student_id": "frank",
+        "full_name": "Frank"
+      }
+    ],
+    "crit_findings": [
+      {
+        "kind": "static_analysis",
+        "category": "security"
+      },
+      {
+        "kind": "static_analysis",
+        "category": "style"
+      }
+    ],
+    "student_flags": []
+  }
+]
