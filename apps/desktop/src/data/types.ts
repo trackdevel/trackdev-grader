@@ -92,6 +92,18 @@ export type FormulaDef = {
   expr: unknown;
 };
 
+export type ManualFieldDef = {
+  name: string;
+  value: number;
+  description: string;
+};
+
+export type ManualFields = {
+  defs: ManualFieldDef[];
+  /** project_id (as string) → field name → value override. */
+  values: Record<string, Record<string, number>>;
+};
+
 export type GradeSpec = {
   meta: StructuralMeta;
   weights: Record<string, number>;
@@ -102,6 +114,7 @@ export type GradeSpec = {
     project: FormulaDef[];
     student: FormulaDef[];
   };
+  manual_fields: ManualFields;
 };
 
 /** @deprecated use GradeSpec */

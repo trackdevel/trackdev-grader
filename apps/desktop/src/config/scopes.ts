@@ -67,13 +67,17 @@ export function taskKnownScope(weightKeys: string[]): Set<string> {
   return new Set([...weightKeys, ...TASK_SCOPE]);
 }
 
-export function projectKnownScope(weightKeys: string[]): Set<string> {
-  return new Set([...weightKeys, ...RAW_SCOPE, ...STRUCTURAL_SCOPE]);
+export function projectKnownScope(
+  weightKeys: string[],
+  manualNames: string[] = [],
+): Set<string> {
+  return new Set([...weightKeys, ...RAW_SCOPE, ...STRUCTURAL_SCOPE, ...manualNames]);
 }
 
 export function studentKnownScope(
   weightKeys: string[],
   projectFormulaNames: string[],
+  manualNames: string[] = [],
 ): Set<string> {
   return new Set([
     ...weightKeys,
@@ -81,5 +85,6 @@ export function studentKnownScope(
     ...STRUCTURAL_SCOPE,
     ...STUDENT_STRUCTURAL,
     ...projectFormulaNames,
+    ...manualNames,
   ]);
 }
