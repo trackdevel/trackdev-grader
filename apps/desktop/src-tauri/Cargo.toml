@@ -1,0 +1,26 @@
+[package]
+name = "trackdev-grader-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tauri shell for the TrackDev grading desktop app"
+
+[lib]
+name = "trackdev_grader_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
