@@ -14,10 +14,6 @@ use tracing_subscriber::EnvFilter;
 
 use sprint_grader_collect::{run_collection, CollectOpts};
 use sprint_grader_core::{Config, Database};
-use sprint_grader_grading_html::{run_html, HtmlOpts};
-use sprint_grader_grading_xlsx::{
-    GradingConfig as SheetGradingConfig, RunOpts as GradingSheetOpts,
-};
 use sprint_grader_orchestration::pipeline::resolve_all_sprint_tuples;
 use sprint_grader_orchestration::{
     android_repo_root, publish_report_updates, repo_has_report_changes,
@@ -567,54 +563,10 @@ enum Command {
         #[command(flatten)]
         projects: ProjectsArg,
     },
-    /// Compute project/student grades (0–10) and write `grading_sheet.xlsx`.
-    ///
-    /// Reads `grading.db` + `config/grading.toml`, persists
-    /// `project_final_grade` / `student_final_grade` / component tables,
-    /// and emits a self-recalculating workbook. Does **not** call any LLM.
-    ///
-    /// Incremental: `--projects` grades only the listed teams, but the workbook
-    /// includes every project already in `project_final_grade`; on export all
-    /// of them are recomputed and re-persisted so DB and xlsx stay aligned.
-    GradingSheet {
-        #[command(flatten)]
-        projects: ProjectsArg,
-        /// Output `.xlsx` path (default: `<data-dir>/entregues/grading_sheet.xlsx`)
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Import edited weights from the workbook `Weights` sheet into
-        /// `config/grading.toml` and exit (no grading pass).
-        #[arg(long, value_name = "XLSX")]
-        import_weights: Option<PathBuf>,
-        /// Rebuild `grading_sheet.xlsx` from all graded projects (refresh + persist
-        /// each) without requiring `--projects`.
-        #[arg(long)]
-        workbook_only: bool,
-        /// Grade and persist only; do not write or refresh the merged workbook.
-        #[arg(long)]
-        no_workbook: bool,
-    },
-    /// Emit a single, offline, SQL-queryable `grading.html`: an interactive view
-    /// of the same grade model as `grading-sheet`, with live knob tuning and an
-    /// always-on JS/Rust parity self-test. Shares the grade+persist path, so
-    /// persisted grades are identical. No `--import-weights` (use `grading-sheet`).
-    GradingHtml {
-        #[command(flatten)]
-        projects: ProjectsArg,
-        /// Output `.html` path (default: `<data-dir>/entregues/grading.html`)
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Rebuild from all graded projects without a new `--projects` pass.
-        #[arg(long)]
-        workbook_only: bool,
-    },
-    /// Feedback-only LLM quality flags (Track B; advisory, never grade inputs).
-    ///
     /// Feedback-only LLM quality flags (Track B; advisory, never grade inputs).
     ///
     /// Incremental: `--projects` scopes the LLM pass to listed teams; other
-    /// teams' `llm_quality_flag` rows are preserved. `grading-sheet` exports
-    /// all flags on the `LLM_Flags` sheet.
+    /// teams' `llm_quality_flag` rows are preserved.
     QualityFlags {
         #[command(flatten)]
         projects: ProjectsArg,
@@ -1572,65 +1524,6 @@ fn main() -> Result<()> {
                 .context("reset-local-scores failed")?;
             info!(deleted, "reset-local-scores removed rows");
         }
-        Command::GradingSheet {
-            projects,
-            out,
-            import_weights,
-            workbook_only,
-            no_workbook,
-        } => {
-            let filter = parse_project_filter(projects.projects);
-            if import_weights.is_none() && !workbook_only {
-                resolve_all_sprint_tuples(&db, &today, filter.as_deref())
-                    .context("grading-sheet project resolution failed")?;
-            }
-            if !config_dir.join("grading.toml").is_file() && import_weights.is_none() {
-                SheetGradingConfig::default().write_to_dir(&config_dir)?;
-                info!(
-                    path = %config_dir.join("grading.toml").display(),
-                    "wrote default config/grading.toml"
-                );
-            }
-            let default_out = entregues_dir.join("grading_sheet.xlsx");
-            let opts = GradingSheetOpts {
-                project_filter: filter,
-                out: out.or(Some(default_out.clone())),
-                import_weights,
-                today: today.clone(),
-                workbook_only,
-                no_workbook,
-            };
-            let written = sprint_grader_grading_xlsx::run(&db, &config_dir, &opts)
-                .context("grading-sheet failed")?;
-            info!(path = %written.display(), "grading-sheet complete");
-        }
-        Command::GradingHtml {
-            projects,
-            out,
-            workbook_only,
-        } => {
-            let filter = parse_project_filter(projects.projects);
-            if !workbook_only {
-                resolve_all_sprint_tuples(&db, &today, filter.as_deref())
-                    .context("grading-html project resolution failed")?;
-            }
-            if !config_dir.join("grading.toml").is_file() {
-                SheetGradingConfig::default().write_to_dir(&config_dir)?;
-                info!(
-                    path = %config_dir.join("grading.toml").display(),
-                    "wrote default config/grading.toml"
-                );
-            }
-            let default_out = entregues_dir.join("grading.html");
-            let opts = HtmlOpts {
-                project_filter: filter,
-                out: out.or(Some(default_out)),
-                today: today.clone(),
-                workbook_only,
-            };
-            let written = run_html(&db, &config_dir, &opts).context("grading-html failed")?;
-            info!(path = %written.display(), "grading-html complete");
-        }
         Command::QualityFlags {
             projects,
             max_holistic,
@@ -1817,14 +1710,12 @@ mod tests {
     }
 
     #[test]
-    fn cli_lists_grading_sheet_and_quality_flags() {
+    fn cli_lists_quality_flags() {
         let cmd = Cli::command();
         let subs: Vec<_> = cmd
             .get_subcommands()
             .map(|c| c.get_name().to_string())
             .collect();
-        assert!(subs.iter().any(|s| s == "grading-sheet"));
-        assert!(subs.iter().any(|s| s == "grading-html"));
         assert!(subs.iter().any(|s| s == "quality-flags"));
     }
 }
