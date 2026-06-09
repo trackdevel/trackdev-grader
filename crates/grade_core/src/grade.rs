@@ -454,4 +454,107 @@ mod tests {
         let out = grade(&raw, &spec).unwrap();
         assert!((out.grades.students[0].student_final - 0.0).abs() < 1e-9);
     }
+
+    fn mk_raw(project_id: i64) -> RawProject {
+        RawProject {
+            project_id,
+            name: "t".into(),
+            team_size: 1,
+            axis: AxisInputs {
+                documentation_raw: 4.0,
+                doc_present: true,
+                code_quality_raw: 0.0,
+                cc_pct: 0.0,
+                mutation_score: 0.0,
+                cq_present: false,
+                survival_raw: 0.0,
+                surv_present: false,
+                arch_crit_count: 0.0,
+                arch_warn_count: 0.0,
+                arch_present: true,
+            },
+            tasks: vec![],
+            students: vec![RawStudent {
+                student_id: "solo".into(),
+                full_name: "Solo".into(),
+            }],
+            crit_findings: vec![],
+            student_flags: vec![],
+        }
+    }
+
+    #[test]
+    fn manual_field_values_apply_override_then_default() {
+        use crate::spec::{ManualFieldDef, ManualFields};
+        let mut spec = load_spec();
+        let mut row = BTreeMap::new();
+        row.insert("team_bonus".to_string(), 2.0);
+        let mut values = BTreeMap::new();
+        values.insert("99".to_string(), row);
+        spec.manual_fields = ManualFields {
+            defs: vec![
+                ManualFieldDef {
+                    name: "team_bonus".into(),
+                    value: 1.0,
+                    description: String::new(),
+                },
+                ManualFieldDef {
+                    name: "oral".into(),
+                    value: 0.5,
+                    description: String::new(),
+                },
+            ],
+            values,
+        };
+        // Project 99 overrides team_bonus, inherits oral's default.
+        let m99 = spec.manual_field_values(99);
+        assert_eq!(m99.get("team_bonus"), Some(&2.0));
+        assert_eq!(m99.get("oral"), Some(&0.5));
+        // Project 100 has no overrides → both defaults.
+        let m100 = spec.manual_field_values(100);
+        assert_eq!(m100.get("team_bonus"), Some(&1.0));
+        assert_eq!(m100.get("oral"), Some(&0.5));
+    }
+
+    #[test]
+    fn manual_field_override_reaches_project_final() {
+        use crate::spec::{FormulaDef, ManualFieldDef, ManualFields};
+        let mut spec = load_spec();
+        let mut row = BTreeMap::new();
+        row.insert("team_bonus".to_string(), 2.0);
+        let mut values = BTreeMap::new();
+        values.insert("99".to_string(), row);
+        spec.manual_fields = ManualFields {
+            defs: vec![ManualFieldDef {
+                name: "team_bonus".into(),
+                value: 1.0,
+                description: String::new(),
+            }],
+            values,
+        };
+        // Wire the manual field straight into project_final.
+        let pf: FormulaDef = serde_json::from_str(
+            r#"{"name":"project_final","infix":"team_bonus","expr":{"op":"var","name":"team_bonus"}}"#,
+        )
+        .unwrap();
+        let idx = spec
+            .formulas
+            .project
+            .iter()
+            .position(|f| f.name == "project_final")
+            .unwrap();
+        spec.formulas.project[idx] = pf;
+
+        // Project 99 uses the override (2.0); project 100 falls back to the default (1.0).
+        let out99 = grade(&mk_raw(99), &spec).unwrap();
+        assert!((out99.grades.project_final - 2.0).abs() < 1e-9);
+        let out100 = grade(&mk_raw(100), &spec).unwrap();
+        assert!((out100.grades.project_final - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn empty_manual_fields_inject_nothing() {
+        let spec = load_spec();
+        assert!(spec.manual_field_values(99).is_empty());
+    }
 }
