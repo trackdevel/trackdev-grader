@@ -41,7 +41,8 @@ pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalErro
     }
 
     let scopes = aggregate(raw, &task_keeps, &spec.aggregate_knobs());
-    let mut project_scope = build_project_scope(raw, &scopes, &spec.weights);
+    let manual = spec.manual_field_values(raw.project_id);
+    let mut project_scope = build_project_scope(raw, &scopes, &spec.weights, &manual);
     let mut project_tree = Vec::new();
     for fd in &spec.formulas.project {
         let node = eval(&fd.expr, &project_scope, &fd.name, &fd.infix)?;
@@ -175,6 +176,7 @@ fn build_project_scope(
     raw: &RawProject,
     scopes: &crate::types::ProjectScopes,
     weights: &BTreeMap<String, f64>,
+    manual: &BTreeMap<String, f64>,
 ) -> Scope {
     let mut scope = weights
         .iter()
@@ -201,6 +203,12 @@ fn build_project_scope(
     scope.insert("crit_security_count".into(), scopes.crit_security_count);
     scope.insert("crit_cx_count".into(), scopes.crit_cx_count);
     scope.insert("penalty_on".into(), scopes.penalty_on);
+    // Manual per-project fields, injected last. `or_insert` is defensive: a
+    // name collision (which the spec validator rejects) can never clobber a
+    // weight/raw/structural variable — the manual field is dropped instead.
+    for (k, v) in manual {
+        scope.entry(k.clone()).or_insert(*v);
+    }
     scope
 }
 
