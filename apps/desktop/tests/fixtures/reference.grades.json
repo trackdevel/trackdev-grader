@@ -1,0 +1,228 @@
+[
+  {
+    "project": {
+      "project_id": 1,
+      "quality_grade": 8.33,
+      "quality_penalized": 8.33,
+      "project_penalty": 0.0,
+      "ai_factor": 0.6,
+      "final_grade": 5.0,
+      "review_gate": null,
+      "team_size": 2,
+      "axes": [
+        {
+          "key": "documentation",
+          "raw": 4.0,
+          "score": 6.666666666666666,
+          "present": true
+        },
+        {
+          "key": "code_quality",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "survival",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "architecture",
+          "raw": 0.0,
+          "score": 10.0,
+          "present": true
+        }
+      ]
+    },
+    "students": [
+      {
+        "student_id": "alice",
+        "raw_points": 15.0,
+        "effective_points": 13.0,
+        "ai_keep": 0.8666666666666667,
+        "contribution": 0.8666666666666667,
+        "base_grade": 8.67,
+        "student_penalty": 0.0,
+        "final_grade": 8.67,
+        "review_gate": null
+      },
+      {
+        "student_id": "bob",
+        "raw_points": 10.0,
+        "effective_points": 1.9999999999999996,
+        "ai_keep": 0.19999999999999996,
+        "contribution": 0.1333333333333333,
+        "base_grade": 1.33,
+        "student_penalty": 0.75,
+        "final_grade": 0.58,
+        "review_gate": null
+      }
+    ]
+  },
+  {
+    "project": {
+      "project_id": 2,
+      "quality_grade": 0.0,
+      "quality_penalized": 0.0,
+      "project_penalty": 0.0,
+      "ai_factor": 1.0,
+      "final_grade": 0.0,
+      "review_gate": null,
+      "team_size": 1,
+      "axes": [
+        {
+          "key": "documentation",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "code_quality",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "survival",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "architecture",
+          "raw": null,
+          "score": null,
+          "present": false
+        }
+      ]
+    },
+    "students": [
+      {
+        "student_id": "carol",
+        "raw_points": 10.0,
+        "effective_points": 10.0,
+        "ai_keep": 1.0,
+        "contribution": 1.0,
+        "base_grade": 0.0,
+        "student_penalty": 0.0,
+        "final_grade": 0.0,
+        "review_gate": null
+      }
+    ]
+  },
+  {
+    "project": {
+      "project_id": 3,
+      "quality_grade": 0.0,
+      "quality_penalized": 0.0,
+      "project_penalty": 0.0,
+      "ai_factor": 1.0,
+      "final_grade": 0.0,
+      "review_gate": null,
+      "team_size": 2,
+      "axes": [
+        {
+          "key": "documentation",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "code_quality",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "survival",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "architecture",
+          "raw": null,
+          "score": null,
+          "present": false
+        }
+      ]
+    },
+    "students": [
+      {
+        "student_id": "dave",
+        "raw_points": 8.0,
+        "effective_points": 8.0,
+        "ai_keep": 1.0,
+        "contribution": 1.0,
+        "base_grade": 0.0,
+        "student_penalty": 0.0,
+        "final_grade": 0.0,
+        "review_gate": null
+      },
+      {
+        "student_id": "eve",
+        "raw_points": 0.0,
+        "effective_points": 0.0,
+        "ai_keep": null,
+        "contribution": 0.0,
+        "base_grade": 0.0,
+        "student_penalty": 0.0,
+        "final_grade": 0.0,
+        "review_gate": "NO_DELIVERY"
+      }
+    ]
+  },
+  {
+    "project": {
+      "project_id": 4,
+      "quality_grade": 9.17,
+      "quality_penalized": 7.67,
+      "project_penalty": 1.5,
+      "ai_factor": 1.0,
+      "final_grade": 7.67,
+      "review_gate": null,
+      "team_size": 1,
+      "axes": [
+        {
+          "key": "documentation",
+          "raw": 5.0,
+          "score": 8.333333333333334,
+          "present": true
+        },
+        {
+          "key": "code_quality",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "survival",
+          "raw": null,
+          "score": null,
+          "present": false
+        },
+        {
+          "key": "architecture",
+          "raw": 0.0,
+          "score": 10.0,
+          "present": true
+        }
+      ]
+    },
+    "students": [
+      {
+        "student_id": "frank",
+        "raw_points": 10.0,
+        "effective_points": 10.0,
+        "ai_keep": 1.0,
+        "contribution": 1.0,
+        "base_grade": 7.67,
+        "student_penalty": 0.0,
+        "final_grade": 7.67,
+        "review_gate": null
+      }
+    ]
+  }
+]
