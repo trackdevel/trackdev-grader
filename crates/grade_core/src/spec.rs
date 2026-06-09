@@ -19,6 +19,33 @@ pub struct GradeSpec {
     pub levels: BTreeMap<String, f64>,
     #[serde(default)]
     pub formulas: Formulas,
+    /// Professor-entered per-project inputs: global definitions plus
+    /// per-project value overrides. Empty by default; absent in older specs.
+    #[serde(default)]
+    pub manual_fields: ManualFields,
+}
+
+/// Manual per-project fields: shared definitions + per-project value overrides.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ManualFields {
+    #[serde(default)]
+    pub defs: Vec<ManualFieldDef>,
+    /// Keyed by `project_id` (as a string) → field name → value. A missing
+    /// entry falls back to the field's default `value`.
+    #[serde(default)]
+    pub values: BTreeMap<String, BTreeMap<String, f64>>,
+}
+
+/// A single manual-field definition. `name` is the formula identifier,
+/// `value` is the default applied when a project has no override, and
+/// `description` is the human-facing label.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManualFieldDef {
+    pub name: String,
+    #[serde(default)]
+    pub value: f64,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// Phase 2 alias — the structural slice is a prefix of the full spec JSON.
@@ -96,6 +123,24 @@ impl GradeSpec {
         AggregateKnobs {
             penalty_mode: self.meta.penalty_mode.clone(),
         }
+    }
+
+    /// Resolve manual-field `name → value` for one project: each defined
+    /// field takes the project's override if present, else its default.
+    /// Returns an empty map when no fields are defined.
+    pub fn manual_field_values(&self, project_id: i64) -> BTreeMap<String, f64> {
+        let overrides = self.manual_fields.values.get(&project_id.to_string());
+        self.manual_fields
+            .defs
+            .iter()
+            .map(|d| {
+                let value = overrides
+                    .and_then(|m| m.get(&d.name))
+                    .copied()
+                    .unwrap_or(d.value);
+                (d.name.clone(), value)
+            })
+            .collect()
     }
 }
 

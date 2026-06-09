@@ -5,7 +5,11 @@ import type { GradeOutput, GradeSpec, RawProject } from "../data/types";
 import { freeVarsFromExpr } from "./expr";
 import {
   projectKnownScope,
+  RAW_SCOPE,
+  STRUCTURAL_SCOPE,
+  STUDENT_STRUCTURAL,
   studentKnownScope,
+  TASK_SCOPE,
   taskKnownScope,
 } from "./scopes";
 import gradingSchema from "../../config/grading.schema.json";
@@ -37,6 +41,10 @@ export function validateSpec(spec: GradeSpec): ValidationResult {
 
   const weightKeys = Object.keys(spec.weights ?? {});
 
+  const manualErr = lintManualFields(spec, weightKeys);
+  if (manualErr) return manualErr;
+  const manualNames = (spec.manual_fields?.defs ?? []).map((d) => d.name);
+
   const taskErr = lintFormulaGroup(
     spec.formulas?.task ?? [],
     taskKnownScope(weightKeys),
@@ -47,7 +55,7 @@ export function validateSpec(spec: GradeSpec): ValidationResult {
   const projectNames: string[] = [];
   const projectErr = lintFormulaGroupOrdered(
     spec.formulas?.project ?? [],
-    projectKnownScope(weightKeys),
+    projectKnownScope(weightKeys, manualNames),
     "project",
     projectNames,
   );
@@ -55,13 +63,64 @@ export function validateSpec(spec: GradeSpec): ValidationResult {
 
   const studentErr = lintFormulaGroupOrdered(
     spec.formulas?.student ?? [],
-    studentKnownScope(weightKeys, projectNames),
+    studentKnownScope(weightKeys, projectNames, manualNames),
     "student",
     [],
   );
   if (studentErr) return studentErr;
 
   return { ok: true };
+}
+
+const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Lint manual-field definitions: each name must be a valid identifier, unique,
+ * and must not collide with a weight, a scope variable, or a formula name —
+ * because field names are injected into project scope as formula variables.
+ */
+function lintManualFields(
+  spec: GradeSpec,
+  weightKeys: string[],
+): ValidationResult | null {
+  const defs = spec.manual_fields?.defs ?? [];
+  if (defs.length === 0) return null;
+
+  const formulaNames = [
+    ...(spec.formulas?.task ?? []),
+    ...(spec.formulas?.project ?? []),
+    ...(spec.formulas?.student ?? []),
+  ].map((f) => f.name);
+
+  const reserved = new Set<string>([
+    ...weightKeys,
+    ...RAW_SCOPE,
+    ...STRUCTURAL_SCOPE,
+    ...STUDENT_STRUCTURAL,
+    ...TASK_SCOPE,
+    ...formulaNames,
+  ]);
+
+  const seen = new Set<string>();
+  for (const d of defs) {
+    if (!IDENTIFIER_RE.test(d.name)) {
+      return {
+        ok: false,
+        message: `Manual field name '${d.name}' is not a valid identifier (letters, digits, underscore; cannot start with a digit)`,
+      };
+    }
+    if (seen.has(d.name)) {
+      return { ok: false, message: `Duplicate manual field name '${d.name}'` };
+    }
+    if (reserved.has(d.name)) {
+      return {
+        ok: false,
+        message: `Manual field name '${d.name}' is reserved (collides with a weight, scope variable, or formula name)`,
+      };
+    }
+    seen.add(d.name);
+  }
+  return null;
 }
 
 function lintFormulaGroup(

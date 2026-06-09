@@ -106,7 +106,9 @@ pub fn code_quality_raw(
         mparams.push((*sid).into());
     }
     let mutation: Option<f64> =
-        conn.query_row(&mutation_sql, rusqlite::params_from_iter(mparams), |r| r.get(0))?;
+        conn.query_row(&mutation_sql, rusqlite::params_from_iter(mparams), |r| {
+            r.get(0)
+        })?;
 
     Ok((
         match mi {

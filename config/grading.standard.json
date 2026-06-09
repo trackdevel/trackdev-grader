@@ -73,6 +73,10 @@
     "D": 0.75,
     "E": 1.0
   },
+  "manual_fields": {
+    "defs": [],
+    "values": {}
+  },
   "inputs": {
     "raw": [
       "documentation_raw",

@@ -14,8 +14,8 @@ pub use grade::{grade, round_grade};
 pub use modulation::keep;
 pub use shape::{aggregate, resolve_tasks, structural_scopes};
 pub use spec::{
-    AxisGrade, Formulas, GradeOutput, GradeSpec, GradeTrees, Meta, NamedNode, ProjectGrades,
-    StructuralMeta, StructuralOutput, StructuralSpec, StudentGrades,
+    AxisGrade, Formulas, GradeOutput, GradeSpec, GradeTrees, ManualFieldDef, ManualFields, Meta,
+    NamedNode, ProjectGrades, StructuralMeta, StructuralOutput, StructuralSpec, StudentGrades,
 };
 pub use types::{
     AggregateKnobs, AiMaps, AxisInputs, CritFinding, FindingKind, ProjectScopes, RawProject,

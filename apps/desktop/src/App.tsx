@@ -4,6 +4,7 @@ import { useGrader } from "./hooks/useGrader";
 import { useHashRoute } from "./hooks/useHashRoute";
 import { checkParity } from "./logic/parity";
 import DbPicker from "./views/DbPicker";
+import ManualFields from "./views/ManualFields";
 import ParityBanner from "./views/ParityBanner";
 import ProjectDetail from "./views/ProjectDetail";
 import ProjectList from "./views/ProjectList";
@@ -54,6 +55,13 @@ export default function App() {
         >
           Projects
         </a>
+        <a
+          className={topNav === "manual-fields" ? "active" : undefined}
+          href="#/manual-fields"
+          data-route="manual-fields"
+        >
+          Manual fields
+        </a>
       </nav>
 
       <DbPicker onLoaded={handleDbLoaded} />
@@ -77,7 +85,14 @@ export default function App() {
       {grader.loading && <p className="meta">Recomputing grades…</p>}
 
       <div id="views" className="views">
-        {loadedDb ? (
+        {route.page === "manual-fields" ? (
+          <ManualFields
+            spec={grader.spec}
+            projects={loadedDb?.projects ?? []}
+            validationError={grader.validationError}
+            onChange={grader.setSpec}
+          />
+        ) : loadedDb ? (
           <>
             {route.page === "students" && (
               <StudentList db={loadedDb} grades={grader.grades} />

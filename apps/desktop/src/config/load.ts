@@ -21,7 +21,11 @@ export function parseSpecJson(text: string): GradeSpec {
   if (!result.ok) {
     throw new Error(result.message);
   }
-  return parsed as GradeSpec;
+  const spec = parsed as GradeSpec;
+  if (!spec.manual_fields) {
+    spec.manual_fields = { defs: [], values: {} };
+  }
+  return spec;
 }
 
 export async function openSpecFile(): Promise<{ spec: GradeSpec; path: string } | null> {
