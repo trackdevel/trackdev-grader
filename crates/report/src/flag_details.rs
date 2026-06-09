@@ -82,11 +82,7 @@ fn enrich_approved_broken_pr_details(conn: &Connection, details: &str) -> Option
         .filter(|n| !n.is_empty())
         .is_some();
     if !has_author_name {
-        if let Some(author_id) = obj
-            .get("author")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        {
+        if let Some(author_id) = obj.get("author").and_then(Value::as_str).map(str::to_owned) {
             if let Ok(name) = conn.query_row(
                 "SELECT full_name FROM students WHERE id = ? LIMIT 1",
                 [&author_id],
@@ -1244,10 +1240,7 @@ mod tests {
         let enriched =
             super::enrich_flag_details(&conn, 1, "alice", "APPROVED_BROKEN_PR", Some(details));
         let rendered = render_flag_details("APPROVED_BROKEN_PR", enriched.as_deref());
-        assert_eq!(
-            rendered.plain,
-            "Author Alice Example: PR #31."
-        );
+        assert_eq!(rendered.plain, "Author Alice Example: PR #31.");
         assert_eq!(
             rendered.markdown,
             "Author Alice Example: [PR #31](https://github.com/org/repo/pull/31)."
