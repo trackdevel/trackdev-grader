@@ -112,7 +112,10 @@ fn copy_db_fixture(db: &Database, dest: &std::path::Path) {
     fs::copy(&db.db_path, dest).expect("copy reference.db");
 }
 
-fn output_to_reference(out: &GradeOutput, prior: Option<&ReferenceGradeProject>) -> ReferenceGradeProject {
+fn output_to_reference(
+    out: &GradeOutput,
+    prior: Option<&ReferenceGradeProject>,
+) -> ReferenceGradeProject {
     ReferenceGradeProject {
         project: ReferenceProjectGrade {
             project_id: out.grades.project_id,
@@ -265,14 +268,27 @@ fn assert_scopes_close(
     pid: i64,
 ) {
     let eps = 1e-9;
-    assert!((actual.sum_raw - expected.sum_raw).abs() < eps, "pid {pid} sum_raw");
-    assert!((actual.sum_eff - expected.sum_eff).abs() < eps, "pid {pid} sum_eff");
-    assert!((actual.mean_raw - expected.mean_raw).abs() < eps, "pid {pid} mean_raw");
+    assert!(
+        (actual.sum_raw - expected.sum_raw).abs() < eps,
+        "pid {pid} sum_raw"
+    );
+    assert!(
+        (actual.sum_eff - expected.sum_eff).abs() < eps,
+        "pid {pid} sum_eff"
+    );
+    assert!(
+        (actual.mean_raw - expected.mean_raw).abs() < eps,
+        "pid {pid} mean_raw"
+    );
     assert!(
         (actual.ai_factor - expected.ai_factor).abs() < eps,
         "pid {pid} ai_factor"
     );
-    assert_eq!(actual.students.len(), expected.students.len(), "pid {pid} students");
+    assert_eq!(
+        actual.students.len(),
+        expected.students.len(),
+        "pid {pid} students"
+    );
     for exp in &expected.students {
         let act = actual
             .students
