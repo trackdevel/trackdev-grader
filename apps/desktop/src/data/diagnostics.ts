@@ -41,7 +41,7 @@ export async function loadProjectDiagnostics(
       details: string | null;
       sprint_label: string | null;
     }>(
-      `SELECT f.student_id, f.flag_type, f.severity, f.details, sp.label AS sprint_label
+      `SELECT f.student_id, f.flag_type, f.severity, f.details, sp.name AS sprint_label
        FROM flags f
        JOIN sprints sp ON sp.id = f.sprint_id
        WHERE f.sprint_id IN (${ph})`,
@@ -94,7 +94,7 @@ export async function loadProjectDiagnostics(
       risk_level: string;
       sprint_label: string | null;
     }>(
-      `SELECT ssai.student_id, ssai.risk_level, sp.label AS sprint_label
+      `SELECT ssai.student_id, ssai.risk_level, sp.name AS sprint_label
        FROM student_sprint_ai_usage ssai
        JOIN sprints sp ON sp.id = ssai.sprint_id
        WHERE ssai.project_id = ? AND ssai.sprint_id IN (${ph})`,
