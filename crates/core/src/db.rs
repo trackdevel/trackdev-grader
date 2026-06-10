@@ -1411,6 +1411,8 @@ mod tests {
             "project_component_score",
             "student_component_score",
             "llm_quality_flag",
+            "project_inventory_runs",
+            "repo_structural_metrics",
         ];
 
         let conn = Connection::open_in_memory().unwrap();
