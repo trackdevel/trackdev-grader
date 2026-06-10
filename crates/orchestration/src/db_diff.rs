@@ -57,6 +57,8 @@ pub const DERIVED_TABLES: &[&str] = &[
     "file_ai_probability",
     "text_consistency_scores",
     "code_practices_evaluation",
+    "project_inventory_runs",
+    "repo_structural_metrics",
 ];
 
 /// Collection-stage tables that populate from TrackDev + GitHub. Compared

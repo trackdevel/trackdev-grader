@@ -1352,6 +1352,19 @@ pub fn run_pipeline(
         }
     }
 
+    // Grading v2 Wave 1: structural inventory (size/complexity raw metrics).
+    // Artifact-shape, sprint-free; head_sha gate inside scan_project_to_db.
+    for g in &groups {
+        let project_root = opts.entregues_dir.join(&g.name);
+        if let Err(e) = sprint_grader_project_inventory::scan_project_to_db(
+            &db.conn,
+            &project_root,
+            g.project_id,
+        ) {
+            warn!(project = %g.name, error = %e, "project inventory scan failed");
+        }
+    }
+
     // T-P3.3: LLM-judged architecture review. Gated by config flag +
     // judge backend prerequisites:
     //   - `judge = "claude-cli"` (default) requires the local `claude`
