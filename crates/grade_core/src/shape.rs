@@ -214,6 +214,7 @@ mod tests {
                 arch_warn_count: 0.0,
                 arch_present: true,
             },
+            inventory: vec![],
             tasks: vec![
                 RawTask {
                     assignee_id: "alice".to_string(),
@@ -327,6 +328,7 @@ mod tests {
                 arch_warn_count: 0.0,
                 arch_present: false,
             },
+            inventory: vec![],
             tasks: vec![],
             students: vec![
                 RawStudent {
@@ -379,6 +381,7 @@ mod tests {
                 arch_warn_count: 0.0,
                 arch_present: false,
             },
+            inventory: vec![],
             tasks: vec![],
             students: vec![RawStudent {
                 student_id: "a".to_string(),

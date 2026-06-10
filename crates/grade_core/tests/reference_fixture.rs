@@ -11,7 +11,7 @@ mod seeds;
 use std::fs;
 use std::path::PathBuf;
 
-use grade_core::{grade, structural_scopes, GradeOutput, GradeSpec};
+use grade_core::{grade_cohort, structural_scopes, GradeOutput, GradeSpec};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sprint_grader_core::Database;
@@ -193,17 +193,19 @@ fn reference_fixtures_generate() {
 
     let spec = load_spec();
     let project_ids = [1i64, 2, 3, 4];
-    let mut grades = Vec::new();
     let mut raw_projects = Vec::new();
     let mut scopes = Vec::new();
-    for (i, &pid) in project_ids.iter().enumerate() {
+    for &pid in &project_ids {
         let sprint_ids = db.sprint_ids_up_to_current(pid, TODAY).expect("sprints");
         let raw = load_raw_project(&db.conn, pid, &sprint_ids).expect("raw project");
-        let out = grade(&raw, &spec).expect("grade");
-        let prior = prior_grades.as_ref().and_then(|g| g.get(i));
-        grades.push(output_to_reference(&out, prior));
         raw_projects.push(raw.clone());
         scopes.push(structural_scopes(&raw, &spec));
+    }
+    let cohort = grade_cohort(&raw_projects, &spec).expect("grade_cohort");
+    let mut grades = Vec::new();
+    for (i, entry) in cohort.projects.iter().enumerate() {
+        let prior = prior_grades.as_ref().and_then(|g| g.get(i));
+        grades.push(output_to_reference(&entry.output, prior));
     }
     fs::write(
         &grades_path,

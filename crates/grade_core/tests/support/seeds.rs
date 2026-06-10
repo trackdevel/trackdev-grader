@@ -56,10 +56,48 @@ fn seed_rich_example(conn: &Connection) {
 
     conn.execute(
         "INSERT INTO pull_requests (id, pr_number, repo_full_name, url, title, state, merged)
-         VALUES ('pr1', 1, 'org/repo', 'http://x', 't', 'MERGED', 1)",
+         VALUES ('pr1', 1, 'spring-api', 'http://x', 't', 'MERGED', 1)",
         [],
     )
     .unwrap();
+    for (key, val) in [
+        ("endpoint_count", 8.0),
+        ("controller_count", 4.0),
+        ("entity_count", 3.0),
+        ("repository_count", 2.0),
+        ("production_loc", 4000.0),
+        ("custom_query_count", 2.0),
+        ("avg_cc_per_controller", 3.5),
+    ] {
+        conn.execute(
+            "INSERT INTO repo_structural_metrics (repo_full_name, metric_key, value)
+             VALUES ('spring-api', ?, ?)",
+            rusqlite::params![key, val],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO pull_requests (id, pr_number, repo_full_name, url, title, state, merged)
+         VALUES ('pr2', 2, 'android-app', 'http://y', 't2', 'MERGED', 1)",
+        [],
+    )
+    .unwrap();
+    for (key, val) in [
+        ("fragment_count", 5.0),
+        ("activity_count", 2.0),
+        ("viewmodel_count", 4.0),
+        ("production_loc", 6000.0),
+        ("reactive_wiring_density", 1.2),
+        ("nav_dispatch_density", 0.8),
+        ("avg_cc_per_fragment", 4.0),
+    ] {
+        conn.execute(
+            "INSERT INTO repo_structural_metrics (repo_full_name, metric_key, value)
+             VALUES ('android-app', ?, ?)",
+            rusqlite::params![key, val],
+        )
+        .unwrap();
+    }
     conn.execute(
         "INSERT INTO task_pull_requests (task_id, pr_id) VALUES (1, 'pr1')",
         [],

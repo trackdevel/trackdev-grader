@@ -6,8 +6,11 @@ mod db_axis;
 use db_axis::{
     architecture_counts, code_quality_raw, documentation_raw, project_repos, survival_raw,
 };
+use std::collections::BTreeMap;
+
 use grade_core::{
-    AxisInputs, CritFinding, FindingKind, RawProject, RawStudent, RawTask, StudentFlag,
+    AxisInputs, CritFinding, FindingKind, RawProject, RawStudent, RawTask, RepoMetrics,
+    StudentFlag,
 };
 use rusqlite::{params, Connection};
 use sprint_grader_core::finding::{RuleKind, Severity};
@@ -54,11 +57,39 @@ pub fn load_raw_project(
         name,
         team_size,
         axis,
+        inventory: load_inventory(conn, &repos)?,
         tasks: load_tasks(conn, project_id, sprint_ids)?,
         students: load_students(conn, project_id)?,
         crit_findings: load_crit_findings(conn, project_id)?,
         student_flags: load_student_flags(conn, project_id, sprint_ids)?,
     })
+}
+
+fn load_inventory(
+    conn: &Connection,
+    repos: &[String],
+) -> rusqlite::Result<Vec<RepoMetrics>> {
+    let mut out = Vec::new();
+    for repo in repos {
+        let mut stmt = conn.prepare(
+            "SELECT metric_key, value FROM repo_structural_metrics WHERE repo_full_name = ?",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![repo], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })?;
+        let mut metrics = BTreeMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            metrics.insert(k, v);
+        }
+        if !metrics.is_empty() {
+            out.push(RepoMetrics {
+                repo_full_name: repo.clone(),
+                metrics,
+            });
+        }
+    }
+    Ok(out)
 }
 
 fn load_tasks(

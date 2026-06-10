@@ -4,12 +4,22 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Per-repo structural inventory metrics (`repo_structural_metrics`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RepoMetrics {
+    pub repo_full_name: String,
+    #[serde(default)]
+    pub metrics: BTreeMap<String, f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawProject {
     pub project_id: i64,
     pub name: String,
     pub team_size: i64,
     pub axis: AxisInputs,
+    #[serde(default)]
+    pub inventory: Vec<RepoMetrics>,
     pub tasks: Vec<RawTask>,
     pub students: Vec<RawStudent>,
     pub crit_findings: Vec<CritFinding>,
