@@ -48,11 +48,17 @@ export type StudentFlag = {
   source: string;
 };
 
+export type RepoMetrics = {
+  repo_full_name: string;
+  metrics: Record<string, number>;
+};
+
 export type RawProject = {
   project_id: number;
   name: string;
   team_size: number;
   axis: AxisInputs;
+  inventory?: RepoMetrics[];
   tasks: RawTask[];
   students: RawStudent[];
   crit_findings: CritFinding[];
@@ -104,9 +110,16 @@ export type ManualFields = {
   values: Record<string, Record<string, number>>;
 };
 
+export type MetricAnchor = {
+  floor: number;
+  ceiling: number;
+};
+
 export type GradeSpec = {
   meta: StructuralMeta;
   weights: Record<string, number>;
+  /** Optional per-metric absolute anchors for hybrid cohort normalization. */
+  anchors?: Record<string, MetricAnchor>;
   models: Record<string, number>;
   levels: Record<string, number>;
   formulas: {
@@ -127,6 +140,30 @@ export type StructuralOutput = {
 export type GradeOutput = {
   grades: ProjectGrades;
   trees: GradeTrees;
+};
+
+export type MetricBounds = {
+  floor: number;
+  ceiling: number;
+  p10: number;
+  p90: number;
+  sample_count: number;
+};
+
+export type CohortBounds = {
+  metrics: Record<string, MetricBounds>;
+};
+
+export type CohortProjectGrade = {
+  project_id: number;
+  output: GradeOutput;
+  /** Hybrid-normalized 0–10 preview per raw metric (explainability). */
+  normalized: Record<string, number>;
+};
+
+export type CohortGradeOutput = {
+  bounds: CohortBounds;
+  projects: CohortProjectGrade[];
 };
 
 export type ProjectGrades = {

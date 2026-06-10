@@ -1,10 +1,10 @@
-import type { GradeOutput, GradeSpec, RawProject } from "../data/types";
-import { initEngine, recompute } from "./index";
+import type { CohortGradeOutput, GradeOutput, GradeSpec, RawProject } from "../data/types";
 
 export type RecomputeFrom = "aggregate" | "project" | "student";
 
 export type RecomputeResult = {
   grades: Map<number, GradeOutput>;
+  cohort: CohortGradeOutput | null;
   error: string | null;
 };
 
@@ -19,29 +19,28 @@ export async function recomputeAll(
   projects: RawProject[],
   spec: GradeSpec,
 ): Promise<RecomputeResult> {
-  await initEngine();
   try {
+    const { initEngine, recomputeCohort } = await import("./index");
+    await initEngine();
+    const cohort = await recomputeCohort(projects, spec);
     const grades = new Map<number, GradeOutput>();
-    for (const raw of projects) {
-      const out = (await recompute(raw, spec)) as GradeOutput;
-      if (!("grades" in out)) {
-        throw new Error("expected full GradeOutput from WASM grade()");
-      }
-      grades.set(raw.project_id, out);
+    for (const entry of cohort.projects) {
+      grades.set(entry.project_id, entry.output);
     }
     lastGoodGrades = grades;
-    return { grades, error: null };
+    return { grades, cohort, error: null };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return {
       grades: lastGoodGrades ?? new Map(),
+      cohort: null,
       error: message,
     };
   }
 }
 
 /**
- * Staged recompute entry point. Phase 4 uses full `grade()` for all stages;
+ * Staged recompute entry point. Uses `grade_cohort` for the full batch;
  * `from` is reserved for future partial re-evaluation optimizations.
  */
 export async function recomputeFrom(

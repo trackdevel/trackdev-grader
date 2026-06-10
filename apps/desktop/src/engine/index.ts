@@ -1,9 +1,17 @@
-import type { GradeOutput, GradeSpec, RawProject, StructuralOutput, StructuralSpec } from "../data/types";
+import type {
+  CohortGradeOutput,
+  GradeOutput,
+  GradeSpec,
+  RawProject,
+  StructuralOutput,
+  StructuralSpec,
+} from "../data/types";
 
 type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
   initSync?: (module: Buffer | WebAssembly.Module) => unknown;
   grade: (rawJson: string, specJson: string) => GradeOutput | StructuralOutput;
+  grade_cohort: (projectsJson: string, specJson: string) => CohortGradeOutput;
   structural_scopes: (rawJson: string, specJson: string) => StructuralOutput;
   free_vars: (exprJson: string) => string[];
 };
@@ -33,7 +41,7 @@ export function toRawProject(projection: RawProject): RawProject {
   return structuredClone(projection);
 }
 
-/** Full formula grade (Phase 3). */
+/** Full formula grade for one project (legacy path; prefer `recomputeCohort`). */
 export async function recompute(
   raw: RawProject,
   spec: GradeSpec | StructuralSpec,
@@ -41,6 +49,16 @@ export async function recompute(
   if (!wasm) await initEngine();
   if (!wasm) throw new Error("WASM engine not initialized");
   return wasm.grade(JSON.stringify(raw), JSON.stringify(spec));
+}
+
+/** Cohort batch grade: shared hybrid bounds + per-project grades (Grading v2 Phase 2). */
+export async function recomputeCohort(
+  projects: RawProject[],
+  spec: GradeSpec,
+): Promise<CohortGradeOutput> {
+  if (!wasm) await initEngine();
+  if (!wasm) throw new Error("WASM engine not initialized");
+  return wasm.grade_cohort(JSON.stringify(projects), JSON.stringify(spec));
 }
 
 /** Phase 2 structural path — scopes only, independent of formula staging. */
@@ -71,3 +89,4 @@ export function extractFreeVars(exprJson: string): string[] {
 
 export { clearLastGoodGrades, getLastGoodGrades, recomputeAll, recomputeFrom } from "./recompute";
 export type { RecomputeFrom, RecomputeResult } from "./recompute";
+export { recomputeCohort };

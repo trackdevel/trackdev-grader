@@ -4,6 +4,7 @@ import type {
   RawProject,
   RawStudent,
   RawTask,
+  RepoMetrics,
   SqlExecutor,
   StudentFlag,
 } from "./types";
@@ -273,6 +274,26 @@ async function loadStudentFlags(
   return out;
 }
 
+async function loadInventory(
+  db: SqlExecutor,
+  repos: string[],
+): Promise<RepoMetrics[]> {
+  const out: RepoMetrics[] = [];
+  for (const repo of repos) {
+    const rows = await db.select<{ metric_key: string; value: number }>(
+      `SELECT metric_key, value FROM repo_structural_metrics WHERE repo_full_name = ?`,
+      [repo],
+    );
+    if (rows.length === 0) continue;
+    const metrics: Record<string, number> = {};
+    for (const row of rows) {
+      metrics[row.metric_key] = row.value;
+    }
+    out.push({ repo_full_name: repo, metrics });
+  }
+  return out;
+}
+
 export async function loadRawProject(
   db: SqlExecutor,
   projectId: number,
@@ -311,6 +332,7 @@ export async function loadRawProject(
     name: nameRow?.name ?? "",
     team_size: teamRow?.n ?? 0,
     axis,
+    inventory: await loadInventory(db, repos),
     tasks: await loadTasks(db, projectId, sprintIds),
     students: await loadStudents(db, projectId),
     crit_findings: await loadCritFindings(db, projectId),
