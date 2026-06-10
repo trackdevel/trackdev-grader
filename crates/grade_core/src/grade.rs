@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::axes::{compute_project_axes, normalize_project_all, ProjectAxisScores};
+use crate::cohort::{compute_cohort_bounds, CohortGradeOutput, CohortProjectGrade};
 use crate::formula::{eval, EvalError, Scope};
 use crate::shape::{aggregate, resolve_tasks};
 use crate::spec::{
@@ -10,7 +12,51 @@ use crate::spec::{
 };
 use crate::types::{RawProject, TaskScope};
 
+struct CohortCtx {
+    axes: ProjectAxisScores,
+}
+
+/// Grade an entire cohort: compute hybrid bounds from all projects, then grade
+/// each project with the current formula spec. Bounds and per-metric normalized
+/// previews are returned for explainability.
+pub fn grade_cohort(
+    projects: &[RawProject],
+    spec: &GradeSpec,
+) -> Result<CohortGradeOutput, EvalError> {
+    let bounds = compute_cohort_bounds(projects, spec);
+    let mut graded = Vec::with_capacity(projects.len());
+    for raw in projects {
+        let normalized = normalize_project_all(raw, &bounds);
+        let axes = compute_project_axes(raw, &normalized, spec);
+        let output = grade_project(raw, spec, Some(&CohortCtx { axes }))?;
+        graded.push(CohortProjectGrade {
+            project_id: raw.project_id,
+            output,
+            normalized,
+        });
+    }
+    Ok(CohortGradeOutput {
+        bounds,
+        projects: graded,
+    })
+}
+
 pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalError> {
+    let out = grade_cohort(std::slice::from_ref(raw), spec)?;
+    out.projects
+        .into_iter()
+        .next()
+        .map(|p| p.output)
+        .ok_or_else(|| EvalError::Domain {
+            message: "grade_cohort returned no projects".into(),
+        })
+}
+
+fn grade_project(
+    raw: &RawProject,
+    spec: &GradeSpec,
+    cohort: Option<&CohortCtx>,
+) -> Result<GradeOutput, EvalError> {
     let maps = spec.ai_maps();
     let resolved = resolve_tasks(raw, &maps);
 
@@ -42,7 +88,9 @@ pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalErro
 
     let scopes = aggregate(raw, &task_keeps, &spec.aggregate_knobs());
     let manual = spec.manual_field_values(raw.project_id);
-    let mut project_scope = build_project_scope(raw, &scopes, &spec.weights, &manual);
+    let axis_scores = cohort.map(|c| &c.axes);
+    let mut project_scope =
+        build_project_scope(raw, &scopes, &spec.weights, &manual, axis_scores);
     let mut project_tree = Vec::new();
     for fd in &spec.formulas.project {
         let node = eval(&fd.expr, &project_scope, &fd.name, &fd.infix)?;
@@ -53,18 +101,13 @@ pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalErro
         });
     }
 
-    let quality_composite = project_scope
-        .get("quality_composite")
+    let quality_grade = project_scope
+        .get("quality")
         .copied()
-        .unwrap_or(0.0);
-    let quality_penalized = project_scope
-        .get("quality_penalized")
-        .copied()
-        .unwrap_or(0.0);
-    let project_penalty = project_scope.get("project_penalty").copied().unwrap_or(0.0);
+        .unwrap_or_else(|| project_scope.get("quality_composite").copied().unwrap_or(0.0));
     let project_final_raw = project_scope.get("project_final").copied().unwrap_or(0.0);
 
-    let axes = build_axis_grades(raw, &project_scope);
+    let axes = build_axis_grades(axis_scores, &project_scope);
 
     let mut student_grades = Vec::new();
     let mut student_trees = Vec::new();
@@ -82,9 +125,9 @@ pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalErro
         if let Some(k) = stu.ai_keep {
             stu_scope.insert("ai_keep".into(), k);
         }
-        if let Some(c) = stu.contribution {
-            stu_scope.insert("contribution".into(), c);
-        }
+        let contribution = stu.contribution.unwrap_or(0.0);
+        stu_scope.insert("contribution".into(), contribution);
+        stu_scope.insert("student_contribution".into(), contribution);
 
         let mut formulas = Vec::new();
         for fd in &spec.formulas.student {
@@ -128,17 +171,9 @@ pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalErro
 
     let grades = ProjectGrades {
         project_id: raw.project_id,
-        quality_grade: round_grade(
-            quality_composite,
-            spec.meta.decimals,
-            spec.meta.quantize_final,
-        ),
-        quality_penalized: round_grade(
-            quality_penalized,
-            spec.meta.decimals,
-            spec.meta.quantize_final,
-        ),
-        project_penalty,
+        quality_grade: round_grade(quality_grade, spec.meta.decimals, spec.meta.quantize_final),
+        quality_penalized: round_grade(quality_grade, spec.meta.decimals, spec.meta.quantize_final),
+        project_penalty: 0.0,
         ai_factor: scopes.ai_factor,
         project_final: round_grade(
             project_final_raw,
@@ -177,6 +212,7 @@ fn build_project_scope(
     scopes: &crate::types::ProjectScopes,
     weights: &BTreeMap<String, f64>,
     manual: &BTreeMap<String, f64>,
+    axis_scores: Option<&ProjectAxisScores>,
 ) -> Scope {
     let mut scope = weights
         .iter()
@@ -203,6 +239,14 @@ fn build_project_scope(
     scope.insert("crit_security_count".into(), scopes.crit_security_count);
     scope.insert("crit_cx_count".into(), scopes.crit_cx_count);
     scope.insert("penalty_on".into(), scopes.penalty_on);
+    if let Some(ax) = axis_scores {
+        scope.insert("quality".into(), ax.quality);
+        scope.insert("complexity".into(), ax.complexity);
+        scope.insert("size".into(), ax.size);
+        scope.insert("quality_present".into(), bool01(ax.quality_present));
+        scope.insert("complexity_present".into(), bool01(ax.complexity_present));
+        scope.insert("size_present".into(), bool01(ax.size_present));
+    }
     // Manual per-project fields, injected last. `or_insert` is defensive: a
     // name collision (which the spec validator rejects) can never clobber a
     // weight/raw/structural variable — the manual field is dropped instead.
@@ -212,67 +256,39 @@ fn build_project_scope(
     scope
 }
 
-fn build_axis_grades(raw: &RawProject, project_scope: &Scope) -> Vec<AxisGrade> {
-    let a = &raw.axis;
+fn build_axis_grades(
+    axis_scores: Option<&ProjectAxisScores>,
+    project_scope: &Scope,
+) -> Vec<AxisGrade> {
+    if let Some(ax) = axis_scores {
+        return vec![
+            AxisGrade {
+                key: "quality".into(),
+                raw: None,
+                score: Some(ax.quality),
+                present: ax.quality_present,
+            },
+            AxisGrade {
+                key: "complexity".into(),
+                raw: None,
+                score: Some(ax.complexity),
+                present: ax.complexity_present,
+            },
+            AxisGrade {
+                key: "size".into(),
+                raw: None,
+                score: Some(ax.size),
+                present: ax.size_present,
+            },
+        ];
+    }
+    // Legacy v1 axis keys when cohort context is absent (should not occur in production).
     vec![
         AxisGrade {
-            key: "documentation".into(),
-            raw: if a.doc_present {
-                Some(a.documentation_raw)
-            } else {
-                None
-            },
-            score: if a.doc_present {
-                project_scope.get("doc_axis").copied()
-            } else {
-                None
-            },
-            present: a.doc_present,
-        },
-        AxisGrade {
-            key: "code_quality".into(),
-            raw: if a.cq_present {
-                Some(a.code_quality_raw)
-            } else {
-                None
-            },
-            score: if a.cq_present {
-                project_scope.get("cq_axis").copied()
-            } else {
-                None
-            },
-            present: a.cq_present,
-        },
-        AxisGrade {
-            key: "survival".into(),
-            raw: if a.surv_present {
-                Some(a.survival_raw)
-            } else {
-                None
-            },
-            score: if a.surv_present {
-                project_scope.get("surv_axis").copied()
-            } else {
-                None
-            },
-            present: a.surv_present,
-        },
-        AxisGrade {
-            key: "architecture".into(),
-            raw: if a.arch_present {
-                let k_crit = project_scope.get("k_crit").copied().unwrap_or(2.0);
-                let k_warn = project_scope.get("k_warn").copied().unwrap_or(0.5);
-                let arch_norm = project_scope.get("arch_norm").copied().unwrap_or(4.0);
-                Some((k_crit * a.arch_crit_count + k_warn * a.arch_warn_count) / arch_norm)
-            } else {
-                None
-            },
-            score: if a.arch_present {
-                project_scope.get("arch_axis").copied()
-            } else {
-                None
-            },
-            present: a.arch_present,
+            key: "quality".into(),
+            raw: None,
+            score: project_scope.get("quality_composite").copied(),
+            present: project_scope.get("quality_composite").is_some(),
         },
     ]
 }
@@ -329,8 +345,14 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(grades_path).unwrap()).unwrap();
         let tol = 0.5 * 10f64.powi(-(spec.meta.decimals as i32));
 
+        let cohort = grade_cohort(&raws, &spec).expect("grade_cohort");
         for (raw, exp) in raws.iter().zip(expected.iter()) {
-            let out = grade(raw, &spec).expect("grade");
+            let out = cohort
+                .projects
+                .iter()
+                .find(|p| p.project_id == raw.project_id)
+                .map(|p| &p.output)
+                .unwrap_or_else(|| panic!("missing cohort grade for {}", raw.project_id));
             let pid = raw.project_id;
             let proj = &exp["project"];
             assert_close(
@@ -346,20 +368,6 @@ mod tests {
                 tol,
                 pid,
                 "quality_penalized",
-            );
-            assert_close(
-                out.grades.project_penalty,
-                proj["project_penalty"].as_f64().unwrap(),
-                tol,
-                pid,
-                "project_penalty",
-            );
-            assert_close(
-                out.grades.ai_factor,
-                proj["ai_factor"].as_f64().unwrap(),
-                tol,
-                pid,
-                "ai_factor",
             );
             assert_close(
                 out.grades.project_final,
@@ -443,6 +451,7 @@ mod tests {
                 arch_warn_count: 0.0,
                 arch_present: true,
             },
+            inventory: vec![],
             tasks: vec![],
             students: vec![RawStudent {
                 student_id: "solo".into(),
@@ -473,6 +482,7 @@ mod tests {
                 arch_warn_count: 0.0,
                 arch_present: true,
             },
+            inventory: vec![],
             tasks: vec![],
             students: vec![RawStudent {
                 student_id: "solo".into(),

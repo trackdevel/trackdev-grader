@@ -1,0 +1,23 @@
+[package]
+name = "sprint-grader-project-inventory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tree-sitter = "0.25"
+sprint-grader-core = { path = "../core" }
+sprint-grader-architecture = { path = "../architecture" }
+sprint-grader-quality = { path = "../quality" }
+
+[dev-dependencies]
+tempfile.workspace = true
+sprint-grader-core = { path = "../core" }

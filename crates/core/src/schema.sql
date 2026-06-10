@@ -856,6 +856,32 @@ CREATE TABLE IF NOT EXISTS architecture_runs (
     PRIMARY KEY (repo_full_name)
 );
 
+-- Structural inventory for Grading v2 size/complexity axes (Wave 1).
+-- Artifact-level, sprint-free. `head_sha` short-circuits unchanged repos.
+CREATE TABLE IF NOT EXISTS project_inventory_runs (
+    repo_full_name TEXT    NOT NULL,
+    project_id     INTEGER NOT NULL,
+    status         TEXT    NOT NULL,           -- OK | SKIPPED_HEAD_UNCHANGED | SKIPPED_NO_SOURCES | CRASHED
+    metric_count   INTEGER NOT NULL DEFAULT 0,
+    file_count     INTEGER NOT NULL DEFAULT 0,
+    duration_ms    INTEGER,
+    head_sha       TEXT,
+    diagnostics    TEXT,
+    scanned_at     TEXT    NOT NULL,           -- ISO-8601 UTC
+    PRIMARY KEY (repo_full_name)
+);
+
+CREATE TABLE IF NOT EXISTS repo_structural_metrics (
+    repo_full_name TEXT NOT NULL,
+    metric_key     TEXT NOT NULL,
+    value          REAL NOT NULL,
+    head_sha       TEXT,
+    PRIMARY KEY (repo_full_name, metric_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_structural_metrics_repo
+    ON repo_structural_metrics(repo_full_name);
+
 -- Per-team ownership snapshot (T-P2.3). `truck_factor` is the smallest k
 -- such that the top-k authors jointly own >=95% of statements attributed in
 -- the project's fingerprints for this sprint. `owners_csv` lists those k

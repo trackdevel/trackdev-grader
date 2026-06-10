@@ -13,6 +13,10 @@ pub struct GradeSpec {
     pub meta: Meta,
     #[serde(default)]
     pub weights: BTreeMap<String, f64>,
+    /// Optional per-metric absolute anchors; missing keys fall back to legacy
+    /// weight names (`doc_max`, `mi_floor`, …).
+    #[serde(default)]
+    pub anchors: BTreeMap<String, crate::anchor::MetricAnchor>,
     #[serde(default)]
     pub models: BTreeMap<String, f64>,
     #[serde(default)]

@@ -4459,6 +4459,7 @@ dependencies = [
  "sprint-grader-evaluate",
  "sprint-grader-evaluate-local",
  "sprint-grader-process",
+ "sprint-grader-project-inventory",
  "sprint-grader-quality",
  "sprint-grader-repo-analysis",
  "sprint-grader-report",
@@ -4482,6 +4483,21 @@ dependencies = [
  "sprint-grader-core",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "sprint-grader-project-inventory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rusqlite",
+ "sprint-grader-architecture",
+ "sprint-grader-core",
+ "sprint-grader-quality",
+ "tempfile",
+ "tracing",
+ "tree-sitter",
 ]
 
 [[package]]

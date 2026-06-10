@@ -1,4 +1,6 @@
-use grade_core::{Expr, GradeOutput, GradeSpec, RawProject, StructuralOutput};
+use grade_core::{
+    CohortGradeOutput, Expr, GradeOutput, GradeSpec, RawProject, StructuralOutput,
+};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -10,6 +12,17 @@ pub fn structural_scopes(raw_json: &str, spec_json: &str) -> Result<JsValue, JsE
     let scopes = grade_core::structural_scopes(&raw, &spec);
     serde_wasm_bindgen::to_value(&StructuralOutput { scopes })
         .map_err(|e| JsError::new(&format!("serialize output: {e}")))
+}
+
+#[wasm_bindgen]
+pub fn grade_cohort(projects_json: &str, spec_json: &str) -> Result<JsValue, JsError> {
+    let projects: Vec<RawProject> = serde_json::from_str(projects_json)
+        .map_err(|e| JsError::new(&format!("invalid projects JSON: {e}")))?;
+    let spec: GradeSpec = serde_json::from_str(spec_json)
+        .map_err(|e| JsError::new(&format!("invalid spec JSON: {e}")))?;
+    let out: CohortGradeOutput =
+        grade_core::grade_cohort(&projects, &spec).map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&format!("serialize output: {e}")))
 }
 
 #[wasm_bindgen]
@@ -40,6 +53,35 @@ pub fn free_vars(expr_json: &str) -> Result<JsValue, JsError> {
 mod tests {
     use super::*;
     use grade_core::{structural_scopes, StructuralSpec};
+
+    #[test]
+    fn grade_cohort_native() {
+        let raw: RawProject = serde_json::from_str(
+            r#"{
+            "project_id": 1,
+            "name": "x",
+            "team_size": 2,
+            "axis": {
+                "documentation_raw": 3, "doc_present": true,
+                "code_quality_raw": 0, "cc_pct": 0, "mutation_score": 0, "cq_present": false,
+                "survival_raw": 0, "surv_present": false,
+                "arch_crit_count": 0, "arch_warn_count": 0, "arch_present": false
+            },
+            "tasks": [],
+            "students": [],
+            "crit_findings": [],
+            "student_flags": []
+        }"#,
+        )
+        .unwrap();
+        let spec_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/grading.standard.json");
+        let spec: GradeSpec =
+            serde_json::from_str(&std::fs::read_to_string(spec_path).unwrap()).unwrap();
+        let out = grade_core::grade_cohort(&[raw], &spec).unwrap();
+        assert_eq!(out.projects.len(), 1);
+        assert!(out.bounds.metrics.contains_key("documentation_raw"));
+    }
 
     #[test]
     fn grade_roundtrip_native() {

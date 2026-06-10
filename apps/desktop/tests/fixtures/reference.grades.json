@@ -2,36 +2,30 @@
   {
     "project": {
       "project_id": 1,
-      "quality_grade": 8.33,
-      "quality_penalized": 8.33,
+      "quality_grade": 10.0,
+      "quality_penalized": 10.0,
       "project_penalty": 0.0,
       "ai_factor": 0.6,
-      "final_grade": 5.0,
+      "final_grade": 7.5,
       "review_gate": null,
       "team_size": 2,
       "axes": [
         {
-          "key": "documentation",
-          "raw": 4.0,
-          "score": 6.666666666666666,
+          "key": "quality",
+          "raw": null,
+          "score": 10.0,
           "present": true
         },
         {
-          "key": "code_quality",
+          "key": "complexity",
           "raw": null,
-          "score": null,
-          "present": false
+          "score": 5.0,
+          "present": true
         },
         {
-          "key": "survival",
+          "key": "size",
           "raw": null,
-          "score": null,
-          "present": false
-        },
-        {
-          "key": "architecture",
-          "raw": 0.0,
-          "score": 10.0,
+          "score": 5.0,
           "present": true
         }
       ]
@@ -43,9 +37,9 @@
         "effective_points": 13.0,
         "ai_keep": 0.8666666666666667,
         "contribution": 0.8666666666666667,
-        "base_grade": 8.67,
+        "base_grade": 13.0,
         "student_penalty": 0.0,
-        "final_grade": 8.67,
+        "final_grade": 10.0,
         "review_gate": null
       },
       {
@@ -54,9 +48,9 @@
         "effective_points": 1.9999999999999996,
         "ai_keep": 0.19999999999999996,
         "contribution": 0.1333333333333333,
-        "base_grade": 1.33,
+        "base_grade": 2.0,
         "student_penalty": 0.75,
-        "final_grade": 0.58,
+        "final_grade": 1.25,
         "review_gate": null
       }
     ]
@@ -73,27 +67,21 @@
       "team_size": 1,
       "axes": [
         {
-          "key": "documentation",
+          "key": "quality",
           "raw": null,
-          "score": null,
+          "score": 0.0,
           "present": false
         },
         {
-          "key": "code_quality",
+          "key": "complexity",
           "raw": null,
-          "score": null,
+          "score": 0.0,
           "present": false
         },
         {
-          "key": "survival",
+          "key": "size",
           "raw": null,
-          "score": null,
-          "present": false
-        },
-        {
-          "key": "architecture",
-          "raw": null,
-          "score": null,
+          "score": 0.0,
           "present": false
         }
       ]
@@ -124,27 +112,21 @@
       "team_size": 2,
       "axes": [
         {
-          "key": "documentation",
+          "key": "quality",
           "raw": null,
-          "score": null,
+          "score": 0.0,
           "present": false
         },
         {
-          "key": "code_quality",
+          "key": "complexity",
           "raw": null,
-          "score": null,
+          "score": 0.0,
           "present": false
         },
         {
-          "key": "survival",
+          "key": "size",
           "raw": null,
-          "score": null,
-          "present": false
-        },
-        {
-          "key": "architecture",
-          "raw": null,
-          "score": null,
+          "score": 0.0,
           "present": false
         }
       ]
@@ -163,7 +145,7 @@
       },
       {
         "student_id": "eve",
-        "raw_points": 0.0,
+        "raw_points": -0.0,
         "effective_points": 0.0,
         "ai_keep": null,
         "contribution": 0.0,
@@ -177,37 +159,31 @@
   {
     "project": {
       "project_id": 4,
-      "quality_grade": 9.17,
-      "quality_penalized": 7.67,
-      "project_penalty": 1.5,
+      "quality_grade": 6.36,
+      "quality_penalized": 6.36,
+      "project_penalty": 0.0,
       "ai_factor": 1.0,
-      "final_grade": 7.67,
+      "final_grade": 6.36,
       "review_gate": null,
       "team_size": 1,
       "axes": [
         {
-          "key": "documentation",
-          "raw": 5.0,
-          "score": 8.333333333333334,
+          "key": "quality",
+          "raw": null,
+          "score": 6.363636363636363,
           "present": true
         },
         {
-          "key": "code_quality",
+          "key": "complexity",
           "raw": null,
-          "score": null,
+          "score": 0.0,
           "present": false
         },
         {
-          "key": "survival",
+          "key": "size",
           "raw": null,
-          "score": null,
+          "score": 0.0,
           "present": false
-        },
-        {
-          "key": "architecture",
-          "raw": 0.0,
-          "score": 10.0,
-          "present": true
         }
       ]
     },
@@ -218,9 +194,9 @@
         "effective_points": 10.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "base_grade": 7.67,
+        "base_grade": 6.36,
         "student_penalty": 0.0,
-        "final_grade": 7.67,
+        "final_grade": 6.36,
         "review_gate": null
       }
     ]

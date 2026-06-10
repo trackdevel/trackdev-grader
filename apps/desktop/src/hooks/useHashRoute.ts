@@ -1,60 +1,96 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 
+/**
+ * Hash routes, organised under three top-level tabs:
+ *   #/students                          → student list
+ *   #/students/<projectId>/<studentId>  → student detail
+ *   #/projects                          → project list
+ *   #/projects/<projectId>              → project detail
+ *   #/formula                           → formula tree + custom fields
+ *
+ * Legacy aliases (#/student/…, #/project/…, #/formulas-and-custom-fields)
+ * still parse so old links keep working.
+ */
 export type AppRoute =
   | { page: "students" }
   | { page: "projects" }
-  | { page: "manual-fields" }
+  | { page: "formula" }
   | { page: "student"; projectId: number; studentId: string }
   | { page: "project"; projectId: number };
 
-function parseHash(hash: string): AppRoute {
-  const raw = hash.replace(/^#\/?/, "");
-  const parts = raw.split("/").filter(Boolean);
-  if (!parts.length || parts[0] === "students") return { page: "students" };
-  if (parts[0] === "projects") return { page: "projects" };
-  if (parts[0] === "manual-fields") return { page: "manual-fields" };
-  if (parts[0] === "student" && parts.length >= 3) {
-    return {
-      page: "student",
-      projectId: Number(parts[1]),
-      studentId: decodeURIComponent(parts[2]),
-    };
+export type TopTab = "students" | "projects" | "formula";
+
+export function topTabOf(route: AppRoute): TopTab {
+  switch (route.page) {
+    case "student":
+      return "students";
+    case "project":
+      return "projects";
+    default:
+      return route.page;
   }
-  if (parts[0] === "project" && parts.length >= 2) {
-    return { page: "project", projectId: Number(parts[1]) };
-  }
-  return { page: "students" };
 }
 
-export function useHashRoute() {
-  const [route, setRoute] = useState<AppRoute>(() =>
-    typeof window !== "undefined" ? parseHash(window.location.hash) : { page: "students" },
-  );
-
-  useEffect(() => {
-    const onHash = () => setRoute(parseHash(window.location.hash));
-    window.addEventListener("hashchange", onHash);
-    if (!window.location.hash || window.location.hash === "#") {
-      window.location.hash = "#/students";
+export function parseHash(hash: string): AppRoute {
+  const parts = hash
+    .replace(/^#\/?/, "")
+    .split("/")
+    .filter(Boolean);
+  const [head, a, b] = parts;
+  switch (head) {
+    case undefined:
+    case "students":
+    case "student": {
+      if (a !== undefined && b !== undefined) {
+        const projectId = Number(a);
+        if (Number.isFinite(projectId)) {
+          return { page: "student", projectId, studentId: decodeURIComponent(b) };
+        }
+      }
+      return { page: "students" };
     }
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
-
-  const navigate = useCallback((hash: string) => {
-    if (window.location.hash === hash) {
-      setRoute(parseHash(hash));
-    } else {
-      window.location.hash = hash;
+    case "projects":
+    case "project": {
+      if (a !== undefined) {
+        const projectId = Number(a);
+        if (Number.isFinite(projectId)) return { page: "project", projectId };
+      }
+      return { page: "projects" };
     }
-  }, []);
+    case "formula":
+    case "formulas-and-custom-fields":
+      return { page: "formula" };
+    default:
+      return { page: "students" };
+  }
+}
 
+function subscribe(onChange: () => void): () => void {
+  window.addEventListener("hashchange", onChange);
+  return () => window.removeEventListener("hashchange", onChange);
+}
+
+function getSnapshot(): string {
+  return window.location.hash;
+}
+
+function getServerSnapshot(): string {
+  return "";
+}
+
+export function useHashRoute(): { route: AppRoute; navigate: (hash: string) => void } {
+  const hash = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const route = useMemo(() => parseHash(hash), [hash]);
+  const navigate = useCallback((next: string) => {
+    window.location.hash = next;
+  }, []);
   return { route, navigate };
 }
 
 export function projectHref(projectId: number): string {
-  return `#/project/${projectId}`;
+  return `#/projects/${projectId}`;
 }
 
 export function studentHref(projectId: number, studentId: string): string {
-  return `#/student/${projectId}/${encodeURIComponent(studentId)}`;
+  return `#/students/${projectId}/${encodeURIComponent(studentId)}`;
 }

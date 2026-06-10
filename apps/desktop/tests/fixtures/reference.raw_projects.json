@@ -16,6 +16,20 @@
       "arch_warn_count": 0.0,
       "arch_present": true
     },
+    "inventory": [
+      {
+        "repo_full_name": "spring-api",
+        "metrics": {
+          "avg_cc_per_controller": 3.5,
+          "controller_count": 4.0,
+          "custom_query_count": 2.0,
+          "endpoint_count": 8.0,
+          "entity_count": 3.0,
+          "production_loc": 4000.0,
+          "repository_count": 2.0
+        }
+      }
+    ],
     "tasks": [
       {
         "assignee_id": "alice",
@@ -75,6 +89,7 @@
       "arch_warn_count": 0.0,
       "arch_present": false
     },
+    "inventory": [],
     "tasks": [
       {
         "assignee_id": "carol",
@@ -110,6 +125,7 @@
       "arch_warn_count": 0.0,
       "arch_present": false
     },
+    "inventory": [],
     "tasks": [
       {
         "assignee_id": "dave",
@@ -149,6 +165,7 @@
       "arch_warn_count": 0.0,
       "arch_present": true
     },
+    "inventory": [],
     "tasks": [
       {
         "assignee_id": "frank",
