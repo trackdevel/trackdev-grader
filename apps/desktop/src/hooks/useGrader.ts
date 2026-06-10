@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { loadBundledDefault } from "../config/load";
 import { dryRunSpec, isEditedSpec, validateSpec } from "../config/validate";
@@ -21,38 +21,43 @@ export type GraderState = {
   setSpecPath: (path: string | null) => void;
 };
 
+async function gradeProbe(raw: RawProject, spec: GradeSpec): Promise<GradeOutput> {
+  await initEngine();
+  return (await recompute(raw, spec)) as GradeOutput;
+}
+
 export function useGrader(rawProjects: RawProject[]): GraderState {
   const bundledDefault = useMemo(() => loadBundledDefault(), []);
-  const [spec, setSpecState] = useState<GradeSpec>(() => loadBundledDefault());
+  const [spec, setSpec] = useState<GradeSpec>(() => loadBundledDefault());
   const [specPath, setSpecPath] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [recomputeError, setRecomputeError] = useState<string | null>(null);
   const [grades, setGrades] = useState<Map<number, GradeOutput>>(new Map());
   const [loading, setLoading] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const probeRef = useRef<RawProject | null>(null);
 
   const edited = isEditedSpec(spec, bundledDefault);
 
-  const runRecompute = useCallback(
-    async (nextSpec: GradeSpec, projects: RawProject[]) => {
-      const validation = validateSpec(nextSpec);
+  // Debounced recompute. The `cancelled` flag makes superseded runs drop
+  // their results, so rapid spec edits can't commit grades out of order.
+  useEffect(() => {
+    let cancelled = false;
+
+    const run = async () => {
+      const validation = validateSpec(spec);
       if (!validation.ok) {
-        setValidationError(validation.message);
+        if (!cancelled) setValidationError(validation.message);
+        return;
+      }
+      if (rawProjects.length === 0) {
+        if (!cancelled) {
+          setValidationError(null);
+          setRecomputeError(null);
+        }
         return;
       }
 
-      if (projects.length === 0) {
-        setValidationError(null);
-        setRecomputeError(null);
-        return;
-      }
-
-      const probe = probeRef.current ?? projects[0];
-      const dry = await dryRunSpec(nextSpec, probe, async (raw, s) => {
-        await initEngine();
-        return (await recompute(raw, s)) as GradeOutput;
-      });
+      const dry = await dryRunSpec(spec, rawProjects[0], gradeProbe);
+      if (cancelled) return;
       if (!dry.ok) {
         setValidationError(dry.message);
         return;
@@ -60,45 +65,31 @@ export function useGrader(rawProjects: RawProject[]): GraderState {
 
       setValidationError(null);
       setLoading(true);
-      const result = await recomputeAll(projects, nextSpec);
+      const result = await recomputeAll(rawProjects, spec);
+      if (cancelled) return;
       setLoading(false);
       setRecomputeError(result.error);
       if (result.grades.size > 0) {
         setGrades(new Map(result.grades));
       }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (rawProjects.length > 0) {
-      probeRef.current = rawProjects[0];
-    }
-  }, [rawProjects]);
-
-  useEffect(() => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      void runRecompute(spec, rawProjects);
-    }, DEBOUNCE_MS);
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [spec, rawProjects, runRecompute]);
 
-  const setSpec = useCallback((next: GradeSpec) => {
-    setSpecState(next);
-  }, []);
+    const timer = setTimeout(() => void run(), DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [spec, rawProjects]);
 
-  const resetSpec = useCallback(() => {
+  const resetSpec = () => {
     // Reset restores the bundled grading *logic* but preserves professor-entered
     // manual fields (definitions + per-project values), which are data, not logic.
-    setSpecState((prev) => {
+    setSpec((prev) => {
       const d = loadBundledDefault();
       return { ...d, manual_fields: prev.manual_fields ?? d.manual_fields };
     });
     setSpecPath(null);
-  }, []);
+  };
 
   return {
     spec,

@@ -77,34 +77,56 @@ The default database path is `data/entregues/grading.db`. In the app, click **Op
 
 ### 1. Open a database
 
-Click **Open grading.db** and choose a `.db` file. The app loads all projects in the file and shows them in a summary table. Grades are recomputed immediately using the current grading spec.
+Click **Open grading.db** (in the header) and choose a `.db` file. The app loads all projects in the file and recomputes grades immediately using the current grading spec.
 
-### 2. Browse students and projects
+On launch, if the process working directory contains **`grader.desktop.json`**, the app loads that session file automatically (database and grading-spec paths inside it are resolved relative to the config file's folder).
 
-Use the top navigation:
+Session toolbar (header):
 
-- **Students** — sortable table of every student across all loaded teams (final grade, base grade, penalties, AI keep, contribution, review gate).
-- **Projects** — team-level overview with composite grades and penalties.
+| Action | Effect |
+|--------|--------|
+| **Save configuration** | Writes `grader.desktop.json` in the cwd, or overwrites the config file you loaded |
+| **Save configuration as…** | Pick a path for a new session file |
+| **Load configuration…** | Open a `grader.desktop.json` (or compatible JSON) from disk |
+| **Reload grader.desktop.json** | Re-read the cwd session file without a file dialog |
 
-Click a row to open a detail page with grade breakdown, formula trees, per-task scores, flags, and AI-detection summaries.
+Example `grader.desktop.json` (paths relative to the config file):
+
+```json
+{
+  "version": 1,
+  "grading_db": "data/entregues/grading.db",
+  "grading_spec": "config/grading.custom.json"
+}
+```
+
+### 2. The three tabs
+
+The main tab bar has three options:
+
+- **Students** — sortable table of every student across all loaded teams (final grade, base grade, penalties, AI keep, contribution, review gate). Click a student for the full detail page: grade breakdown, formula trees with evaluated values, per-task scores, flags, and AI-detection summaries.
+- **Projects** — project list with final grade. Click a project for everything else: quality axes, formula tree, per-student summary, critical findings, flags.
+- **Formula** — the grading formula itself (see below).
 
 URLs use hash routing, for example:
 
-- `#/students`
-- `#/projects`
-- `#/student/<project_id>/<student_id>`
-- `#/project/<project_id>`
+- `#/students` and `#/students/<project_id>/<student_id>`
+- `#/projects` and `#/projects/<project_id>`
+- `#/formula`
 
-### 3. Grading spec editor
+(legacy `#/student/…` / `#/project/…` links still resolve.)
 
-Expand **Grading spec editor** to tune how grades are calculated. Changes debounce (~350 ms) and trigger a live recomputation.
+### 3. Formula tab
+
+Shows the actual formula evaluated by the engine, organised by scope (task / project / student), each rendered as an expandable structure tree. Click **Edit** on any formula to change it as plain infix text — operators `+ - * /`, functions `min`, `max`, `clamp` — and **Apply**. Edits are parsed, validated (unknown variables, forward references), and trigger a live recomputation (~350 ms debounce).
+
+Also on this tab:
 
 | Section | What you can change |
 |---------|---------------------|
-| **Meta** | Penalty mode (`subtractive` or `off`), decimal places for displayed grades |
-| **Weights** | Axis weights used in composite scoring |
-| **AI models / levels** | String-to-multiplier maps for declared AI tool usage |
-| **Formulas (JSON)** | Full formula AST (per-task keep, axis scores, penalties, final grade) |
+| **Advanced JSON** | Add, remove, or rename formulas by editing the formulas object directly |
+| **Parameters** | Penalty mode, decimals, axis weights, AI model/level multiplier maps |
+| **Custom fields** | Per-project manual inputs (see below) |
 
 Toolbar actions:
 
@@ -112,15 +134,13 @@ Toolbar actions:
 - **Save spec…** — write the current spec (to the open file, or pick a new path)
 - **Reset to bundled default** — restore `config/grading.standard.json` from the repo
 
-The status banner at the top shows whether you are on the bundled standard spec, have edited it, or have a validation/parity issue.
-
 ### 4. Parity banner
 
 When using the unmodified bundled spec, the banner confirms grades match the reference baseline. After editing weights or formulas, it switches to a “tuned” state so you know results differ from the shipped standard.
 
-### 5. Manual fields
+### 5. Custom fields
 
-Some grade components are entered by hand rather than computed from the database — for example an oral-defense grade or a peer-evaluation adjustment. The **Manual fields** tab (top navigation) lets you:
+Some grade components are entered by hand rather than computed from the database — for example an oral-defense grade or a peer-evaluation adjustment. The **Custom fields** section of the Formula tab lets you:
 
 - **Define fields** (shared across all teams). Each field has a `name` — used directly as a variable in formulas, so it must be a valid identifier (letters, digits, underscore; not starting with a digit) and must not clash with an existing weight, scope variable, or formula name — a default `value`, and a `description`.
 - **Enter per-project values** in the grid: one row per team, one column per field. A blank cell inherits the field's default.
