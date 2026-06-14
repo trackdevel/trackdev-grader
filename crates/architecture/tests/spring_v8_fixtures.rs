@@ -429,7 +429,7 @@ fn good_case_request_body_with_valid_companion_is_silent() {
 }
 
 #[test]
-fn bad_case_service_public_method_uses_non_dto() {
+fn service_public_method_uses_non_dto_rule_is_disabled() {
     let tmp = TempDir::new().unwrap();
     write_java(
         tmp.path(),
@@ -445,8 +445,8 @@ fn bad_case_service_public_method_uses_non_dto() {
     git_init(tmp.path());
     let hits = scan_with_production_config(tmp.path());
     assert!(
-        hits.contains("SERVICE_PUBLIC_METHOD_USES_NON_DTO"),
-        "expected SERVICE_PUBLIC_METHOD_USES_NON_DTO, got: {hits:?}"
+        !hits.contains("SERVICE_PUBLIC_METHOD_USES_NON_DTO"),
+        "rule disabled — service domain types are not graded: {hits:?}"
     );
 }
 
@@ -895,7 +895,6 @@ fn all_good_cases_produce_zero_spring_v8_violations() {
         "FAT_CONTROLLER_METHOD",
         "MANUAL_DTO_MAPPING_IN_CONTROLLER",
         "MISSING_VALID_ON_REQUEST_BODY",
-        "SERVICE_PUBLIC_METHOD_USES_NON_DTO",
         "SERVICE_USES_MULTIPLE_REPOSITORIES",
         "ENTITY_DEPENDS_ON_SPRING_BEAN",
         "REPOSITORY_USES_NATIVE_QUERY",

@@ -353,7 +353,6 @@ must_not_match = ["org/springframework/web/**", "org/springframework/data/**"]
             "FAT_CONTROLLER_METHOD",
             "MANUAL_DTO_MAPPING_IN_CONTROLLER",
             "MISSING_VALID_ON_REQUEST_BODY",
-            "SERVICE_PUBLIC_METHOD_USES_NON_DTO",
             "SERVICE_USES_MULTIPLE_REPOSITORIES",
             "ENTITY_DEPENDS_ON_SPRING_BEAN",
         ] {

@@ -67,7 +67,7 @@ pub fn classify_errors(stderr: &str) -> Vec<ErrorClass> {
             first_occurrence: first,
         });
     }
-    counts.sort_by(|a, b| b.count.cmp(&a.count));
+    counts.sort_by_key(|c| std::cmp::Reverse(c.count));
     counts
 }
 
@@ -226,7 +226,7 @@ pub fn summarize_compilation(conn: &Connection, sprint_id: i64) -> rusqlite::Res
             }
         }
         let mut top: Vec<(String, i64)> = merged.into_iter().collect();
-        top.sort_by(|a, b| b.1.cmp(&a.1));
+        top.sort_by_key(|t| std::cmp::Reverse(t.1));
         let top_errors: Vec<Value> = top
             .into_iter()
             .take(5)
