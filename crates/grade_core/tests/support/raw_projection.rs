@@ -4,7 +4,8 @@
 mod db_axis;
 
 use db_axis::{
-    architecture_counts, code_quality_raw, documentation_raw, project_repos, survival_raw,
+    architecture_counts, architecture_scan_present, code_quality_raw, documentation_raw,
+    project_repos, survival_raw,
 };
 use std::collections::BTreeMap;
 
@@ -37,6 +38,7 @@ pub fn load_raw_project(
     let surv = survival_raw(conn, project_id, sprint_ids)?;
     let repos = project_repos(conn, project_id)?;
     let (arch_crit, arch_warn) = architecture_counts(conn, project_id)?;
+    let arch_present = architecture_scan_present(conn, &repos)?;
 
     let axis = AxisInputs {
         documentation_raw: doc.raw_value.unwrap_or(0.0),
@@ -47,9 +49,9 @@ pub fn load_raw_project(
         cq_present: cq.present,
         survival_raw: surv.raw_value.unwrap_or(0.0),
         surv_present: surv.present,
-        arch_crit_count: arch_crit as f64,
-        arch_warn_count: arch_warn as f64,
-        arch_present: !repos.is_empty(),
+        arch_crit_count: arch_crit,
+        arch_warn_count: arch_warn,
+        arch_present,
     };
 
     Ok(RawProject {
@@ -65,10 +67,23 @@ pub fn load_raw_project(
     })
 }
 
+fn inventory_table_exists(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'repo_structural_metrics'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
 fn load_inventory(
     conn: &Connection,
     repos: &[String],
 ) -> rusqlite::Result<Vec<RepoMetrics>> {
+    if !inventory_table_exists(conn) {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     for repo in repos {
         let mut stmt = conn.prepare(
@@ -198,7 +213,7 @@ fn load_student_flags(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT student_id, severity FROM flags
+            "SELECT student_id, severity, flag_type FROM flags
              WHERE sprint_id IN ({placeholders})
                AND student_id NOT LIKE 'PROJECT_%'"
         );
@@ -208,10 +223,14 @@ fn load_student_flags(
         }
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(bind), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
         })?;
         for row in rows {
-            let (student_id, severity) = row?;
+            let (student_id, severity, flag_type) = row?;
             if conn.query_row(
                 "SELECT COUNT(*) FROM students WHERE id = ? AND team_project_id = ?",
                 params![student_id, project_id],
@@ -224,29 +243,43 @@ fn load_student_flags(
                 student_id,
                 severity,
                 source: "sprint".to_string(),
+                flag_type: flag_type.unwrap_or_default(),
+                weighted: 0.0,
             });
         }
     }
 
+    // T2.2 mirror: hotspot artifact flags carry the per-student blame
+    // magnitude in their details JSON.
     let mut stmt = conn.prepare(
-        "SELECT student_id, severity FROM student_artifact_flags
+        "SELECT student_id, severity, flag_type, details FROM student_artifact_flags
          WHERE project_id = ? AND student_id NOT LIKE 'PROJECT_%'",
     )?;
     let rows = stmt.query_map(params![project_id], |r| {
         Ok((
             r.get::<_, Option<String>>(0)?,
             r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
         ))
     })?;
     for row in rows {
-        let (student_id, severity) = row?;
+        let (student_id, severity, flag_type, details) = row?;
         let Some(student_id) = student_id else {
             continue;
         };
+        let flag_type = flag_type.unwrap_or_default();
+        let weighted = details
+            .as_deref()
+            .and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+            .map(|v| grade_core::hotspot_magnitude(&flag_type, &v))
+            .unwrap_or(0.0);
         out.push(StudentFlag {
             student_id,
             severity: severity.unwrap_or_default(),
             source: "artifact".to_string(),
+            flag_type,
+            weighted,
         });
     }
     Ok(out)

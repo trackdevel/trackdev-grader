@@ -3,8 +3,6 @@
 //! Regenerate committed fixtures:
 //!   UPDATE_REFERENCE_FIXTURES=1 cargo test -p grade_core reference_fixtures -- --ignored --nocapture
 
-#[path = "support/raw_projection.rs"]
-mod raw_projection;
 #[path = "support/seeds.rs"]
 mod seeds;
 
@@ -16,8 +14,8 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sprint_grader_core::Database;
 
-use raw_projection::load_raw_project;
 use seeds::seed_all_fixtures;
+use sprint_grader_orchestration::grading_projection::load_raw_project;
 
 const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -61,6 +59,7 @@ struct ReferenceStudentGrade {
     contribution: Option<f64>,
     base_grade: f64,
     student_penalty: f64,
+    codequality_penalty: f64,
     final_grade: f64,
     review_gate: Option<String>,
 }
@@ -158,6 +157,7 @@ fn output_to_reference(
                     contribution: s.contribution,
                     base_grade: s.base_grade,
                     student_penalty: s.student_penalty,
+                    codequality_penalty: s.codequality_penalty,
                     final_grade: s.student_final,
                     review_gate: gate,
                 }

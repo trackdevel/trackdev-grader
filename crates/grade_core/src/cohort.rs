@@ -134,20 +134,34 @@ pub fn resolve_anchor(spec: &GradeSpec, key: &str) -> MetricAnchor {
             floor: 0.0,
             ceiling: w.get("prod_loc_ceiling").copied().unwrap_or(50_000.0),
         },
-        "endpoint_count" | "controller_count" | "entity_count" | "repository_count"
-        | "fragment_count" | "activity_count" | "viewmodel_count" | "room_database_count" => {
-            MetricAnchor {
-                floor: 0.0,
-                ceiling: w.get("inventory_count_ceiling").copied().unwrap_or(50.0),
-            }
-        }
-        "custom_query_count" | "scheduled_task_count" | "observe_call_count"
-        | "nav_dispatch_count" | "reactive_state_field_count" => MetricAnchor {
+        "production_statement_count" => MetricAnchor {
+            floor: 0.0,
+            ceiling: w.get("prod_stmt_ceiling").copied().unwrap_or(15_000.0),
+        },
+        "endpoint_count"
+        | "controller_count"
+        | "entity_count"
+        | "repository_count"
+        | "fragment_count"
+        | "activity_count"
+        | "viewmodel_count"
+        | "room_database_count" => MetricAnchor {
+            floor: 0.0,
+            ceiling: w.get("inventory_count_ceiling").copied().unwrap_or(50.0),
+        },
+        "custom_query_count"
+        | "scheduled_task_count"
+        | "observe_call_count"
+        | "nav_dispatch_count"
+        | "reactive_state_field_count" => MetricAnchor {
             floor: 0.0,
             ceiling: w.get("inventory_depth_ceiling").copied().unwrap_or(30.0),
         },
-        "reactive_wiring_density" | "nav_dispatch_density" | "avg_cc_per_controller"
-        | "avg_cc_per_fragment" | "avg_statements_per_endpoint" => MetricAnchor {
+        "reactive_wiring_density"
+        | "nav_dispatch_density"
+        | "avg_cc_per_controller"
+        | "avg_cc_per_fragment"
+        | "avg_statements_per_endpoint" => MetricAnchor {
             floor: 0.0,
             ceiling: w.get("inventory_density_ceiling").copied().unwrap_or(10.0),
         },
@@ -206,10 +220,7 @@ pub fn hybrid_normalize(value: f64, bounds: &MetricBounds) -> f64 {
 }
 
 /// Hybrid-normalize all present raw metrics for one project.
-pub fn normalize_project_metrics(
-    raw: &RawProject,
-    bounds: &CohortBounds,
-) -> BTreeMap<String, f64> {
+pub fn normalize_project_metrics(raw: &RawProject, bounds: &CohortBounds) -> BTreeMap<String, f64> {
     let mut out = BTreeMap::new();
     for (key, value) in collect_raw_samples(raw) {
         if let Some(b) = bounds.metrics.get(&key) {

@@ -1,6 +1,4 @@
-use grade_core::{
-    CohortGradeOutput, Expr, GradeOutput, GradeSpec, RawProject, StructuralOutput,
-};
+use grade_core::{CohortGradeOutput, Expr, GradeOutput, GradeSpec, RawProject, StructuralOutput};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -63,10 +61,11 @@ mod tests {
             "team_size": 2,
             "axis": {
                 "documentation_raw": 3, "doc_present": true,
-                "code_quality_raw": 0, "cc_pct": 0, "mutation_score": 0, "cq_present": false,
+                "code_quality_raw": 90, "cc_pct": 0, "mutation_score": 0, "cq_present": true,
                 "survival_raw": 0, "surv_present": false,
                 "arch_crit_count": 0, "arch_warn_count": 0, "arch_present": false
             },
+            "inventory": [{"repo_full_name":"r","metrics":{"production_loc":1000.0}}],
             "tasks": [],
             "students": [],
             "crit_findings": [],
@@ -74,13 +73,13 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let spec_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/grading.standard.json");
+        let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/grading.standard.json");
         let spec: GradeSpec =
             serde_json::from_str(&std::fs::read_to_string(spec_path).unwrap()).unwrap();
         let out = grade_core::grade_cohort(&[raw], &spec).unwrap();
         assert_eq!(out.projects.len(), 1);
-        assert!(out.bounds.metrics.contains_key("documentation_raw"));
+        assert!(out.bounds.metrics.contains_key("code_quality_raw"));
     }
 
     #[test]

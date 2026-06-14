@@ -1,5 +1,6 @@
 //! Axis raw loaders for test DB projection (mirrors grading_xlsx normalize SQL).
 
+use grade_core::arch_rule_grading_weight;
 use rusqlite::{params, Connection};
 use sprint_grader_core::finding::{RuleKind, Severity};
 use sprint_grader_core::rule_attribution::load_attributed_findings_for_repo;
@@ -198,16 +199,37 @@ pub fn project_repos(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec
     Ok(out)
 }
 
-pub fn architecture_counts(conn: &Connection, project_id: i64) -> rusqlite::Result<(u32, u32)> {
+pub fn architecture_scan_present(conn: &Connection, repos: &[String]) -> rusqlite::Result<bool> {
+    for repo in repos {
+        // SKIPPED_HEAD_UNCHANGED means a prior OK scan's violations are still
+        // valid (the cache gate found the same HEAD) — the data is present.
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM architecture_runs
+             WHERE repo_full_name = ? AND status IN ('OK', 'SKIPPED_HEAD_UNCHANGED')",
+            params![repo],
+            |r| r.get(0),
+        )?;
+        if n > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub fn architecture_counts(conn: &Connection, project_id: i64) -> rusqlite::Result<(f64, f64)> {
     let repos = project_repos(conn, project_id)?;
-    let mut crit = 0u32;
-    let mut warn = 0u32;
+    let mut crit = 0.0;
+    let mut warn = 0.0;
     for repo in &repos {
         let findings = load_attributed_findings_for_repo(conn, repo, RuleKind::Architecture)?;
         for af in findings {
+            let w = arch_rule_grading_weight(&af.finding.rule_id);
+            if w <= 0.0 {
+                continue;
+            }
             match af.finding.severity {
-                Severity::Critical => crit += 1,
-                Severity::Warning => warn += 1,
+                Severity::Critical => crit += w,
+                Severity::Warning => warn += w,
                 Severity::Info => {}
             }
         }

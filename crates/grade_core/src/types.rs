@@ -74,6 +74,12 @@ pub struct StudentFlag {
     pub student_id: String,
     pub severity: String,
     pub source: String,
+    /// Sprint or artifact flag type (e.g. `ARCHITECTURE_HOTSPOT`).
+    #[serde(default)]
+    pub flag_type: String,
+    /// Pre-parsed hotspot magnitude (`weighted` or complexity `score`).
+    #[serde(default)]
+    pub weighted: Option<f64>,
 }
 
 /// Per-task resolved scalars before the keep formula runs.
@@ -94,6 +100,14 @@ pub struct StudentScope {
     pub ai_keep: Option<f64>,
     pub contribution: Option<f64>,
     pub student_critical_count: f64,
+    #[serde(default)]
+    pub arch_blame: f64,
+    #[serde(default)]
+    pub cx_blame: f64,
+    #[serde(default)]
+    pub sa_blame: f64,
+    #[serde(default)]
+    pub codequality_penalty: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

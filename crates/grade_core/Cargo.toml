@@ -16,3 +16,4 @@ rusqlite = { workspace = true }
 tempfile = "3"
 serde = { workspace = true }
 sprint-grader-core = { path = "../core" }
+sprint-grader-orchestration = { path = "../orchestration" }

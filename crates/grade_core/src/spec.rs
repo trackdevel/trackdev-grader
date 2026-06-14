@@ -184,6 +184,8 @@ pub struct StudentGrades {
     pub contribution: Option<f64>,
     pub base_grade: f64,
     pub student_penalty: f64,
+    #[serde(default)]
+    pub codequality_penalty: f64,
     pub student_final: f64,
 }
 
