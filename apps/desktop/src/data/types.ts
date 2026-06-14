@@ -46,6 +46,10 @@ export type StudentFlag = {
   student_id: string;
   severity: string;
   source: string;
+  /** Mirror of grade_core StudentFlag (T2.2): partitions behavioural vs hotspot. */
+  flag_type: string;
+  /** Per-student blame magnitude for the v4 percentile bands; null when absent. */
+  weighted: number | null;
 };
 
 export type RepoMetrics = {
@@ -193,6 +197,8 @@ export type StudentGrades = {
   contribution: number | null;
   base_grade: number;
   student_penalty: number;
+  /** v4 cohort-percentile code-quality deduction (mirror of grade_core). */
+  codequality_penalty: number;
   student_final: number;
 };
 

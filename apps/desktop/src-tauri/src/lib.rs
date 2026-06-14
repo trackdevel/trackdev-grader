@@ -21,12 +21,8 @@ fn resolve_stored_path(config_path: String, stored: String) -> Result<String, St
 fn relativize_path(config_path: String, absolute: String) -> Result<String, String> {
     let abs = Path::new(&absolute);
     let base = config_parent(&config_path)?;
-    let abs_canon = abs
-        .canonicalize()
-        .unwrap_or_else(|_| abs.to_path_buf());
-    let base_canon = base
-        .canonicalize()
-        .unwrap_or(base);
+    let abs_canon = abs.canonicalize().unwrap_or_else(|_| abs.to_path_buf());
+    let base_canon = base.canonicalize().unwrap_or(base);
     if let Ok(rel) = abs_canon.strip_prefix(&base_canon) {
         return Ok(rel.to_string_lossy().into_owned());
     }
@@ -93,13 +89,13 @@ mod tests {
 
     #[test]
     fn resolve_stored_path_keeps_absolute() {
-        let abs = if cfg!(windows) {
+        let abs: String = if cfg!(windows) {
             r"C:\tmp\grading.db".into()
         } else {
             "/tmp/grading.db".into()
         };
-        let resolved = resolve_stored_path("/any/grader.desktop.json".into(), abs.clone())
-            .expect("resolve");
+        let resolved =
+            resolve_stored_path("/any/grader.desktop.json".into(), abs.clone()).expect("resolve");
         assert_eq!(resolved, abs);
     }
 }
