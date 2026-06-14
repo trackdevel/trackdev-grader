@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use sprint_grader_architecture::scanner::ScannedFile;
+use sprint_grader_core::is_java_statement_kind;
 use sprint_grader_quality::complexity::{analyze_method, cyclomatic_complexity};
 use tree_sitter::Node;
 
@@ -27,27 +28,6 @@ const REACTIVE_FIELD_TYPES: &[&str] = &[
     "SharedFlow",
 ];
 
-const STATEMENT_KINDS: &[&str] = &[
-    "expression_statement",
-    "local_variable_declaration",
-    "return_statement",
-    "if_statement",
-    "for_statement",
-    "enhanced_for_statement",
-    "while_statement",
-    "do_statement",
-    "switch_expression",
-    "switch_statement",
-    "throw_statement",
-    "try_statement",
-    "try_with_resources_statement",
-    "assert_statement",
-    "break_statement",
-    "continue_statement",
-    "yield_statement",
-    "synchronized_statement",
-];
-
 #[derive(Debug, Default)]
 struct FileScan {
     controller_count: u32,
@@ -65,6 +45,7 @@ struct FileScan {
     nav_dispatch_count: u32,
     reactive_state_field_count: u32,
     production_loc: u32,
+    production_statement_count: u32,
     controller_cc_sum: u64,
     controller_cc_n: u32,
     fragment_cc_sum: u64,
@@ -81,9 +62,7 @@ struct RepoScan {
 
 pub fn is_production_main_source(rel_path: &str) -> bool {
     let norm = rel_path.replace('\\', "/");
-    MAIN_SOURCE_MARKERS
-        .iter()
-        .any(|m| norm.contains(m))
+    MAIN_SOURCE_MARKERS.iter().any(|m| norm.contains(m))
 }
 
 /// Scan parsed production Java files and return metric key → value.
@@ -113,14 +92,23 @@ enum ClassKind {
     Fragment,
 }
 
-fn walk_node(node: Node, source: &[u8], rel_path: &str, acc: &mut FileScan, class_kind: Option<ClassKind>) {
+fn walk_node(
+    node: Node,
+    source: &[u8],
+    rel_path: &str,
+    acc: &mut FileScan,
+    class_kind: Option<ClassKind>,
+) {
     let kind = node.kind();
     if kind == "class_declaration" || kind == "interface_declaration" {
         let class_ann = class_annotations(node, source);
         let extends = extends_simple_name(node, source);
         let class_name = class_simple_name(node, source);
 
-        if class_ann.iter().any(|a| a == "RestController" || a == "Controller") {
+        if class_ann
+            .iter()
+            .any(|a| a == "RestController" || a == "Controller")
+        {
             acc.controller_count += 1;
         }
         if class_ann.iter().any(|a| a == "Service") {
@@ -138,7 +126,10 @@ fn walk_node(node: Node, source: &[u8], rel_path: &str, acc: &mut FileScan, clas
         if extends.as_deref() == Some("Fragment") {
             acc.fragment_count += 1;
         }
-        if matches!(extends.as_deref(), Some("Activity") | Some("AppCompatActivity")) {
+        if matches!(
+            extends.as_deref(),
+            Some("Activity") | Some("AppCompatActivity")
+        ) {
             acc.activity_count += 1;
         }
         if extends.as_deref() == Some("ViewModel")
@@ -147,7 +138,10 @@ fn walk_node(node: Node, source: &[u8], rel_path: &str, acc: &mut FileScan, clas
             acc.viewmodel_count += 1;
         }
 
-        let ck = if class_ann.iter().any(|a| a == "RestController" || a == "Controller") {
+        let ck = if class_ann
+            .iter()
+            .any(|a| a == "RestController" || a == "Controller")
+        {
             ClassKind::Controller
         } else if extends.as_deref() == Some("Fragment") {
             ClassKind::Fragment
@@ -162,8 +156,12 @@ fn walk_node(node: Node, source: &[u8], rel_path: &str, acc: &mut FileScan, clas
     }
 
     if kind == "method_declaration" || kind == "constructor_declaration" {
+        acc.production_statement_count += count_statements_in_method(node);
         let method_ann = method_annotations(node, source);
-        if method_ann.iter().any(|a| MAPPING_ANNOTATIONS.contains(&a.as_str())) {
+        if method_ann
+            .iter()
+            .any(|a| MAPPING_ANNOTATIONS.contains(&a.as_str()))
+        {
             acc.endpoint_count += 1;
             let stmts = count_statements_in_method(node);
             acc.endpoint_stmt_sum += stmts as u64;
@@ -219,10 +217,16 @@ fn finalize(acc: &FileScan) -> BTreeMap<String, f64> {
     let fragments = acc.fragment_count.max(1) as f64;
 
     let mut out = BTreeMap::new();
-    out.insert(metrics::CONTROLLER_COUNT.into(), acc.controller_count as f64);
+    out.insert(
+        metrics::CONTROLLER_COUNT.into(),
+        acc.controller_count as f64,
+    );
     out.insert(metrics::SERVICE_COUNT.into(), acc.service_count as f64);
     out.insert(metrics::ENTITY_COUNT.into(), acc.entity_count as f64);
-    out.insert(metrics::REPOSITORY_COUNT.into(), acc.repository_count as f64);
+    out.insert(
+        metrics::REPOSITORY_COUNT.into(),
+        acc.repository_count as f64,
+    );
     out.insert(metrics::ENDPOINT_COUNT.into(), acc.endpoint_count as f64);
     out.insert(metrics::FRAGMENT_COUNT.into(), acc.fragment_count as f64);
     out.insert(metrics::ACTIVITY_COUNT.into(), acc.activity_count as f64);
@@ -252,6 +256,10 @@ fn finalize(acc: &FileScan) -> BTreeMap<String, f64> {
         acc.reactive_state_field_count as f64,
     );
     out.insert(metrics::PRODUCTION_LOC.into(), acc.production_loc as f64);
+    out.insert(
+        metrics::PRODUCTION_STATEMENT_COUNT.into(),
+        acc.production_statement_count as f64,
+    );
     out.insert(
         metrics::REACTIVE_WIRING_DENSITY.into(),
         acc.observe_call_count as f64 / screens,
@@ -394,7 +402,9 @@ fn class_simple_name(class: Node, source: &[u8]) -> String {
 
 fn field_type_simple_name(field: Node, source: &[u8]) -> Option<String> {
     for c in children(field) {
-        if c.kind().ends_with("_type") || c.kind() == "generic_type" || c.kind() == "type_identifier"
+        if c.kind().ends_with("_type")
+            || c.kind() == "generic_type"
+            || c.kind() == "type_identifier"
         {
             return simple_type_name(c, source);
         }
@@ -420,7 +430,7 @@ fn count_statements_in_method(method: Node) -> u32 {
 }
 
 fn count_statements(node: Node, n: &mut u32) {
-    if STATEMENT_KINDS.contains(&node.kind()) {
+    if is_java_statement_kind(node.kind()) {
         *n += 1;
     }
     for c in children(node) {
@@ -445,13 +455,13 @@ mod tests {
 
     #[test]
     fn production_path_gate() {
-        assert!(is_production_main_source(
-            "src/main/java/com/x/App.java"
-        ));
+        assert!(is_production_main_source("src/main/java/com/x/App.java"));
         assert!(is_production_main_source(
             "app/src/main/java/com/x/App.java"
         ));
-        assert!(!is_production_main_source("src/test/java/com/x/AppTest.java"));
+        assert!(!is_production_main_source(
+            "src/test/java/com/x/AppTest.java"
+        ));
     }
 
     #[test]
@@ -475,6 +485,23 @@ public class UserController {
         assert_eq!(m[metrics::CONTROLLER_COUNT], 1.0);
         assert_eq!(m[metrics::ENDPOINT_COUNT], 2.0);
         assert!(m[metrics::AVG_STATEMENTS_PER_ENDPOINT] >= 1.0);
+        assert!(m[metrics::PRODUCTION_STATEMENT_COUNT] >= 3.0);
+    }
+
+    #[test]
+    fn production_statement_count_includes_non_endpoint_methods() {
+        let src = br#"package com.x.api;
+public class UserService {
+    public void work() {
+        int x = 1;
+        if (x > 0) { x = 2; }
+    }
+}
+"#;
+        let f = ScannedFile::from_inline("src/main/java/com/x/UserService.java", src).unwrap();
+        let m = scan_files(&[f]);
+        assert!(m[metrics::PRODUCTION_STATEMENT_COUNT] >= 3.0);
+        assert_eq!(m[metrics::ENDPOINT_COUNT], 0.0);
     }
 
     #[test]

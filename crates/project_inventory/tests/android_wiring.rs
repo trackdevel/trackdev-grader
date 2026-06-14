@@ -5,7 +5,7 @@ use std::process::Command;
 
 use rusqlite::Connection;
 use sprint_grader_core::db::apply_schema;
-use sprint_grader_project_inventory::{scan_repo_to_db, metrics};
+use sprint_grader_project_inventory::{metrics, scan_repo_to_db};
 use tempfile::TempDir;
 
 fn git_init_commit(dir: &std::path::Path) {
@@ -59,7 +59,7 @@ fn android_repo_inventory_counts_fragments_observe_and_nav() {
     )
     .unwrap();
 
-    let summary = scan_repo_to_db(&conn, &repo, "org/android-app", 1).expect("scan");
+    let summary = scan_repo_to_db(&conn, &repo, "org/android-app", 1, false).expect("scan");
     assert!(!summary.skipped_unchanged);
 
     let q = |key: &str| -> f64 {
