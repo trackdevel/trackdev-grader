@@ -101,6 +101,9 @@ export default function App() {
         ))}
       </nav>
 
+      {grader.validationError && (
+        <p className="error">Spec validation: {grader.validationError}</p>
+      )}
       {grader.recomputeError && (
         <p className="error">Engine: {grader.recomputeError} (showing last-good grades)</p>
       )}

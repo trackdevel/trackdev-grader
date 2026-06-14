@@ -12,6 +12,7 @@ type Row = {
   grade: number;
   base: number;
   stu_pen: number;
+  cq_pen: number;
   ai_keep: number | null;
   contribution: number | null;
   gate: string | null;
@@ -26,35 +27,40 @@ export default function StudentList({ db, grades }: Props) {
   const rows: Row[] = [];
   for (const raw of db.projects) {
     const out = grades.get(raw.project_id);
-    if (!out) continue;
     const diag = db.diagnostics.get(raw.project_id);
     for (const stu of raw.students) {
-      const g = out.grades.students.find((s) => s.student_id === stu.student_id);
-      if (!g) continue;
+      const g = out?.grades.students.find((s) => s.student_id === stu.student_id);
       rows.push({
         project_id: raw.project_id,
         team: raw.name,
         student_id: stu.student_id,
         student: stu.full_name,
-        grade: g.student_final,
-        base: g.base_grade,
-        stu_pen: g.student_penalty,
-        ai_keep: g.ai_keep,
-        contribution: g.contribution,
-        gate: diag
-          ? studentReviewGate(raw, diag, stu.student_id, g.effective_points)
-          : null,
+        grade: g?.student_final ?? Number.NaN,
+        base: g?.base_grade ?? Number.NaN,
+        stu_pen: g?.student_penalty ?? Number.NaN,
+        cq_pen: g?.codequality_penalty ?? Number.NaN,
+        ai_keep: g?.ai_keep ?? null,
+        contribution: g?.contribution ?? null,
+        gate:
+          g && diag
+            ? studentReviewGate(raw, diag, stu.student_id, g.effective_points)
+            : null,
       });
     }
   }
+
+  const hasGrades = rows.some((r) => Number.isFinite(r.grade));
 
   return (
     <section className="view">
       <h3>All students</h3>
       <p className="hint">Click column headers to sort. Grades from the live WASM engine.</p>
       {rows.length === 0 ? (
-        <p className="hint">Open a grading.db to see students.</p>
-      ) : (
+        <p className="hint">No students in this database.</p>
+      ) : !hasGrades ? (
+        <p className="hint">Students loaded — waiting for grade engine (check errors above).</p>
+      ) : null}
+      {rows.length > 0 && (
         <SortableTable
           rows={rows}
           rowKey={(r) => `${r.project_id}-${r.student_id}`}
@@ -86,10 +92,26 @@ export default function StudentList({ db, grades }: Props) {
               sortable: true,
               numeric: true,
               sortValue: (r) => r.grade,
-              render: (r) => fmtNum(r.grade),
+              render: (r) => (Number.isFinite(r.grade) ? fmtNum(r.grade) : "—"),
             },
-            { key: "base", header: "base", render: (r) => fmtNum(r.base) },
-            { key: "stu_pen", header: "stu_pen", render: (r) => fmtNum(r.stu_pen) },
+            {
+              key: "base",
+              header: "base",
+              render: (r) => (Number.isFinite(r.base) ? fmtNum(r.base) : "—"),
+            },
+            {
+              key: "stu_pen",
+              header: "stu_pen",
+              render: (r) => (Number.isFinite(r.stu_pen) ? fmtNum(r.stu_pen) : "—"),
+            },
+            {
+              key: "cq_pen",
+              header: "cq_pen",
+              numeric: true,
+              sortable: true,
+              sortValue: (r) => r.cq_pen,
+              render: (r) => (Number.isFinite(r.cq_pen) ? fmtNum(r.cq_pen) : "—"),
+            },
             {
               key: "ai_keep",
               header: "ai_keep",
