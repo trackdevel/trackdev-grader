@@ -69,6 +69,30 @@ fn fires_when_weighted_sum_at_or_above_threshold() {
 }
 
 #[test]
+fn threshold_zero_emits_magnitude_for_small_warning_blame() {
+    // Grading v4 (T3.3): grade_core's percentile bands do the selection, so the
+    // detector must not pre-filter. At threshold 0.0 a student owning a single
+    // small WARNING violation still gets a magnitude-bearing flag for ranking.
+    let conn = common::make_db();
+    common::seed_default_project(&conn);
+    common::seed_student(&conn, "alice");
+    let v1 = insert_violation(&conn, "A.java", "r1", "WARNING");
+    insert_attribution(&conn, v1, "alice", 0.5);
+
+    let mut cfg = Config::test_default();
+    cfg.detector_thresholds.architecture_hotspot_min_weighted = 0.0;
+    detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &cfg).unwrap();
+    let details = common::artifact_flag_details_for(
+        &conn,
+        common::PROJECT_ID,
+        "ARCHITECTURE_HOTSPOT",
+        "alice",
+    )
+    .unwrap();
+    assert_eq!(details["weighted"].as_f64(), Some(0.5));
+}
+
+#[test]
 fn silent_when_weighted_sum_below_threshold() {
     let conn = common::make_db();
     common::seed_default_project(&conn);

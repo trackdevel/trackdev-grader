@@ -73,6 +73,39 @@ fn silent_when_score_below_warn_band() {
 }
 
 #[test]
+fn warn_threshold_zero_emits_magnitude_for_small_warning_blame() {
+    // Grading v4 (T3.3): with warn = 0.0 (the production course.toml value) a
+    // student with a single low-weight WARNING finding fires WARNING and the
+    // `score` magnitude is recorded for the grade_core percentile ranking; crit
+    // stays > 0 only to set the displayed severity.
+    let conn = common::make_db();
+    common::seed_default_project(&conn);
+    common::seed_student(&conn, "alice");
+    let f = insert_finding(&conn, "A.java", "f", "broad-catch", "WARNING", None, None);
+    // weight 0.5 * rank 2 = 1.0 score; below the old warn band of 4.0.
+    insert_attribution(&conn, f, "alice", 0.5);
+
+    detect_artifact_flags_for_project_id(
+        &conn,
+        common::PROJECT_ID,
+        &config_with_thresholds(0.0, 8.0),
+    )
+    .unwrap();
+    let details =
+        common::artifact_flag_details_for(&conn, common::PROJECT_ID, "COMPLEXITY_HOTSPOT", "alice")
+            .unwrap();
+    assert_eq!(details["score"].as_f64(), Some(1.0));
+    let sev = common::artifact_flag_severity_for(
+        &conn,
+        common::PROJECT_ID,
+        "COMPLEXITY_HOTSPOT",
+        "alice",
+    )
+    .unwrap();
+    assert_eq!(sev, "WARNING");
+}
+
+#[test]
 fn warning_at_warn_band() {
     let conn = common::make_db();
     common::seed_default_project(&conn);

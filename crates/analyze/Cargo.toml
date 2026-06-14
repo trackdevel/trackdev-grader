@@ -16,5 +16,6 @@ serde_json.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 rusqlite.workspace = true
+grade_core = { path = "../grade_core" }
 sprint-grader-core = { path = "../core" }
 sprint-grader-survival = { path = "../survival" }

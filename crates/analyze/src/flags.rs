@@ -1642,8 +1642,13 @@ fn architecture_hotspot(
     }
     let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
     for (student_id, severity, weight, rule_name, rule_kind, file_path) in rows {
+        let rule_weight = grade_core::arch_rule_hotspot_weight(&rule_name);
+        if rule_weight <= 0.0 {
+            continue;
+        }
+        let effective_weight = weight * rule_weight;
         let acc = by_student.entry(student_id).or_default();
-        acc.weighted += weight;
+        acc.weighted += effective_weight;
         if severity_rank(&severity) > severity_rank(&acc.worst_severity) {
             acc.worst_severity = severity.clone();
         }
@@ -1652,7 +1657,8 @@ fn architecture_hotspot(
             "rule_kind": rule_kind,
             "file_path": file_path,
             "severity": severity,
-            "weight": weight,
+            "weight": effective_weight,
+            "rule_grading_weight": rule_weight,
         }));
     }
     let mut flags = Vec::new();

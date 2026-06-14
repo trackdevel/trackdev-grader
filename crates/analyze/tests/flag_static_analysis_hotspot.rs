@@ -94,6 +94,39 @@ fn fires_when_weighted_sum_at_or_above_threshold() {
 }
 
 #[test]
+fn threshold_zero_emits_magnitude_for_small_warning_blame() {
+    // Grading v4 (T3.3): the grade_core percentile bands decide who is charged,
+    // so the detector must not pre-filter by absolute blame. At threshold 0.0 a
+    // student with a single low-weight WARNING-only finding still gets a flag
+    // with the magnitude recorded — the production course.toml sets 0.0 so the
+    // static-analysis signal reaches the ranking (the 10.0 default fired for a
+    // single student cohort-wide, starving it).
+    let conn = common::make_db();
+    common::seed_default_project(&conn);
+    common::seed_student(&conn, "alice");
+    let f1 = insert_finding(
+        &conn,
+        "A.java",
+        "UnusedImport",
+        "WARNING",
+        "checkstyle",
+        "style",
+    );
+    insert_attribution(&conn, f1, "alice", 0.5);
+
+    detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &config_with_threshold(0.0))
+        .unwrap();
+    let details = common::artifact_flag_details_for(
+        &conn,
+        common::PROJECT_ID,
+        "STATIC_ANALYSIS_HOTSPOT",
+        "alice",
+    )
+    .unwrap();
+    assert_eq!(details["weighted"].as_f64(), Some(0.5));
+}
+
+#[test]
 fn default_threshold_keeps_flag_silent() {
     // Phase-1 sign-off: the default threshold (10.0) should keep the flag
     // effectively silent — feedback-only behaviour. With 5.0 weight,
