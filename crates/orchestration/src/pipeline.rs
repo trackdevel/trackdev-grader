@@ -1360,6 +1360,7 @@ pub fn run_pipeline(
             &db.conn,
             &project_root,
             g.project_id,
+            false,
         ) {
             warn!(project = %g.name, error = %e, "project inventory scan failed");
         }
