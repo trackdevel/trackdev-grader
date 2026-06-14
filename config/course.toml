@@ -159,11 +159,22 @@ cosmetic_rewrite_pct_of_lat = 0.05
 # bulk_rename_pr: ratio = min(adds,dels) / max(adds,dels), with a line floor
 bulk_rename_adds_dels_ratio = 0.8
 bulk_rename_line_floor = 50
-# ARCHITECTURE_HOTSPOT (T-P3.1): summed blame-attribution weight at or above
-# which a student fires. 1.0 ≈ "owns one full violation"; default 2.0 picks
-# up students who own multiple violations or a clear majority of one
-# severe span.
-architecture_hotspot_min_weighted = 2.0
+# Per-student code-quality HOTSPOT detectors (ARCHITECTURE / COMPLEXITY /
+# STATIC_ANALYSIS). Grading v4 (T3.3): these no longer gate the grade — the
+# cohort-percentile bands in grade_core decide who is charged (top 10% → −1.0,
+# next 20% → −0.5 per signal, ranked by blame ÷ AI-discounted estimation
+# points). The detector threshold's only remaining job is to make each
+# student's blame *magnitude* available to that ranking, so it MUST NOT
+# pre-filter real offenders. Set to 0.0: every student with any attributed
+# blame gets a magnitude-bearing flag (incl. WARNING-only findings), and the
+# percentile bands (+ cq_abs_floor) do the selection. Before this, the SA
+# default of 10.0 fired for a single student cohort-wide, starving the
+# static-analysis signal. `complexity_hotspot_crit` stays > 0 only to set the
+# WARNING/CRITICAL severity shown in reports — it is not a grade gate.
+architecture_hotspot_min_weighted = 0.0
+static_analysis_hotspot_min_weighted = 0.0
+complexity_hotspot_warn = 0.0
+complexity_hotspot_crit = 8.0
 
 # Anti-gaming: per-run threshold jitter (T-P2.6).
 #
