@@ -3,6 +3,8 @@
 use once_cell::sync::Lazy;
 use tree_sitter::{Node, Parser};
 
+use crate::halstead::{compute_halstead, maintainability_index};
+
 static JAVA_LANG: Lazy<tree_sitter::Language> = Lazy::new(|| tree_sitter_java::LANGUAGE.into());
 
 const CC_NODE_TYPES: &[&str] = &[
@@ -51,6 +53,12 @@ pub struct MethodMetrics {
     pub parameter_count: i64,
     pub max_nesting_depth: i64,
     pub return_count: i64,
+    /// Halstead maintainability index (0–100) for this method. `comment_pct`
+    /// is held at 0 (the 3-metric MI variant) — the scan doesn't track
+    /// per-method comment density, and a uniform 0 keeps the cross-team
+    /// signal comparable. Persisted into `method_metrics.maintainability_index`
+    /// for the `quality_delta` per-student rollup.
+    pub maintainability_index: f64,
     /// 1-based line where the method declaration begins (inclusive).
     /// Wired into `method_metrics.start_line` so the testability stage
     /// can derive findings + drive bad-line-weighted blame attribution
@@ -197,16 +205,21 @@ pub fn analyze_method(node: Node, source: &[u8], file_path: &str) -> MethodMetri
             break;
         }
     }
+    let loc = count_loc(node);
+    let cc = cyclomatic_complexity(node, source);
+    let halstead = compute_halstead(node, source);
+    let mi = maintainability_index(halstead.volume, cc, loc, 0.0);
     MethodMetrics {
         file_path: file_path.to_string(),
         class_name: find_class_name(node, source),
         method_name: name,
-        loc: count_loc(node),
-        cyclomatic_complexity: cyclomatic_complexity(node, source),
+        loc,
+        cyclomatic_complexity: cc,
         cognitive_complexity: cognitive_complexity(node, source),
         parameter_count: count_parameters(node),
         max_nesting_depth: max_nesting_depth(node, source),
         return_count: count_returns(node),
+        maintainability_index: mi,
         start_line: (node.start_position().row as i64) + 1,
         end_line: (node.end_position().row as i64) + 1,
     }
@@ -269,5 +282,33 @@ mod tests {
         assert_eq!(m.return_count, 2);
         assert_eq!(m.parameter_count, 1);
         assert!(m.max_nesting_depth >= 2);
+        // Halstead MI is populated and bounded (small methods clamp high).
+        assert!(m.maintainability_index > 0.0 && m.maintainability_index <= 100.0);
+    }
+
+    #[test]
+    fn trivial_method_maintainability_clamps_high() {
+        let src = br#"class A { int f() { return 1; } }"#;
+        let m = &analyze_file("A.java", src)[0];
+        // tiny volume + 1 LOC → MI formula overshoots and clamps to 100.
+        assert!((m.maintainability_index - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn long_method_maintainability_drops_below_ceiling() {
+        // A method spanning many physical lines drives the 16.2·ln(LOC)
+        // term high enough to pull MI under the 100 ceiling — proving the
+        // index is really computed from Halstead, not a constant.
+        let mut src = String::from("class A {\n  int big() {\n    int acc = 0;\n");
+        for i in 0..40 {
+            src.push_str(&format!("    int v{i} = {i} + acc; acc = acc + v{i};\n"));
+        }
+        src.push_str("    return acc;\n  }\n}\n");
+        let m = &analyze_file("A.java", src.as_bytes())[0];
+        assert!(
+            m.maintainability_index > 0.0 && m.maintainability_index < 100.0,
+            "long method must score below the MI ceiling, got {}",
+            m.maintainability_index
+        );
     }
 }

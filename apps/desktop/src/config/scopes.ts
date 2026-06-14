@@ -1,31 +1,50 @@
 /** Known variable sets for formula scope lint (Phase 4). */
 
+/** Documented weight keys (v2 + legacy v1 names for lint hints). */
 export const WEIGHT_KEYS = [
+  "w_quality",
+  "w_complexity",
+  "w_size",
+  "w_android",
+  "w_spring",
+  "w_mi",
+  "w_arch",
+  "w_density",
+  "w_mutation",
   "w_doc",
   "w_cq",
   "w_surv",
-  "w_arch",
   "ai_strength",
   "floor_keep",
   "undeclared_model_m",
   "undeclared_level_l",
-  "max_penalty_points",
   "student_penalty_cap",
-  "crit_sa_points",
-  "crit_cx_points",
   "crit_flag_points",
-  "security_extra",
-  "doc_max",
   "mi_floor",
   "mi_ceiling",
-  "cc_penalty",
-  "test_bonus",
-  "test_cap",
-  "surv_floor",
-  "surv_ceiling",
-  "k_crit",
-  "k_warn",
   "arch_norm",
+  "density_ceiling",
+  "inventory_count_ceiling",
+  "inventory_depth_ceiling",
+  "inventory_density_ceiling",
+  "prod_loc_ceiling",
+  "prod_stmt_ceiling",
+  "quality_floor",
+  "quality_blend",
+] as const;
+
+/** Injected by grade_cohort before project formulas (Grading v3). */
+export const V2_AXIS_SCOPE = [
+  "quality",
+  "complexity",
+  "size",
+  "work_base",
+  "quality_eff",
+  "quality_multiplier",
+  "quality_present",
+  "complexity_present",
+  "size_present",
+  "work_base_present",
 ] as const;
 
 export const RAW_SCOPE = [
@@ -60,7 +79,11 @@ export const STUDENT_STRUCTURAL = [
   "student_eff",
   "ai_keep",
   "contribution",
+  "student_contribution",
   "student_critical_count",
+  // v4: cohort-percentile code-quality penalty injected per student by
+  // grade_cohort (mirror of grade.rs). Usable in student formulas.
+  "codequality_penalty",
 ] as const;
 
 export function taskKnownScope(weightKeys: string[]): Set<string> {
@@ -71,7 +94,13 @@ export function projectKnownScope(
   weightKeys: string[],
   manualNames: string[] = [],
 ): Set<string> {
-  return new Set([...weightKeys, ...RAW_SCOPE, ...STRUCTURAL_SCOPE, ...manualNames]);
+  return new Set([
+    ...weightKeys,
+    ...RAW_SCOPE,
+    ...STRUCTURAL_SCOPE,
+    ...V2_AXIS_SCOPE,
+    ...manualNames,
+  ]);
 }
 
 export function studentKnownScope(
@@ -83,6 +112,7 @@ export function studentKnownScope(
     ...weightKeys,
     ...RAW_SCOPE,
     ...STRUCTURAL_SCOPE,
+    ...V2_AXIS_SCOPE,
     ...STUDENT_STRUCTURAL,
     ...projectFormulaNames,
     ...manualNames,

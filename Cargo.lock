@@ -1639,6 +1639,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sprint-grader-core",
+ "sprint-grader-orchestration",
  "tempfile",
 ]
 
@@ -4233,6 +4234,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "grade_core",
  "rusqlite",
  "serde",
  "serde_json",
@@ -4316,7 +4318,9 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "grade_core",
  "rusqlite",
+ "serde_json",
  "sprint-grader-ai-detect",
  "sprint-grader-analyze",
  "sprint-grader-architecture",
@@ -4328,6 +4332,7 @@ dependencies = [
  "sprint-grader-evaluate-local",
  "sprint-grader-orchestration",
  "sprint-grader-process",
+ "sprint-grader-project-inventory",
  "sprint-grader-quality",
  "sprint-grader-quality-llm",
  "sprint-grader-repo-analysis",
@@ -4444,9 +4449,11 @@ name = "sprint-grader-orchestration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "grade_core",
  "libc",
  "rayon",
  "rusqlite",
+ "serde_json",
  "sha2",
  "sprint-grader-ai-detect",
  "sprint-grader-analyze",

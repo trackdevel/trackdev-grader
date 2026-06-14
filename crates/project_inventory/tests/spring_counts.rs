@@ -5,7 +5,7 @@ use std::process::Command;
 
 use rusqlite::Connection;
 use sprint_grader_core::db::apply_schema;
-use sprint_grader_project_inventory::{scan_repo_to_db, metrics};
+use sprint_grader_project_inventory::{metrics, scan_repo_to_db};
 use tempfile::TempDir;
 
 fn git_init_commit(dir: &std::path::Path) {
@@ -68,7 +68,7 @@ fn spring_repo_inventory_counts_controllers_endpoints_entities() {
     )
     .unwrap();
 
-    let summary = scan_repo_to_db(&conn, &repo, "org/spring-api", 1).expect("scan");
+    let summary = scan_repo_to_db(&conn, &repo, "org/spring-api", 1, false).expect("scan");
     assert!(!summary.skipped_unchanged);
     assert!(summary.metrics_written > 0);
 
@@ -85,4 +85,5 @@ fn spring_repo_inventory_counts_controllers_endpoints_entities() {
     assert_eq!(q(metrics::ENDPOINT_COUNT), 2.0);
     assert_eq!(q(metrics::ENTITY_COUNT), 1.0);
     assert_eq!(q(metrics::REPOSITORY_COUNT), 1.0);
+    assert!(q(metrics::PRODUCTION_STATEMENT_COUNT) >= 2.0);
 }

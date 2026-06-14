@@ -6,29 +6,9 @@ use once_cell::sync::Lazy;
 use tree_sitter::{Node, Parser};
 
 use crate::types::{Method, ParseResult, Statement, VarKind, VariableDecl};
+use sprint_grader_core::is_java_statement_kind;
 
 // ---- Node type sets (mirrors parser.py constants) ----
-
-const JAVA_STATEMENT_TYPES: &[&str] = &[
-    "expression_statement",
-    "local_variable_declaration",
-    "return_statement",
-    "if_statement",
-    "for_statement",
-    "enhanced_for_statement",
-    "while_statement",
-    "do_statement",
-    "switch_expression",
-    "switch_statement",
-    "throw_statement",
-    "try_statement",
-    "try_with_resources_statement",
-    "assert_statement",
-    "break_statement",
-    "continue_statement",
-    "yield_statement",
-    "synchronized_statement",
-];
 
 const JAVA_METHOD_TYPES: &[&str] = &["method_declaration", "constructor_declaration"];
 
@@ -43,7 +23,7 @@ const CLASS_LIKE_TYPES: &[&str] = &[
 ];
 
 fn is_stmt(kind: &str) -> bool {
-    JAVA_STATEMENT_TYPES.contains(&kind)
+    is_java_statement_kind(kind)
 }
 fn is_method(kind: &str) -> bool {
     JAVA_METHOD_TYPES.contains(&kind)

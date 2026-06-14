@@ -1,21 +1,18 @@
-//! Load a `grade_core::RawProject` from a grading.db connection (test helper).
+//! Load a `grade_core::RawProject` from a grading.db connection.
 
-#[path = "db_axis.rs"]
-mod db_axis;
-
-use db_axis::{
+use super::db_axis::{
     architecture_counts, architecture_scan_present, code_quality_raw, documentation_raw,
     project_repos, survival_raw,
 };
 use std::collections::BTreeMap;
 
+use anyhow::{Context, Result};
 use grade_core::{
-    AxisInputs, CritFinding, FindingKind, RawProject, RawStudent, RawTask, RepoMetrics,
-    StudentFlag,
+    has_gradable_artifact, hotspot_blame_magnitude, AxisInputs, RawProject, RawStudent, RawTask,
+    RepoMetrics, StudentFlag,
 };
 use rusqlite::{params, Connection};
-use sprint_grader_core::finding::{RuleKind, Severity};
-use sprint_grader_core::rule_attribution::load_attributed_findings_for_repo;
+use sprint_grader_core::Database;
 
 pub fn load_raw_project(
     conn: &Connection,
@@ -37,6 +34,7 @@ pub fn load_raw_project(
     let (cq, cc_pct, mutation) = code_quality_raw(conn, project_id, sprint_ids)?;
     let surv = survival_raw(conn, project_id, sprint_ids)?;
     let repos = project_repos(conn, project_id)?;
+    let inventory_repos = repos_for_inventory(conn, project_id, &repos)?;
     let (arch_crit, arch_warn) = architecture_counts(conn, project_id)?;
     let arch_present = architecture_scan_present(conn, &repos)?;
 
@@ -59,10 +57,10 @@ pub fn load_raw_project(
         name,
         team_size,
         axis,
-        inventory: load_inventory(conn, &repos)?,
+        inventory: load_inventory(conn, &inventory_repos)?,
         tasks: load_tasks(conn, project_id, sprint_ids)?,
         students: load_students(conn, project_id)?,
-        crit_findings: load_crit_findings(conn, project_id)?,
+        crit_findings: vec![],
         student_flags: load_student_flags(conn, project_id, sprint_ids)?,
     })
 }
@@ -77,10 +75,31 @@ fn inventory_table_exists(conn: &Connection) -> bool {
     .unwrap_or(false)
 }
 
-fn load_inventory(
+/// Union PR-linked repo names with inventory scan rows for this project.
+fn repos_for_inventory(
     conn: &Connection,
-    repos: &[String],
-) -> rusqlite::Result<Vec<RepoMetrics>> {
+    project_id: i64,
+    pr_repos: &[String],
+) -> rusqlite::Result<Vec<String>> {
+    let mut out = pr_repos.to_vec();
+    if !inventory_table_exists(conn) {
+        return Ok(out);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT repo_full_name FROM project_inventory_runs
+         WHERE project_id = ? AND metric_count > 0",
+    )?;
+    let rows = stmt.query_map(params![project_id], |r| r.get::<_, String>(0))?;
+    for row in rows {
+        let name = row?;
+        if !out.iter().any(|r| r == &name) {
+            out.push(name);
+        }
+    }
+    Ok(out)
+}
+
+fn load_inventory(conn: &Connection, repos: &[String]) -> rusqlite::Result<Vec<RepoMetrics>> {
     if !inventory_table_exists(conn) {
         return Ok(Vec::new());
     }
@@ -173,33 +192,6 @@ fn load_students(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<Raw
     rows.collect()
 }
 
-fn load_crit_findings(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<CritFinding>> {
-    let mut out = Vec::new();
-    for repo in project_repos(conn, project_id)? {
-        let mut stmt = conn.prepare(
-            "SELECT category FROM static_analysis_findings
-             WHERE repo_full_name = ? AND severity = 'CRITICAL'",
-        )?;
-        let rows = stmt.query_map(params![repo], |r| r.get::<_, Option<String>>(0))?;
-        for row in rows {
-            out.push(CritFinding {
-                kind: FindingKind::StaticAnalysis,
-                category: row?,
-            });
-        }
-        let findings = load_attributed_findings_for_repo(conn, &repo, RuleKind::Complexity)?;
-        for af in findings {
-            if af.finding.severity == Severity::Critical {
-                out.push(CritFinding {
-                    kind: FindingKind::Complexity,
-                    category: None,
-                });
-            }
-        }
-    }
-    Ok(out)
-}
-
 fn load_student_flags(
     conn: &Connection,
     project_id: i64,
@@ -213,7 +205,7 @@ fn load_student_flags(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT student_id, severity, flag_type FROM flags
+            "SELECT student_id, severity, flag_type, details FROM flags
              WHERE sprint_id IN ({placeholders})
                AND student_id NOT LIKE 'PROJECT_%'"
         );
@@ -227,10 +219,11 @@ fn load_student_flags(
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
             ))
         })?;
         for row in rows {
-            let (student_id, severity, flag_type) = row?;
+            let (student_id, severity, flag_type, details) = row?;
             if conn.query_row(
                 "SELECT COUNT(*) FROM students WHERE id = ? AND team_project_id = ?",
                 params![student_id, project_id],
@@ -239,18 +232,18 @@ fn load_student_flags(
             {
                 continue;
             }
+            let flag_type = flag_type.unwrap_or_default();
+            let weighted = flag_magnitude(&flag_type, details.as_deref());
             out.push(StudentFlag {
                 student_id,
                 severity,
                 source: "sprint".to_string(),
-                flag_type: flag_type.unwrap_or_default(),
-                weighted: 0.0,
+                flag_type,
+                weighted,
             });
         }
     }
 
-    // T2.2 mirror: hotspot artifact flags carry the per-student blame
-    // magnitude in their details JSON.
     let mut stmt = conn.prepare(
         "SELECT student_id, severity, flag_type, details FROM student_artifact_flags
          WHERE project_id = ? AND student_id NOT LIKE 'PROJECT_%'",
@@ -269,11 +262,7 @@ fn load_student_flags(
             continue;
         };
         let flag_type = flag_type.unwrap_or_default();
-        let weighted = details
-            .as_deref()
-            .and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok())
-            .map(|v| grade_core::hotspot_magnitude(&flag_type, &v))
-            .unwrap_or(0.0);
+        let weighted = flag_magnitude(&flag_type, details.as_deref());
         out.push(StudentFlag {
             student_id,
             severity: severity.unwrap_or_default(),
@@ -283,4 +272,59 @@ fn load_student_flags(
         });
     }
     Ok(out)
+}
+
+fn flag_magnitude(flag_type: &str, details: Option<&str>) -> Option<f64> {
+    let mag = hotspot_blame_magnitude(flag_type, details);
+    if mag > 0.0 {
+        Some(mag)
+    } else {
+        None
+    }
+}
+
+/// Load every project in the DB (optionally filtered by name) as `RawProject` rows.
+pub fn load_cohort_raw_projects(
+    db: &Database,
+    today: &str,
+    project_filter: Option<&[String]>,
+) -> Result<Vec<RawProject>> {
+    let project_ids = resolve_project_ids(db, project_filter)?;
+    let mut out = Vec::with_capacity(project_ids.len());
+    for pid in project_ids {
+        let sprint_ids = db
+            .sprint_ids_up_to_current(pid, today)
+            .with_context(|| format!("sprint_ids for project_id {pid}"))?;
+        let raw = load_raw_project(&db.conn, pid, &sprint_ids)
+            .with_context(|| format!("load_raw_project project_id {pid}"))?;
+        if has_gradable_artifact(&raw) {
+            out.push(raw);
+        }
+    }
+    Ok(out)
+}
+
+fn resolve_project_ids(db: &Database, project_filter: Option<&[String]>) -> Result<Vec<i64>> {
+    match project_filter {
+        Some(names) if !names.is_empty() => {
+            let mut ids = Vec::new();
+            for name in names {
+                let id: i64 = db
+                    .conn
+                    .query_row("SELECT id FROM projects WHERE name = ?", [name], |r| {
+                        r.get(0)
+                    })
+                    .with_context(|| format!("project not found: {name}"))?;
+                ids.push(id);
+            }
+            Ok(ids)
+        }
+        _ => {
+            let mut stmt = db.conn.prepare("SELECT id FROM projects ORDER BY id")?;
+            let ids = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(ids)
+        }
+    }
 }

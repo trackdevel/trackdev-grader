@@ -15,6 +15,7 @@ pub const OBSERVE_CALL_COUNT: &str = "observe_call_count";
 pub const NAV_DISPATCH_COUNT: &str = "nav_dispatch_count";
 pub const REACTIVE_STATE_FIELD_COUNT: &str = "reactive_state_field_count";
 pub const PRODUCTION_LOC: &str = "production_loc";
+pub const PRODUCTION_STATEMENT_COUNT: &str = "production_statement_count";
 pub const REACTIVE_WIRING_DENSITY: &str = "reactive_wiring_density";
 pub const NAV_DISPATCH_DENSITY: &str = "nav_dispatch_density";
 pub const AVG_CC_PER_CONTROLLER: &str = "avg_cc_per_controller";
@@ -38,6 +39,7 @@ pub const ALL_KEYS: &[&str] = &[
     NAV_DISPATCH_COUNT,
     REACTIVE_STATE_FIELD_COUNT,
     PRODUCTION_LOC,
+    PRODUCTION_STATEMENT_COUNT,
     REACTIVE_WIRING_DENSITY,
     NAV_DISPATCH_DENSITY,
     AVG_CC_PER_CONTROLLER,

@@ -867,7 +867,9 @@ use std::collections::HashMap;
 
 use rusqlite::{params, Connection};
 use sprint_grader_core::time::{containing_sprint_id, load_sprint_windows, track_min_time};
-use sprint_grader_survival::blame::{blame_file, build_email_to_student_map, EmailStudentMap};
+use sprint_grader_survival::blame::{
+    blame_file, build_email_to_student_map, BlameLine, EmailStudentMap,
+};
 use tracing::warn;
 
 /// Per-line weighting policy applied during attribution. Each variant
@@ -1249,16 +1251,47 @@ fn discover_main_java_files(repo_path: &Path) -> Vec<String> {
     out
 }
 
+/// Dominant blame author over `[start_line, end_line]`, mapped to a student
+/// id. Mirrors the per-finding blame in `attribute_findings_for_repo` but at
+/// whole-method granularity, so every `method_metrics` row carries an author
+/// for the `quality_delta` per-student rollup. Ties break on the lowest
+/// student id for determinism. Returns `None` when no line in the span
+/// resolves to a known student (e.g. vendored / generated files).
+fn dominant_method_author(
+    blame: &HashMap<u32, BlameLine>,
+    email_map: &EmailStudentMap,
+    start_line: i64,
+    end_line: i64,
+) -> Option<String> {
+    if start_line < 1 || end_line < start_line {
+        return None;
+    }
+    let mut per_student: HashMap<String, u32> = HashMap::new();
+    for ln in (start_line as u32)..=(end_line as u32) {
+        if let Some(bl) = blame.get(&ln) {
+            if let Some(sid) = resolve_student(email_map, &bl.author_email) {
+                *per_student.entry(sid).or_default() += 1;
+            }
+        }
+    }
+    let mut ranked: Vec<(String, u32)> = per_student.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.into_iter().next().map(|(sid, _)| sid)
+}
+
 /// Persist one method's metrics into `method_metrics` (the cache the
 /// rest of the quality stage already reads). Idempotent via
 /// `INSERT OR REPLACE` on the natural PK `(file_path, class_name,
-/// method_name, sprint_id)`. The `author_id` column is intentionally
-/// NULL here — the testability stage doesn't resolve method-level
-/// authorship at the metric level (attribution happens per-finding).
+/// method_name, sprint_id)`. `author_id` is the method's dominant blame
+/// author (see [`dominant_method_author`]) and `maintainability_index` is
+/// the Halstead MI computed in `analyze_file` — both feed the
+/// `quality_delta` rollup into `student_sprint_quality`. The remaining
+/// `halstead_*` columns stay NULL (unused downstream).
 fn persist_method_metrics(
     conn: &rusqlite::Connection,
     sprint_id: i64,
     metric: &MethodMetrics,
+    author_id: Option<&str>,
 ) -> rusqlite::Result<()> {
     use rusqlite::params;
     conn.execute(
@@ -1268,19 +1301,21 @@ fn persist_method_metrics(
              parameter_count, max_nesting_depth, return_count,
              halstead_volume, halstead_difficulty, halstead_effort,
              halstead_bugs, maintainability_index, start_line, end_line)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?,
-                 NULL, NULL, NULL, NULL, NULL, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 NULL, NULL, NULL, NULL, ?, ?, ?)",
         params![
             metric.file_path,
             metric.class_name,
             metric.method_name,
             sprint_id,
+            author_id,
             metric.loc,
             metric.cyclomatic_complexity,
             metric.cognitive_complexity,
             metric.parameter_count,
             metric.max_nesting_depth,
             metric.return_count,
+            metric.maintainability_index,
             metric.start_line,
             metric.end_line,
         ],
@@ -1450,6 +1485,11 @@ pub fn scan_repo_to_db(
         params![repo_full_name],
     )?;
 
+    // Identity map for stamping each method's dominant blame author into
+    // `method_metrics.author_id` (the column `compute_all_quality` groups
+    // by). Built once, reused for every file.
+    let email_map = build_email_to_student_map(conn)?;
+
     let mut written = 0usize;
     for rel in &files {
         let abs = repo_path.join(rel);
@@ -1471,12 +1511,19 @@ pub fn scan_repo_to_db(
             persist_finding(conn, project_id, repo_full_name, &f)?;
             written += 1;
         }
-        // Populate `method_metrics` so subsequent quality_delta /
-        // future testability_findings_from_db calls don't have to
-        // re-parse. method_metrics keeps its sprint_id PK column —
-        // it's not part of the artifact migration.
-        for m in crate::complexity::analyze_file(rel, &src) {
-            persist_method_metrics(conn, sprint_id_for_metrics_cache, &m)?;
+        // Populate `method_metrics` with Halstead MI (computed in
+        // `analyze_file`) and the dominant blame author per method, so
+        // `compute_all_quality` can roll up `avg_maintainability` per
+        // student. One blame per file; skipped when the file has no
+        // methods. method_metrics keeps its sprint_id PK column — it's
+        // not part of the artifact migration.
+        let methods = crate::complexity::analyze_file(rel, &src);
+        if !methods.is_empty() {
+            let blame = blame_file(repo_path, rel);
+            for m in &methods {
+                let author = dominant_method_author(&blame, &email_map, m.start_line, m.end_line);
+                persist_method_metrics(conn, sprint_id_for_metrics_cache, m, author.as_deref())?;
+            }
         }
     }
 

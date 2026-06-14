@@ -268,27 +268,9 @@ trigger_annotation = "RequestBody"
 required_annotation_regex = "^(Valid|Validated)$"
 severity = "WARNING"
 
-# SERVICE_PUBLIC_METHOD_USES_NON_DTO — public method return type.
-[[ast_rule]]
-name = "SERVICE_PUBLIC_METHOD_USES_NON_DTO"
-class_match.annotation = "Service"
-kind = "forbidden_return_type"
-visibility = "public"
-type_regex = ".+"
-type_allowlist = "(?i).*(dto|request|response).*|^(Void|Boolean|Byte|Short|Integer|Long|Float|Double|Character|String|BigDecimal|BigInteger|UUID|LocalDate|LocalDateTime|LocalTime|Instant|Duration|Period|ZonedDateTime|OffsetDateTime|Date|URI|URL|Object|Map|HashMap|Number)$"
-type_package_allowlist = "(?i)(^|\\.)(dto|dtos)(\\.|$)"
-severity = "WARNING"
-
-# SERVICE_PUBLIC_METHOD_USES_NON_DTO — public method parameter type.
-[[ast_rule]]
-name = "SERVICE_PUBLIC_METHOD_USES_NON_DTO"
-class_match.annotation = "Service"
-kind = "forbidden_method_param"
-visibility = "public"
-type_regex = ".+"
-type_allowlist = "(?i).*(dto|request|response).*|^(Void|Boolean|Byte|Short|Integer|Long|Float|Double|Character|String|BigDecimal|BigInteger|UUID|LocalDate|LocalDateTime|LocalTime|Instant|Duration|Period|ZonedDateTime|OffsetDateTime|Date|URI|URL|Object|Map|HashMap|Number)$"
-type_package_allowlist = "(?i)(^|\\.)(dto|dtos)(\\.|$)"
-severity = "WARNING"
+# SERVICE_PUBLIC_METHOD_USES_NON_DTO — DISABLED (2026-06).
+# Public service methods may legitimately use domain types without exposing them
+# on a controller boundary; excluded from grading via grade_core::policy.
 
 # SERVICE_USES_MULTIPLE_REPOSITORIES — one repository per service.
 [[ast_rule]]

@@ -1,6 +1,5 @@
 import type {
   AxisInputs,
-  CritFinding,
   RawProject,
   RawStudent,
   RawTask,
@@ -139,6 +138,30 @@ async function survivalRaw(
   return { raw: weightedSum / weightTotal, present: true };
 }
 
+async function architectureScanPresent(
+  db: SqlExecutor,
+  repos: string[],
+): Promise<boolean> {
+  for (const repo of repos) {
+    // SKIPPED_HEAD_UNCHANGED means a prior OK scan's violations are still
+    // valid (the cache gate found the same HEAD) — the data is present.
+    const row = await db.queryRow<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM architecture_runs
+       WHERE repo_full_name = ? AND status IN ('OK', 'SKIPPED_HEAD_UNCHANGED')`,
+      [repo],
+    );
+    if ((row?.n ?? 0) > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Grading v4 (T2.1): the project quality axis sees only HIGH-LEVEL architecture
+// — `layer_dependency` breaches (wrong package layering, a team-level design
+// decision). Every per-file AST rule (FINDVIEWBYID_USAGE, FRAGMENT_BYPASSES_…)
+// is charged to the offending student via the *_HOTSPOT artifact flags, not to
+// the team. Mirror of orchestration::grading_projection::db_axis::architecture_counts.
 async function architectureCounts(
   db: SqlExecutor,
   repos: string[],
@@ -146,13 +169,16 @@ async function architectureCounts(
   let crit = 0;
   let warn = 0;
   for (const repo of repos) {
-    const rows = await db.select<{ severity: string }>(
-      `SELECT severity FROM architecture_violations WHERE repo_full_name = ?`,
+    const rows = await db.select<{ severity: string; n: number }>(
+      `SELECT severity, COUNT(*) AS n FROM architecture_violations
+       WHERE repo_full_name = ? AND rule_kind = 'layer_dependency'
+       GROUP BY severity`,
       [repo],
     );
     for (const row of rows) {
-      if (row.severity === "CRITICAL") crit += 1;
-      else if (row.severity === "WARNING") warn += 1;
+      const sev = (row.severity ?? "").toUpperCase();
+      if (sev === "CRITICAL" || sev === "ERROR") crit += row.n;
+      else if (sev === "WARNING") warn += row.n;
     }
   }
   return { crit, warn };
@@ -202,32 +228,33 @@ async function loadStudents(db: SqlExecutor, projectId: number): Promise<RawStud
   return rows.map((r) => ({ student_id: r.id, full_name: r.full_name }));
 }
 
-async function loadCritFindings(
-  db: SqlExecutor,
-  projectId: number,
-): Promise<CritFinding[]> {
-  const out: CritFinding[] = [];
-  const repos = await projectRepos(db, projectId);
-  for (const repo of repos) {
-    const sa = await db.select<{ category: string | null }>(
-      `SELECT category FROM static_analysis_findings
-       WHERE repo_full_name = ? AND severity = 'CRITICAL'`,
-      [repo],
-    );
-    for (const row of sa) {
-      out.push({ kind: "static_analysis", category: row.category });
-    }
-    const cx = await db.select<{ severity: string }>(
-      `SELECT severity FROM method_complexity_findings WHERE repo_full_name = ?`,
-      [repo],
-    );
-    for (const row of cx) {
-      if (row.severity === "CRITICAL") {
-        out.push({ kind: "complexity", category: null });
-      }
-    }
+const COMPLEXITY_HOTSPOT = "COMPLEXITY_HOTSPOT";
+const HOTSPOT_FLAG_TYPES = new Set([
+  "ARCHITECTURE_HOTSPOT",
+  "COMPLEXITY_HOTSPOT",
+  "STATIC_ANALYSIS_HOTSPOT",
+]);
+
+/**
+ * Per-student blame magnitude from a hotspot flag's `details` JSON; null when
+ * absent. Mirror of grade_core::policy::hotspot_blame_magnitude wrapped in
+ * raw.rs::flag_magnitude (complexity stores `score`, arch/SA store `weighted`).
+ */
+function flagMagnitude(flagType: string, details: string | null): number | null {
+  if (!details) return null;
+  let v: { score?: unknown; weighted?: unknown };
+  try {
+    v = JSON.parse(details);
+  } catch {
+    return null;
   }
-  return out;
+  let mag = 0;
+  if (flagType === COMPLEXITY_HOTSPOT) {
+    mag = typeof v.score === "number" ? v.score : 0;
+  } else if (HOTSPOT_FLAG_TYPES.has(flagType)) {
+    mag = typeof v.weighted === "number" ? v.weighted : 0;
+  }
+  return mag > 0 ? mag : null;
 }
 
 async function loadStudentFlags(
@@ -238,10 +265,15 @@ async function loadStudentFlags(
   const out: StudentFlag[] = [];
   if (sprintIds.length > 0) {
     const ph = placeholders(sprintIds.length);
-    const rows = await db.select<{ student_id: string; severity: string }>(
-      `SELECT f.student_id, f.severity FROM flags f
-       WHERE f.sprint_id IN (${ph})
-         AND f.student_id NOT LIKE 'PROJECT_%'`,
+    const rows = await db.select<{
+      student_id: string;
+      severity: string;
+      flag_type: string | null;
+      details: string | null;
+    }>(
+      `SELECT student_id, severity, flag_type, details FROM flags
+       WHERE sprint_id IN (${ph})
+         AND student_id NOT LIKE 'PROJECT_%'`,
       sprintIds,
     );
     for (const row of rows) {
@@ -250,34 +282,80 @@ async function loadStudentFlags(
         [row.student_id, projectId],
       );
       if ((enrolled?.n ?? 0) > 0) {
+        const flagType = row.flag_type ?? "";
         out.push({
           student_id: row.student_id,
           severity: row.severity,
           source: "sprint",
+          flag_type: flagType,
+          weighted: flagMagnitude(flagType, row.details),
         });
       }
     }
   }
-  const artifacts = await db.select<{ student_id: string | null; severity: string | null }>(
-    `SELECT student_id, severity FROM student_artifact_flags
+  const artifacts = await db.select<{
+    student_id: string | null;
+    severity: string | null;
+    flag_type: string | null;
+    details: string | null;
+  }>(
+    `SELECT student_id, severity, flag_type, details FROM student_artifact_flags
      WHERE project_id = ? AND student_id NOT LIKE 'PROJECT_%'`,
     [projectId],
   );
   for (const row of artifacts) {
     if (!row.student_id) continue;
+    const flagType = row.flag_type ?? "";
     out.push({
       student_id: row.student_id,
       severity: row.severity ?? "",
       source: "artifact",
+      flag_type: flagType,
+      weighted: flagMagnitude(flagType, row.details),
     });
   }
   return out;
 }
 
+async function tableExists(db: SqlExecutor, name: string): Promise<boolean> {
+  const row = await db.queryRow<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?`,
+    [name],
+  );
+  return (row?.n ?? 0) > 0;
+}
+
+/** PR-linked repos plus any inventory scan rows for this project. */
+async function reposForInventory(
+  db: SqlExecutor,
+  projectId: number,
+  prRepos: string[],
+): Promise<string[]> {
+  const out = [...prRepos];
+  if (!(await tableExists(db, "project_inventory_runs"))) {
+    return out;
+  }
+  const rows = await db.select<{ repo_full_name: string }>(
+    `SELECT DISTINCT repo_full_name FROM project_inventory_runs
+     WHERE project_id = ? AND metric_count > 0`,
+    [projectId],
+  );
+  for (const row of rows) {
+    if (!out.includes(row.repo_full_name)) {
+      out.push(row.repo_full_name);
+    }
+  }
+  return out;
+}
+
+/** Returns [] when `repo_structural_metrics` is absent (pre–Wave 1 grading.db). */
 async function loadInventory(
   db: SqlExecutor,
   repos: string[],
 ): Promise<RepoMetrics[]> {
+  if (!(await tableExists(db, "repo_structural_metrics"))) {
+    return [];
+  }
   const out: RepoMetrics[] = [];
   for (const repo of repos) {
     const rows = await db.select<{ metric_key: string; value: number }>(
@@ -294,6 +372,18 @@ async function loadInventory(
   return out;
 }
 
+/**
+ * Project-grade axes require scanned structural inventory with non-zero code
+ * mass (T2.4). Mirror of grade_core::policy::has_gradable_artifact — story
+ * points and PR repo names alone do not qualify. Empty-artifact projects are
+ * dropped from the cohort so they never appear in the desktop lists.
+ */
+export function hasGradableArtifact(raw: RawProject): boolean {
+  const sum = (key: string): number =>
+    (raw.inventory ?? []).reduce((acc, r) => acc + (r.metrics[key] ?? 0), 0);
+  return sum("production_loc") > 0 || sum("production_statement_count") > 0;
+}
+
 export async function loadRawProject(
   db: SqlExecutor,
   projectId: number,
@@ -308,10 +398,12 @@ export async function loadRawProject(
     [projectId],
   );
   const repos = await projectRepos(db, projectId);
+  const inventoryRepos = await reposForInventory(db, projectId, repos);
   const doc = await documentationRaw(db, projectId, sprintIds);
   const cq = await codeQualityRaw(db, projectId, sprintIds);
   const surv = await survivalRaw(db, projectId, sprintIds);
   const arch = await architectureCounts(db, repos);
+  const archPresent = await architectureScanPresent(db, repos);
 
   const axis: AxisInputs = {
     documentation_raw: doc.raw,
@@ -324,7 +416,7 @@ export async function loadRawProject(
     surv_present: surv.present,
     arch_crit_count: arch.crit,
     arch_warn_count: arch.warn,
-    arch_present: repos.length > 0,
+    arch_present: archPresent,
   };
 
   return {
@@ -332,10 +424,12 @@ export async function loadRawProject(
     name: nameRow?.name ?? "",
     team_size: teamRow?.n ?? 0,
     axis,
-    inventory: await loadInventory(db, repos),
+    inventory: await loadInventory(db, inventoryRepos),
     tasks: await loadTasks(db, projectId, sprintIds),
     students: await loadStudents(db, projectId),
-    crit_findings: await loadCritFindings(db, projectId),
+    // v4 (T2.3): density is gone; criticals are charged to students via the
+    // *_HOTSPOT artifact flags, so the project carries no crit_findings.
+    crit_findings: [],
     student_flags: await loadStudentFlags(db, projectId, sprintIds),
   };
 }

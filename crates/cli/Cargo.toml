@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+serde_json.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dotenvy.workspace = true
@@ -31,6 +32,8 @@ sprint-grader-repo-analysis = { path = "../repo_analysis" }
 sprint-grader-ai-detect = { path = "../ai_detect" }
 sprint-grader-report = { path = "../report" }
 sprint-grader-orchestration = { path = "../orchestration" }
+grade_core = { path = "../grade_core" }
 sprint-grader-architecture = { path = "../architecture" }
 sprint-grader-static-analysis = { path = "../static_analysis" }
+sprint-grader-project-inventory = { path = "../project_inventory" }
 sprint-grader-quality-llm = { path = "../quality_llm" }

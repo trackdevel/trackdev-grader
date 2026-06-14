@@ -1,4 +1,5 @@
 import type { LoadedDb, GradeOutput } from "../data/types";
+import { axisScore, qualityEff } from "../logic/gradeAxes";
 import { projectReviewGate } from "../logic/gates";
 import { fmtNum } from "./SortableTable";
 import { FormulaTreeList } from "./Tree";
@@ -23,6 +24,10 @@ function KvTable({ pairs }: { pairs: Array<[string, string | number | null]> }) 
       </tbody>
     </table>
   );
+}
+
+function fmtAxis(n: number | null): string {
+  return n != null && Number.isFinite(n) ? fmtNum(n) : "—";
 }
 
 const AXIS_LABELS: Record<string, string> = {
@@ -71,6 +76,9 @@ export default function ProjectDetail({ db, grades, projectId }: Props) {
         <h3>Team grade</h3>
         <KvTable
           pairs={[
+            ["work_base", fmtAxis(axisScore(out.grades.axes, "work_base"))],
+            ["quality_eff", fmtAxis(qualityEff(out.grades.axes))],
+            ["quality_multiplier", fmtAxis(axisScore(out.grades.axes, "quality_multiplier"))],
             ["Final grade", fmtNum(out.grades.project_final)],
             ["Composite quality", fmtNum(out.grades.quality_grade)],
             ["After penalties", fmtNum(out.grades.quality_penalized)],
@@ -99,6 +107,7 @@ export default function ProjectDetail({ db, grades, projectId }: Props) {
               <th>student</th>
               <th>grade</th>
               <th>base</th>
+              <th>cq pen</th>
               <th>contribution</th>
             </tr>
           </thead>
@@ -116,6 +125,7 @@ export default function ProjectDetail({ db, grades, projectId }: Props) {
                     </td>
                     <td>{fmtNum(s.student_final)}</td>
                     <td>{fmtNum(s.base_grade)}</td>
+                    <td>{fmtNum(s.codequality_penalty)}</td>
                     <td>{s.contribution != null ? fmtNum(s.contribution, 3) : ""}</td>
                   </tr>
                 );

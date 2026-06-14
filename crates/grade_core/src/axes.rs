@@ -1,10 +1,11 @@
-//! Grading v2 project axis scores: cohort-normalized quality, size, complexity.
+//! Grading v3 project axis scores: work (size + complexity) modulated by quality.
 
 use std::collections::BTreeMap;
 
 use crate::cohort::{hybrid_normalize, CohortBounds};
+use crate::policy::{count_crit_findings, has_gradable_artifact};
 use crate::spec::GradeSpec;
-use crate::types::{CritFinding, FindingKind, RawProject, RepoMetrics};
+use crate::types::{RawProject, RepoMetrics};
 
 /// Per-project 0–10 axis scores injected into formula scope during `grade_cohort`.
 #[derive(Debug, Clone, PartialEq)]
@@ -12,9 +13,16 @@ pub struct ProjectAxisScores {
     pub quality: f64,
     pub complexity: f64,
     pub size: f64,
+    /// Present-renormalized blend of size and complexity (`w_size` / `w_complexity`).
+    pub work_base: f64,
+    /// Quality score used in the multiplier (10 when quality absent — neutral).
+    pub quality_eff: f64,
+    /// `quality_floor + quality_blend × (quality_eff / 10)`.
+    pub quality_multiplier: f64,
     pub quality_present: bool,
     pub complexity_present: bool,
     pub size_present: bool,
+    pub work_base_present: bool,
 }
 
 const SIZE_SPRING: &[&str] = &[
@@ -41,8 +49,14 @@ const COMPLEXITY_ANDROID: &[&str] = &[
     "avg_cc_per_fragment",
 ];
 
+/// Breadth slice of project size (structural counts on main).
+const W_SIZE_BREADTH: f64 = 0.70;
+/// Statement-volume slice of project size (repo-wide production methods).
+const W_SIZE_VOLUME: f64 = 0.30;
+
 pub fn repo_kind(repo_full_name: &str) -> &'static str {
-    if repo_full_name.starts_with("android-") {
+    let lower = repo_full_name.to_lowercase();
+    if lower.starts_with("android") || lower.contains("-android") || lower.contains("/android") {
         "android"
     } else {
         "spring"
@@ -53,18 +67,30 @@ pub fn repo_kind(repo_full_name: &str) -> &'static str {
 pub fn collect_cohort_samples(projects: &[RawProject]) -> BTreeMap<String, Vec<f64>> {
     let mut by_key: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for raw in projects {
-        push_sample(&mut by_key, "code_quality_raw", raw.axis.cq_present, raw.axis.code_quality_raw);
+        push_sample(
+            &mut by_key,
+            "code_quality_raw",
+            raw.axis.cq_present,
+            raw.axis.code_quality_raw,
+        );
         push_sample(
             &mut by_key,
             "mutation_score",
             raw.axis.cq_present && raw.axis.mutation_score > 0.0,
             raw.axis.mutation_score,
         );
-        let arch_weighted =
-            raw.axis.arch_crit_count * 2.0 + raw.axis.arch_warn_count * 0.5;
-        push_sample(&mut by_key, "arch_weighted", raw.axis.arch_present, arch_weighted);
+        let arch_weighted = raw.axis.arch_crit_count * 2.0 + raw.axis.arch_warn_count * 0.5;
+        push_sample(
+            &mut by_key,
+            "arch_weighted",
+            raw.axis.arch_present,
+            arch_weighted,
+        );
         if let Some(d) = violation_density_raw(raw) {
-            by_key.entry("violation_density".into()).or_default().push(d);
+            by_key
+                .entry("violation_density".into())
+                .or_default()
+                .push(d);
         }
         for repo in &raw.inventory {
             for (k, v) in &repo.metrics {
@@ -98,48 +124,26 @@ fn production_loc_k(raw: &RawProject) -> f64 {
         / 1000.0
 }
 
-fn count_crit_findings(findings: &[CritFinding]) -> (f64, f64, f64) {
-    let mut sa = 0.0;
-    let mut security = 0.0;
-    let mut cx = 0.0;
-    for f in findings {
-        match f.kind {
-            FindingKind::StaticAnalysis => {
-                sa += 1.0;
-                if f.category.as_deref() == Some("security") {
-                    security += 1.0;
-                }
-            }
-            FindingKind::Complexity => cx += 1.0,
-        }
-    }
-    (sa, security, cx)
-}
-
 /// Hybrid-normalize every tracked raw metric for one project.
-pub fn normalize_project_all(
-    raw: &RawProject,
-    bounds: &CohortBounds,
-) -> BTreeMap<String, f64> {
+pub fn normalize_project_all(raw: &RawProject, bounds: &CohortBounds) -> BTreeMap<String, f64> {
     let mut out = BTreeMap::new();
     if raw.axis.cq_present {
-        norm_insert(&mut out, bounds, "code_quality_raw", raw.axis.code_quality_raw);
+        norm_insert(
+            &mut out,
+            bounds,
+            "code_quality_raw",
+            raw.axis.code_quality_raw,
+        );
         if raw.axis.mutation_score > 0.0 {
             norm_insert(&mut out, bounds, "mutation_score", raw.axis.mutation_score);
         }
     }
     if raw.axis.arch_present {
-        let arch_weighted =
-            raw.axis.arch_crit_count * 2.0 + raw.axis.arch_warn_count * 0.5;
+        let arch_weighted = raw.axis.arch_crit_count * 2.0 + raw.axis.arch_warn_count * 0.5;
         norm_insert(&mut out, bounds, "arch_weighted", arch_weighted);
     }
     if let Some(d) = violation_density_raw(raw) {
         norm_insert(&mut out, bounds, "violation_density", d);
-    }
-    for repo in &raw.inventory {
-        for (k, v) in &repo.metrics {
-            norm_insert(&mut out, bounds, k, *v);
-        }
     }
     out
 }
@@ -153,89 +157,175 @@ fn norm_insert(out: &mut BTreeMap<String, f64>, bounds: &CohortBounds, key: &str
 /// Compute blended quality / size / complexity axis scores for one project.
 pub fn compute_project_axes(
     raw: &RawProject,
-    normalized: &BTreeMap<String, f64>,
+    _normalized: &BTreeMap<String, f64>,
+    bounds: &CohortBounds,
     spec: &GradeSpec,
 ) -> ProjectAxisScores {
+    if !has_gradable_artifact(raw) {
+        return absent_project_axes();
+    }
+
     let w = &spec.weights;
     let w_android = w.get("w_android").copied().unwrap_or(0.6);
     let w_spring = w.get("w_spring").copied().unwrap_or(0.4);
+    let w_size = w.get("w_size").copied().unwrap_or(0.2);
+    let w_complexity = w.get("w_complexity").copied().unwrap_or(0.3);
+    let quality_floor = w.get("quality_floor").copied().unwrap_or(0.25);
+    let quality_blend = w.get("quality_blend").copied().unwrap_or(0.75);
+    // v4: frozen multiplicative scale so the cohort-top work_base reaches 10
+    // (uncapped — strong future cohorts may exceed 10).
+    let work_scale = w.get("work_scale").copied().unwrap_or(1.0);
 
-    let quality = quality_axis(raw, normalized, w);
-    let size = blend_repo_axis(
-        raw,
-        normalized,
-        SIZE_ANDROID,
-        SIZE_SPRING,
-        w_android,
-        w_spring,
-    );
+    let quality = quality_axis(raw, w);
+    let breadth = blend_repo_axis(raw, bounds, SIZE_ANDROID, SIZE_SPRING, w_android, w_spring);
+    let volume = statement_volume_axis(raw, bounds);
+    let size = blend_size_axis(breadth, volume);
     let complexity = blend_repo_axis(
         raw,
-        normalized,
+        bounds,
         COMPLEXITY_ANDROID,
         COMPLEXITY_SPRING,
         w_android,
         w_spring,
     );
 
+    let work = work_base_axis(size, complexity, w_size, w_complexity);
+    let quality_eff = if quality.present { quality.score } else { 10.0 };
+    let quality_multiplier = quality_floor + quality_blend * (quality_eff / 10.0);
+
     ProjectAxisScores {
         quality: quality.score,
         complexity: complexity.score,
         size: size.score,
+        work_base: if work.present {
+            work.score * work_scale
+        } else {
+            0.0
+        },
+        quality_eff,
+        quality_multiplier,
         quality_present: quality.present,
         complexity_present: complexity.present,
         size_present: size.present,
+        work_base_present: work.present,
     }
 }
 
+pub fn absent_project_axes() -> ProjectAxisScores {
+    ProjectAxisScores {
+        quality: 0.0,
+        complexity: 0.0,
+        size: 0.0,
+        work_base: 0.0,
+        quality_eff: 0.0,
+        quality_multiplier: 0.0,
+        quality_present: false,
+        complexity_present: false,
+        size_present: false,
+        work_base_present: false,
+    }
+}
+
+fn work_base_axis(
+    size: AxisResult,
+    complexity: AxisResult,
+    w_size: f64,
+    w_complexity: f64,
+) -> AxisResult {
+    match (size.present, complexity.present) {
+        (false, false) => AxisResult {
+            score: 0.0,
+            present: false,
+        },
+        (true, false) => size,
+        (false, true) => complexity,
+        (true, true) => {
+            let denom = w_size + w_complexity;
+            AxisResult {
+                score: ((w_size * size.score + w_complexity * complexity.score) / denom)
+                    .clamp(0.0, 10.0),
+                present: true,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct AxisResult {
     score: f64,
     present: bool,
 }
 
-fn quality_axis(
-    raw: &RawProject,
-    normalized: &BTreeMap<String, f64>,
-    w: &BTreeMap<String, f64>,
-) -> AxisResult {
+/// Map a raw value onto 0–10 by pure-absolute linear interpolation between
+/// `floor` and `ceiling`, clamped. Unlike `hybrid_normalize`, this never
+/// stretches the cohort's p10/p90 across the band — so a saturated metric
+/// (the maintainability index clusters ~97) is not amplified into a full
+/// spread (Grading v4 / Q11).
+fn absolute_map(value: f64, floor: f64, ceiling: f64) -> f64 {
+    if ceiling <= floor {
+        return 0.0;
+    }
+    ((value - floor) / (ceiling - floor) * 10.0).clamp(0.0, 10.0)
+}
+
+/// Grading v4 quality axis: maintainability is the driver (absolute-mapped,
+/// not cohort-percentile), mutation folds in when present, and high-level
+/// (layer) architecture is a SUBTRACTIVE guard that only dents teams which
+/// actually break package layering. Specific architecture / complexity /
+/// static-analysis violations are charged to students, not here.
+fn quality_axis(raw: &RawProject, w: &BTreeMap<String, f64>) -> AxisResult {
     let w_mi = w.get("w_mi").copied().unwrap_or(0.35);
-    let w_arch = w.get("w_arch").copied().unwrap_or(0.30);
-    let w_density = w.get("w_density").copied().unwrap_or(0.25);
     let w_mutation = w.get("w_mutation").copied().unwrap_or(0.10);
+    let mi_floor = w.get("mi_floor").copied().unwrap_or(85.0);
+    let mi_ceiling = w.get("mi_ceiling").copied().unwrap_or(98.0);
 
     let mut terms: Vec<(f64, f64)> = Vec::new();
     if raw.axis.cq_present {
-        if let Some(&n) = normalized.get("code_quality_raw") {
-            terms.push((w_mi, n));
-        }
+        terms.push((
+            w_mi,
+            absolute_map(raw.axis.code_quality_raw, mi_floor, mi_ceiling),
+        ));
         if raw.axis.mutation_score > 0.0 {
-            if let Some(&n) = normalized.get("mutation_score") {
-                terms.push((w_mutation, n));
-            }
+            terms.push((
+                w_mutation,
+                (raw.axis.mutation_score * 10.0).clamp(0.0, 10.0),
+            ));
         }
     }
-    if raw.axis.arch_present {
-        if let Some(&n) = normalized.get("arch_weighted") {
-            terms.push((w_arch, (10.0 - n).clamp(0.0, 10.0)));
-        }
-    }
-    if let Some(&n) = normalized.get("violation_density") {
-        terms.push((w_density, (10.0 - n).clamp(0.0, 10.0)));
+    let base = present_renorm_mean(terms);
+    if !base.present {
+        // No maintainability/mutation signal → quality absent; the caller
+        // substitutes the neutral 10. The layer guard never invents quality.
+        return base;
     }
 
-    present_renorm_mean(terms)
+    // High-level architecture guard: subtract only on real layer breaches
+    // (`arch_*_count` are fed layer_dependency-only by the projection). 0 for
+    // the clean teams, so MI is not diluted by a near-constant arch term.
+    let arch_k = w.get("arch_k").copied().unwrap_or(1.0);
+    let arch_cap = w.get("arch_cap").copied().unwrap_or(3.0);
+    let arch_penalty = if raw.axis.arch_present {
+        let arch_weighted = raw.axis.arch_crit_count * 2.0 + raw.axis.arch_warn_count * 0.5;
+        (arch_k * arch_weighted).min(arch_cap)
+    } else {
+        0.0
+    };
+    AxisResult {
+        score: (base.score - arch_penalty).clamp(0.0, 10.0),
+        present: true,
+    }
 }
 
 fn blend_repo_axis(
     raw: &RawProject,
-    normalized: &BTreeMap<String, f64>,
+    bounds: &CohortBounds,
     android_keys: &[&str],
     spring_keys: &[&str],
     w_android: f64,
     w_spring: f64,
 ) -> AxisResult {
-    let android = repo_subscore(raw, normalized, "android", android_keys);
-    let spring = repo_subscore(raw, normalized, "spring", spring_keys);
+    let android = repo_subscore(raw, bounds, "android", android_keys);
+    let spring = repo_subscore(raw, bounds, "spring", spring_keys);
 
     match (android.present, spring.present) {
         (false, false) => AxisResult {
@@ -254,12 +344,7 @@ fn blend_repo_axis(
     }
 }
 
-fn repo_subscore(
-    raw: &RawProject,
-    normalized: &BTreeMap<String, f64>,
-    kind: &str,
-    keys: &[&str],
-) -> AxisResult {
+fn repo_subscore(raw: &RawProject, bounds: &CohortBounds, kind: &str, keys: &[&str]) -> AxisResult {
     let repos: Vec<&RepoMetrics> = raw
         .inventory
         .iter()
@@ -275,9 +360,9 @@ fn repo_subscore(
     for repo in repos {
         let mut vals = Vec::new();
         for key in keys {
-            if repo.metrics.contains_key(*key) {
-                if let Some(&n) = normalized.get(*key) {
-                    vals.push(n);
+            if let Some(&v) = repo.metrics.get(*key) {
+                if let Some(b) = bounds.metrics.get(*key) {
+                    vals.push(hybrid_normalize(v, b));
                 }
             }
         }
@@ -294,6 +379,50 @@ fn repo_subscore(
     AxisResult {
         score: scores.iter().sum::<f64>() / scores.len() as f64,
         present: true,
+    }
+}
+
+fn statement_volume_axis(raw: &RawProject, bounds: &CohortBounds) -> AxisResult {
+    let total: f64 = raw
+        .inventory
+        .iter()
+        .map(|r| {
+            r.metrics
+                .get("production_statement_count")
+                .copied()
+                .unwrap_or(0.0)
+        })
+        .sum();
+    if total <= 0.0 {
+        return AxisResult {
+            score: 0.0,
+            present: false,
+        };
+    }
+    let Some(b) = bounds.metrics.get("production_statement_count") else {
+        return AxisResult {
+            score: 0.0,
+            present: false,
+        };
+    };
+    AxisResult {
+        score: hybrid_normalize(total, b).clamp(0.0, 10.0),
+        present: true,
+    }
+}
+
+fn blend_size_axis(breadth: AxisResult, volume: AxisResult) -> AxisResult {
+    match (breadth.present, volume.present) {
+        (false, false) => AxisResult {
+            score: 0.0,
+            present: false,
+        },
+        (true, false) => breadth,
+        (false, true) => volume,
+        (true, true) => AxisResult {
+            score: (W_SIZE_BREADTH * breadth.score + W_SIZE_VOLUME * volume.score).clamp(0.0, 10.0),
+            present: true,
+        },
     }
 }
 
@@ -315,7 +444,7 @@ fn present_renorm_mean(terms: Vec<(f64, f64)>) -> AxisResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AxisInputs, RawStudent};
+    use crate::types::{AxisInputs, CritFinding, FindingKind, RawStudent};
 
     fn project_with_inventory() -> RawProject {
         RawProject {
@@ -361,7 +490,9 @@ mod tests {
     #[test]
     fn violation_density_uses_prod_loc_k() {
         let mut raw = project_with_inventory();
-        raw.inventory[0].metrics.insert("production_loc".into(), 2000.0);
+        raw.inventory[0]
+            .metrics
+            .insert("production_loc".into(), 2000.0);
         raw.crit_findings.push(CritFinding {
             kind: FindingKind::StaticAnalysis,
             category: None,
@@ -371,8 +502,94 @@ mod tests {
     }
 
     #[test]
-    fn repo_kind_detects_android_prefix() {
+    fn work_base_blends_size_and_complexity_legacy_weights() {
+        let size = AxisResult {
+            score: 5.0,
+            present: true,
+        };
+        let complexity = AxisResult {
+            score: 7.5,
+            present: true,
+        };
+        let work = work_base_axis(size, complexity, 0.2, 0.3);
+        assert!((work.score - 6.5).abs() < 1e-9);
+        assert!(work.present);
+    }
+
+    #[test]
+    fn v3_multiplier_at_zero_quality_retains_quarter_of_work() {
+        let quality_floor: f64 = 0.25;
+        let quality_blend: f64 = 0.75;
+        let quality_eff: f64 = 0.0;
+        let m = quality_floor + quality_blend * (quality_eff / 10.0);
+        assert!((m - 0.25).abs() < 1e-9);
+        let work_base: f64 = 8.0;
+        assert!((work_base * m - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quality_axis_maps_mi_absolute_without_amplification() {
+        let mut w = BTreeMap::new();
+        w.insert("w_mi".into(), 0.35);
+        w.insert("w_mutation".into(), 0.10);
+        w.insert("mi_floor".into(), 85.0);
+        w.insert("mi_ceiling".into(), 98.0);
+        let mut a = project_with_inventory();
+        a.axis.mutation_score = 0.0;
+        a.axis.arch_present = false;
+        let mut b = a.clone();
+        a.axis.code_quality_raw = 97.0;
+        b.axis.code_quality_raw = 98.0;
+        // 97 vs 98 MI → a sub-point quality gap (no cohort-percentile blow-up).
+        let (qa, qb) = (quality_axis(&a, &w), quality_axis(&b, &w));
+        assert!(qb.score > qa.score && (qb.score - qa.score).abs() < 1.0);
+        // A bloated team (MI 87) maps near the absolute floor.
+        let mut c = a.clone();
+        c.axis.code_quality_raw = 87.0;
+        assert!(quality_axis(&c, &w).score < 2.5);
+    }
+
+    #[test]
+    fn quality_axis_subtracts_layer_arch_penalty() {
+        let mut w = BTreeMap::new();
+        w.insert("w_mi".into(), 0.35);
+        w.insert("mi_floor".into(), 85.0);
+        w.insert("mi_ceiling".into(), 98.0);
+        w.insert("arch_k".into(), 1.0);
+        w.insert("arch_cap".into(), 3.0);
+        let mut clean = project_with_inventory();
+        clean.axis.mutation_score = 0.0;
+        clean.axis.code_quality_raw = 98.0; // MI_abs = 10.0
+        clean.axis.arch_present = true;
+        clean.axis.arch_crit_count = 0.0;
+        clean.axis.arch_warn_count = 0.0;
+        let mut breach = clean.clone();
+        breach.axis.arch_warn_count = 4.0; // arch_weighted = 2.0 → penalty 2.0
+        assert!((quality_axis(&clean, &w).score - 10.0).abs() < 1e-9);
+        assert!((quality_axis(&breach, &w).score - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn size_axis_blends_breadth_and_statement_volume() {
+        let breadth = AxisResult {
+            score: 8.0,
+            present: true,
+        };
+        let volume = AxisResult {
+            score: 4.0,
+            present: true,
+        };
+        let blended = blend_size_axis(breadth, volume);
+        let expected = W_SIZE_BREADTH * 8.0 + W_SIZE_VOLUME * 4.0;
+        assert!((blended.score - expected).abs() < 1e-9);
+        assert!(blended.present);
+    }
+
+    #[test]
+    fn repo_kind_detects_android_repos() {
         assert_eq!(repo_kind("android-foo"), "android");
+        assert_eq!(repo_kind("udg-pds/android-pds26_1a"), "android");
         assert_eq!(repo_kind("org/spring"), "spring");
+        assert_eq!(repo_kind("udg-pds/spring-pds26_1a"), "spring");
     }
 }

@@ -2,33 +2,62 @@
 
 use std::collections::BTreeMap;
 
-use crate::axes::{compute_project_axes, normalize_project_all, ProjectAxisScores};
+use crate::axes::{
+    absent_project_axes, compute_project_axes, normalize_project_all, ProjectAxisScores,
+};
 use crate::cohort::{compute_cohort_bounds, CohortGradeOutput, CohortProjectGrade};
 use crate::formula::{eval, EvalError, Scope};
+use crate::policy::has_gradable_artifact;
 use crate::shape::{aggregate, resolve_tasks};
 use crate::spec::{
     AxisGrade, GradeOutput, GradeSpec, GradeTrees, NamedNode, ProjectGrades, StudentGrades,
     StudentTree, TaskTree,
 };
-use crate::types::{RawProject, TaskScope};
+use crate::types::{ProjectScopes, RawProject, TaskScope};
 
 struct CohortCtx {
     axes: ProjectAxisScores,
+    codequality_penalties: BTreeMap<(i64, String), f64>,
 }
 
-/// Grade an entire cohort: compute hybrid bounds from all projects, then grade
-/// each project with the current formula spec. Bounds and per-metric normalized
-/// previews are returned for explainability.
+/// Grade an entire cohort: compute hybrid bounds from gradable projects, then grade
+/// each gradable project with the current formula spec.
 pub fn grade_cohort(
     projects: &[RawProject],
     spec: &GradeSpec,
 ) -> Result<CohortGradeOutput, EvalError> {
-    let bounds = compute_cohort_bounds(projects, spec);
-    let mut graded = Vec::with_capacity(projects.len());
-    for raw in projects {
+    let gradable: Vec<&RawProject> = projects
+        .iter()
+        .filter(|p| has_gradable_artifact(p))
+        .collect();
+    let gradable_owned: Vec<RawProject> = gradable.iter().map(|p| (*p).clone()).collect();
+    let bounds = compute_cohort_bounds(&gradable_owned, spec);
+
+    let mut scoped = Vec::with_capacity(gradable.len());
+    for raw in &gradable {
+        let scopes = project_scopes(raw, spec)?;
+        scoped.push((raw.project_id, scopes));
+    }
+    let cq_penalties = codequality_penalties(&scoped, &spec.weights);
+
+    let mut graded = Vec::with_capacity(gradable.len());
+    for raw in &gradable {
         let normalized = normalize_project_all(raw, &bounds);
-        let axes = compute_project_axes(raw, &normalized, spec);
-        let output = grade_project(raw, spec, Some(&CohortCtx { axes }))?;
+        let axes = compute_project_axes(raw, &normalized, &bounds, spec);
+        let scopes = scoped
+            .iter()
+            .find(|(pid, _)| *pid == raw.project_id)
+            .map(|(_, s)| s)
+            .expect("scopes for gradable project");
+        let output = grade_project_with_scopes(
+            raw,
+            spec,
+            scopes,
+            Some(&CohortCtx {
+                axes,
+                codequality_penalties: cq_penalties.clone(),
+            }),
+        )?;
         graded.push(CohortProjectGrade {
             project_id: raw.project_id,
             output,
@@ -42,6 +71,18 @@ pub fn grade_cohort(
 }
 
 pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalError> {
+    if !has_gradable_artifact(raw) {
+        let scopes = project_scopes(raw, spec)?;
+        return grade_project_with_scopes(
+            raw,
+            spec,
+            &scopes,
+            Some(&CohortCtx {
+                axes: absent_project_axes(),
+                codequality_penalties: BTreeMap::new(),
+            }),
+        );
+    }
     let out = grade_cohort(std::slice::from_ref(raw), spec)?;
     out.projects
         .into_iter()
@@ -52,9 +93,104 @@ pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalErro
         })
 }
 
-fn grade_project(
+fn project_scopes(raw: &RawProject, spec: &GradeSpec) -> Result<ProjectScopes, EvalError> {
+    let maps = spec.ai_maps();
+    let resolved = resolve_tasks(raw, &maps);
+    let mut task_keeps = Vec::with_capacity(resolved.len());
+    for task_scope in &resolved {
+        let mut scope = task_scope_to_formula_scope(task_scope, &spec.weights);
+        for fd in &spec.formulas.task {
+            let node = eval(&fd.expr, &scope, &fd.name, &fd.infix)?;
+            scope.insert(fd.name.clone(), node.value);
+        }
+        let keep = scope.get("keep").copied().unwrap_or(1.0);
+        task_keeps.push((task_scope.clone(), keep));
+    }
+    Ok(aggregate(raw, &task_keeps, &spec.aggregate_knobs()))
+}
+
+/// Cohort-wide per-student code-quality penalty from percentile bands per signal.
+fn codequality_penalties(
+    scoped: &[(i64, ProjectScopes)],
+    weights: &BTreeMap<String, f64>,
+) -> BTreeMap<(i64, String), f64> {
+    let cq_min_points = weights.get("cq_min_points").copied().unwrap_or(1.0);
+    let cq_abs_floor = weights.get("cq_abs_floor").copied().unwrap_or(0.0);
+    let cq_crit_pct = weights.get("cq_crit_pct").copied().unwrap_or(0.10);
+    let cq_warn_pct = weights.get("cq_warn_pct").copied().unwrap_or(0.30);
+    let cq_crit_pts = weights.get("cq_crit_pts").copied().unwrap_or(1.0);
+    let cq_warn_pts = weights.get("cq_warn_pts").copied().unwrap_or(0.5);
+    let cq_cap = weights.get("cq_cap").copied().unwrap_or(3.0);
+
+    let mut rows: Vec<(i64, String, f64, f64, f64, f64)> = Vec::new();
+    for (project_id, scopes) in scoped {
+        for stu in &scopes.students {
+            rows.push((
+                *project_id,
+                stu.student_id.clone(),
+                stu.student_eff,
+                stu.arch_blame,
+                stu.cx_blame,
+                stu.sa_blame,
+            ));
+        }
+    }
+
+    let mut out: BTreeMap<(i64, String), f64> = BTreeMap::new();
+    for blame_idx in 3usize..=5 {
+        let mut ranked: Vec<(i64, String, f64)> = rows
+            .iter()
+            .filter_map(|(pid, sid, eff, arch, cx, sa)| {
+                let blame = match blame_idx {
+                    3 => *arch,
+                    4 => *cx,
+                    _ => *sa,
+                };
+                if blame <= 0.0 {
+                    return None;
+                }
+                let bpp = blame / eff.max(cq_min_points);
+                if bpp < cq_abs_floor {
+                    return None;
+                }
+                Some((*pid, sid.clone(), bpp))
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        let n = ranked.len();
+        if n == 0 {
+            continue;
+        }
+        let crit_cutoff = (n as f64 * cq_crit_pct).ceil() as usize;
+        let warn_cutoff = (n as f64 * cq_warn_pct).ceil() as usize;
+        for (i, (pid, sid, _bpp)) in ranked.iter().enumerate() {
+            let tier = if i < crit_cutoff {
+                cq_crit_pts
+            } else if i < warn_cutoff {
+                cq_warn_pts
+            } else {
+                0.0
+            };
+            if tier > 0.0 {
+                let entry = out.entry((*pid, sid.clone())).or_insert(0.0);
+                *entry += tier;
+            }
+        }
+    }
+    for pen in out.values_mut() {
+        *pen = pen.min(cq_cap);
+    }
+    out
+}
+
+fn grade_project_with_scopes(
     raw: &RawProject,
     spec: &GradeSpec,
+    scopes: &ProjectScopes,
     cohort: Option<&CohortCtx>,
 ) -> Result<GradeOutput, EvalError> {
     let maps = spec.ai_maps();
@@ -86,11 +222,9 @@ fn grade_project(
         task_keeps.push((task_scope.clone(), keep));
     }
 
-    let scopes = aggregate(raw, &task_keeps, &spec.aggregate_knobs());
     let manual = spec.manual_field_values(raw.project_id);
     let axis_scores = cohort.map(|c| &c.axes);
-    let mut project_scope =
-        build_project_scope(raw, &scopes, &spec.weights, &manual, axis_scores);
+    let mut project_scope = build_project_scope(raw, scopes, &spec.weights, &manual, axis_scores);
     let mut project_tree = Vec::new();
     for fd in &spec.formulas.project {
         let node = eval(&fd.expr, &project_scope, &fd.name, &fd.infix)?;
@@ -101,10 +235,12 @@ fn grade_project(
         });
     }
 
-    let quality_grade = project_scope
-        .get("quality")
-        .copied()
-        .unwrap_or_else(|| project_scope.get("quality_composite").copied().unwrap_or(0.0));
+    let quality_grade = project_scope.get("quality").copied().unwrap_or_else(|| {
+        project_scope
+            .get("quality_composite")
+            .copied()
+            .unwrap_or(0.0)
+    });
     let project_final_raw = project_scope.get("project_final").copied().unwrap_or(0.0);
 
     let axes = build_axis_grades(axis_scores, &project_scope);
@@ -119,9 +255,18 @@ fn grade_project(
             .map(|(t, _)| t.raw_points)
             .sum();
 
+        let cq_penalty = cohort
+            .and_then(|c| {
+                c.codequality_penalties
+                    .get(&(raw.project_id, stu.student_id.clone()))
+                    .copied()
+            })
+            .unwrap_or(0.0);
+
         let mut stu_scope = project_scope.clone();
         stu_scope.insert("student_eff".into(), stu.student_eff);
         stu_scope.insert("student_critical_count".into(), stu.student_critical_count);
+        stu_scope.insert("codequality_penalty".into(), cq_penalty);
         if let Some(k) = stu.ai_keep {
             stu_scope.insert("ai_keep".into(), k);
         }
@@ -161,6 +306,7 @@ fn grade_project(
             contribution: stu.contribution,
             base_grade: round_grade(base_grade, spec.meta.decimals, spec.meta.quantize_final),
             student_penalty,
+            codequality_penalty: cq_penalty,
             student_final,
         });
         student_trees.push(StudentTree {
@@ -209,7 +355,7 @@ fn task_scope_to_formula_scope(task: &TaskScope, weights: &BTreeMap<String, f64>
 
 fn build_project_scope(
     raw: &RawProject,
-    scopes: &crate::types::ProjectScopes,
+    scopes: &ProjectScopes,
     weights: &BTreeMap<String, f64>,
     manual: &BTreeMap<String, f64>,
     axis_scores: Option<&ProjectAxisScores>,
@@ -243,9 +389,13 @@ fn build_project_scope(
         scope.insert("quality".into(), ax.quality);
         scope.insert("complexity".into(), ax.complexity);
         scope.insert("size".into(), ax.size);
+        scope.insert("work_base".into(), ax.work_base);
+        scope.insert("quality_eff".into(), ax.quality_eff);
+        scope.insert("quality_multiplier".into(), ax.quality_multiplier);
         scope.insert("quality_present".into(), bool01(ax.quality_present));
         scope.insert("complexity_present".into(), bool01(ax.complexity_present));
         scope.insert("size_present".into(), bool01(ax.size_present));
+        scope.insert("work_base_present".into(), bool01(ax.work_base_present));
     }
     // Manual per-project fields, injected last. `or_insert` is defensive: a
     // name collision (which the spec validator rejects) can never clobber a
@@ -263,10 +413,10 @@ fn build_axis_grades(
     if let Some(ax) = axis_scores {
         return vec![
             AxisGrade {
-                key: "quality".into(),
+                key: "size".into(),
                 raw: None,
-                score: Some(ax.quality),
-                present: ax.quality_present,
+                score: Some(ax.size),
+                present: ax.size_present,
             },
             AxisGrade {
                 key: "complexity".into(),
@@ -275,22 +425,32 @@ fn build_axis_grades(
                 present: ax.complexity_present,
             },
             AxisGrade {
-                key: "size".into(),
+                key: "quality".into(),
                 raw: None,
-                score: Some(ax.size),
-                present: ax.size_present,
+                score: Some(ax.quality),
+                present: ax.quality_present,
+            },
+            AxisGrade {
+                key: "work_base".into(),
+                raw: None,
+                score: Some(ax.work_base),
+                present: ax.work_base_present,
+            },
+            AxisGrade {
+                key: "quality_multiplier".into(),
+                raw: None,
+                score: Some(ax.quality_multiplier),
+                present: ax.work_base_present,
             },
         ];
     }
     // Legacy v1 axis keys when cohort context is absent (should not occur in production).
-    vec![
-        AxisGrade {
-            key: "quality".into(),
-            raw: None,
-            score: project_scope.get("quality_composite").copied(),
-            present: project_scope.get("quality_composite").is_some(),
-        },
-    ]
+    vec![AxisGrade {
+        key: "quality".into(),
+        raw: None,
+        score: project_scope.get("quality_composite").copied(),
+        present: project_scope.get("quality_composite").is_some(),
+    }]
 }
 
 fn bool01(b: bool) -> f64 {
@@ -317,7 +477,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::types::{AxisInputs, RawStudent};
+    use crate::types::{AxisInputs, RawStudent, RepoMetrics};
 
     fn fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/tests/fixtures")
@@ -413,6 +573,15 @@ mod tests {
                     pid,
                     &format!("{sid}.student_penalty"),
                 );
+                if let Some(cq) = exp_stu.get("codequality_penalty").and_then(|v| v.as_f64()) {
+                    assert_close(
+                        stu.codequality_penalty,
+                        cq,
+                        tol,
+                        pid,
+                        &format!("{sid}.codequality_penalty"),
+                    );
+                }
                 assert_close(
                     stu.student_final,
                     exp_stu["final_grade"].as_f64().unwrap(),
@@ -429,6 +598,37 @@ mod tests {
             (actual - expected).abs() <= tol,
             "project {pid} {field}: got {actual}, expected {expected}, tol {tol}"
         );
+    }
+
+    #[test]
+    fn empty_shell_without_inventory_scores_zero_project_final() {
+        let spec = load_spec();
+        let raw = RawProject {
+            project_id: 1,
+            name: "test".into(),
+            team_size: 3,
+            axis: AxisInputs {
+                documentation_raw: 0.0,
+                doc_present: false,
+                code_quality_raw: 0.0,
+                cc_pct: 0.0,
+                mutation_score: 0.0,
+                cq_present: false,
+                survival_raw: 0.0,
+                surv_present: false,
+                arch_crit_count: 0.0,
+                arch_warn_count: 0.0,
+                arch_present: true,
+            },
+            inventory: vec![],
+            tasks: vec![],
+            students: vec![],
+            crit_findings: vec![],
+            student_flags: vec![],
+        };
+        let out = grade(&raw, &spec).unwrap();
+        assert!((out.grades.project_final - 0.0).abs() < 1e-9);
+        assert!(!out.grades.axes.iter().any(|a| a.present));
     }
 
     #[test]
@@ -566,5 +766,149 @@ mod tests {
     fn empty_manual_fields_inject_nothing() {
         let spec = load_spec();
         assert!(spec.manual_field_values(99).is_empty());
+    }
+
+    #[test]
+    fn codequality_penalty_ranks_per_point_and_caps() {
+        use crate::policy::ARCHITECTURE_HOTSPOT;
+        use crate::types::{RepoMetrics, StudentFlag};
+        use std::collections::BTreeMap;
+
+        let mut spec = load_spec();
+        spec.weights.insert("cq_min_points".into(), 1.0);
+        spec.weights.insert("cq_abs_floor".into(), 0.0);
+        spec.weights.insert("cq_crit_pct".into(), 0.10);
+        spec.weights.insert("cq_warn_pct".into(), 0.30);
+        spec.weights.insert("cq_crit_pts".into(), 1.0);
+        spec.weights.insert("cq_warn_pts".into(), 0.5);
+        spec.weights.insert("cq_cap".into(), 3.0);
+
+        let inv = || {
+            vec![RepoMetrics {
+                repo_full_name: "r".into(),
+                metrics: BTreeMap::from([("production_loc".into(), 1000.0)]),
+            }]
+        };
+
+        // Ten gradable students with nonzero arch blame; top bpp → crit, next two → warn.
+        let mut projects = Vec::new();
+        for (pid, bpp_target) in [
+            (1, 5.0),
+            (2, 4.0),
+            (3, 3.0),
+            (4, 2.0),
+            (5, 1.0),
+            (6, 0.9),
+            (7, 0.8),
+            (8, 0.7),
+            (9, 0.6),
+            (10, 0.5),
+        ]
+        .iter()
+        {
+            let (pid, bpp) = (*pid, *bpp_target);
+            let eff = 10.0;
+            let blame = bpp * eff;
+            let sid = format!("s{pid}");
+            projects.push(RawProject {
+                project_id: pid,
+                name: format!("p{pid}"),
+                team_size: 1,
+                axis: AxisInputs {
+                    documentation_raw: 0.0,
+                    doc_present: false,
+                    code_quality_raw: 0.0,
+                    cc_pct: 0.0,
+                    mutation_score: 0.0,
+                    cq_present: false,
+                    survival_raw: 0.0,
+                    surv_present: false,
+                    arch_crit_count: 0.0,
+                    arch_warn_count: 0.0,
+                    arch_present: false,
+                },
+                inventory: inv(),
+                tasks: vec![crate::types::RawTask {
+                    assignee_id: sid.clone(),
+                    raw_points: eff,
+                    ai_model: Some("Cap".into()),
+                    ai_level: Some("A".into()),
+                    declared: true,
+                }],
+                students: vec![RawStudent {
+                    student_id: sid.clone(),
+                    full_name: sid.clone(),
+                }],
+                crit_findings: vec![],
+                student_flags: vec![StudentFlag {
+                    student_id: sid,
+                    severity: "CRITICAL".into(),
+                    source: "artifact".into(),
+                    flag_type: ARCHITECTURE_HOTSPOT.into(),
+                    weighted: Some(blame),
+                }],
+            });
+        }
+
+        let cohort = grade_cohort(&projects, &spec).unwrap();
+        let pen = |sid: &str| {
+            cohort
+                .projects
+                .iter()
+                .flat_map(|p| p.output.grades.students.iter())
+                .find(|s| s.student_id == sid)
+                .unwrap()
+                .codequality_penalty
+        };
+        assert!((pen("s1") - 1.0).abs() < 1e-9);
+        assert!((pen("s2") - 0.5).abs() < 1e-9);
+        assert!((pen("s3") - 0.5).abs() < 1e-9);
+        assert!((pen("s4") - 0.0).abs() < 1e-9);
+        assert!((pen("s10") - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn grade_cohort_skips_empty_shell_projects() {
+        let spec = load_spec();
+        let gradable = RawProject {
+            project_id: 1,
+            name: "ok".into(),
+            team_size: 1,
+            axis: AxisInputs {
+                documentation_raw: 0.0,
+                doc_present: false,
+                code_quality_raw: 0.0,
+                cc_pct: 0.0,
+                mutation_score: 0.0,
+                cq_present: false,
+                survival_raw: 0.0,
+                surv_present: false,
+                arch_crit_count: 0.0,
+                arch_warn_count: 0.0,
+                arch_present: false,
+            },
+            inventory: vec![RepoMetrics {
+                repo_full_name: "r".into(),
+                metrics: std::collections::BTreeMap::from([("production_loc".into(), 500.0)]),
+            }],
+            tasks: vec![],
+            students: vec![],
+            crit_findings: vec![],
+            student_flags: vec![],
+        };
+        let empty = RawProject {
+            project_id: 99,
+            name: "shell".into(),
+            team_size: 1,
+            axis: gradable.axis.clone(),
+            inventory: vec![],
+            tasks: vec![],
+            students: vec![],
+            crit_findings: vec![],
+            student_flags: vec![],
+        };
+        let cohort = grade_cohort(&[gradable, empty], &spec).unwrap();
+        assert_eq!(cohort.projects.len(), 1);
+        assert_eq!(cohort.projects[0].project_id, 1);
     }
 }

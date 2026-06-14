@@ -1,9 +1,6 @@
 //! Axis raw loaders for test DB projection (mirrors grading_xlsx normalize SQL).
 
-use grade_core::arch_rule_grading_weight;
 use rusqlite::{params, Connection};
-use sprint_grader_core::finding::{RuleKind, Severity};
-use sprint_grader_core::rule_attribution::load_attributed_findings_for_repo;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AxisRaw {
@@ -216,21 +213,30 @@ pub fn architecture_scan_present(conn: &Connection, repos: &[String]) -> rusqlit
     Ok(false)
 }
 
+/// Grading v4: the project quality axis sees only **high-level** architecture
+/// — `layer_dependency` breaches (wrong package layering, a team-level design
+/// decision). Every per-file AST rule (`FINDVIEWBYID_USAGE`,
+/// `FRAGMENT_BYPASSES_VIEWMODEL`, …) is charged to the offending student via
+/// the `*_HOTSPOT` artifact flags, not to the team.
 pub fn architecture_counts(conn: &Connection, project_id: i64) -> rusqlite::Result<(f64, f64)> {
     let repos = project_repos(conn, project_id)?;
     let mut crit = 0.0;
     let mut warn = 0.0;
     for repo in &repos {
-        let findings = load_attributed_findings_for_repo(conn, repo, RuleKind::Architecture)?;
-        for af in findings {
-            let w = arch_rule_grading_weight(&af.finding.rule_id);
-            if w <= 0.0 {
-                continue;
-            }
-            match af.finding.severity {
-                Severity::Critical => crit += w,
-                Severity::Warning => warn += w,
-                Severity::Info => {}
+        let mut stmt = conn.prepare(
+            "SELECT severity, COUNT(*) FROM architecture_violations
+             WHERE repo_full_name = ? AND rule_kind = 'layer_dependency'
+             GROUP BY severity",
+        )?;
+        let rows = stmt.query_map(params![repo], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (severity, n) = row?;
+            match severity.to_ascii_uppercase().as_str() {
+                "CRITICAL" | "ERROR" => crit += n as f64,
+                "WARNING" => warn += n as f64,
+                _ => {}
             }
         }
     }

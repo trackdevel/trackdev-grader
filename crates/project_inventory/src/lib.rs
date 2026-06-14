@@ -123,50 +123,55 @@ fn production_files(files: &[ScannedFile]) -> Vec<&ScannedFile> {
 }
 
 /// Scan one cloned repo and persist structural metrics. Idempotent per
-/// `(repo_full_name)`; skips when HEAD matches the last successful run.
+/// `(repo_full_name)`; skips when HEAD matches the last successful run
+/// unless `force` is true (e.g. scanner added a new metric key).
 pub fn scan_repo_to_db(
     conn: &Connection,
     repo_path: &Path,
     repo_full_name: &str,
     project_id: i64,
+    force: bool,
 ) -> rusqlite::Result<ScanSummary> {
     let started = Instant::now();
     let head = git_head_sha(repo_path);
 
-    if let (Some(current), Some(cached)) = (head.as_deref(), cached_head_sha(conn, repo_full_name))
-    {
-        if current == cached {
-            let kept: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM repo_structural_metrics WHERE repo_full_name = ?",
-                    params![repo_full_name],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            record_run(
-                conn,
-                RunRecord {
-                    repo_full_name,
-                    project_id,
-                    status: STATUS_SKIPPED_HEAD_UNCHANGED,
-                    metric_count: kept as usize,
+    if !force {
+        if let (Some(current), Some(cached)) =
+            (head.as_deref(), cached_head_sha(conn, repo_full_name))
+        {
+            if current == cached {
+                let kept: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM repo_structural_metrics WHERE repo_full_name = ?",
+                        params![repo_full_name],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                record_run(
+                    conn,
+                    RunRecord {
+                        repo_full_name,
+                        project_id,
+                        status: STATUS_SKIPPED_HEAD_UNCHANGED,
+                        metric_count: kept as usize,
+                        file_count: 0,
+                        duration_ms: started.elapsed().as_millis() as i64,
+                        head_sha: Some(current),
+                        diagnostics: None,
+                    },
+                )?;
+                info!(
+                    repo = repo_full_name,
+                    head = %current,
+                    cached_metrics = kept,
+                    "project inventory skipped (head unchanged)"
+                );
+                return Ok(ScanSummary {
+                    metrics_written: 0,
                     file_count: 0,
-                    duration_ms: started.elapsed().as_millis() as i64,
-                    head_sha: Some(current),
-                    diagnostics: None,
-                },
-            )?;
-            info!(
-                repo = repo_full_name,
-                head = %current,
-                cached_metrics = kept,
-                "project inventory skipped (head unchanged)"
-            );
-            return Ok(ScanSummary {
-                metrics_written: 0,
-                file_count: 0,
-                skipped_unchanged: true,
-            });
+                    skipped_unchanged: true,
+                });
+            }
         }
     }
 
@@ -186,7 +191,10 @@ pub fn scan_repo_to_db(
                 diagnostics: None,
             },
         )?;
-        info!(repo = repo_full_name, "project inventory: no production sources");
+        info!(
+            repo = repo_full_name,
+            "project inventory: no production sources"
+        );
         return Ok(ScanSummary {
             metrics_written: 0,
             file_count: 0,
@@ -242,6 +250,7 @@ pub fn scan_project_to_db(
     conn: &Connection,
     project_root: &Path,
     project_id: i64,
+    force: bool,
 ) -> rusqlite::Result<usize> {
     if !project_root.is_dir() {
         warn!(
@@ -262,7 +271,7 @@ pub fn scan_project_to_db(
         let repo_path = entry.path();
         let bare = entry.file_name().to_string_lossy().into_owned();
         let repo_full_name = resolve_qualified_repo_name(conn, &bare).unwrap_or(bare);
-        match scan_repo_to_db(conn, &repo_path, &repo_full_name, project_id) {
+        match scan_repo_to_db(conn, &repo_path, &repo_full_name, project_id, force) {
             Ok(summary) => total += summary.metrics_written,
             Err(e) => {
                 warn!(repo = %repo_full_name, error = %e, "project inventory scan failed");
@@ -334,7 +343,7 @@ mod tests {
         )
         .unwrap();
 
-        let s1 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1).unwrap();
+        let s1 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, false).unwrap();
         assert!(!s1.skipped_unchanged);
         assert_eq!(s1.metrics_written, ALL_KEYS.len());
 
@@ -348,8 +357,12 @@ mod tests {
             .unwrap();
         assert!((endpoints - 1.0).abs() < 1e-9);
 
-        let s2 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1).unwrap();
+        let s2 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, false).unwrap();
         assert!(s2.skipped_unchanged);
         assert_eq!(s2.metrics_written, 0);
+
+        let s3 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, true).unwrap();
+        assert!(!s3.skipped_unchanged);
+        assert_eq!(s3.metrics_written, ALL_KEYS.len());
     }
 }

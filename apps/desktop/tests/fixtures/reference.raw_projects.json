@@ -14,7 +14,7 @@
       "surv_present": false,
       "arch_crit_count": 0.0,
       "arch_warn_count": 0.0,
-      "arch_present": true
+      "arch_present": false
     },
     "inventory": [
       {
@@ -68,7 +68,9 @@
       {
         "student_id": "bob",
         "severity": "CRITICAL",
-        "source": "sprint"
+        "source": "sprint",
+        "flag_type": "SOME_FLAG",
+        "weighted": null
       }
     ]
   },
@@ -89,7 +91,17 @@
       "arch_warn_count": 0.0,
       "arch_present": false
     },
-    "inventory": [],
+    "inventory": [
+      {
+        "repo_full_name": "spring-team02",
+        "metrics": {
+          "endpoint_count": 4.0,
+          "entity_count": 2.0,
+          "production_loc": 2500.0,
+          "production_statement_count": 900.0
+        }
+      }
+    ],
     "tasks": [
       {
         "assignee_id": "carol",
@@ -125,7 +137,16 @@
       "arch_warn_count": 0.0,
       "arch_present": false
     },
-    "inventory": [],
+    "inventory": [
+      {
+        "repo_full_name": "spring-team03",
+        "metrics": {
+          "endpoint_count": 2.0,
+          "production_loc": 1500.0,
+          "production_statement_count": 500.0
+        }
+      }
+    ],
     "tasks": [
       {
         "assignee_id": "dave",
@@ -163,9 +184,19 @@
       "surv_present": false,
       "arch_crit_count": 0.0,
       "arch_warn_count": 0.0,
-      "arch_present": true
+      "arch_present": false
     },
-    "inventory": [],
+    "inventory": [
+      {
+        "repo_full_name": "org/sec-repo",
+        "metrics": {
+          "controller_count": 3.0,
+          "endpoint_count": 6.0,
+          "production_loc": 3000.0,
+          "production_statement_count": 1100.0
+        }
+      }
+    ],
     "tasks": [
       {
         "assignee_id": "frank",
@@ -181,16 +212,15 @@
         "full_name": "Frank"
       }
     ],
-    "crit_findings": [
+    "crit_findings": [],
+    "student_flags": [
       {
-        "kind": "static_analysis",
-        "category": "security"
-      },
-      {
-        "kind": "static_analysis",
-        "category": "style"
+        "student_id": "frank",
+        "severity": "CRITICAL",
+        "source": "artifact",
+        "flag_type": "ARCHITECTURE_HOTSPOT",
+        "weighted": 12.0
       }
-    ],
-    "student_flags": []
+    ]
   }
 ]

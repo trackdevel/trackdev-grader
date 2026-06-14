@@ -2,6 +2,23 @@
 
 use rusqlite::{params, Connection};
 
+pub fn seed_inventory(conn: &Connection, project_id: i64, repo: &str, metrics: &[(&str, f64)]) {
+    conn.execute(
+        "INSERT INTO project_inventory_runs (repo_full_name, project_id, status, metric_count, scanned_at)
+         VALUES (?, ?, 'OK', ?, '2026-01-01T00:00:00Z')",
+        params![repo, project_id, metrics.len() as i64],
+    )
+    .unwrap();
+    for (key, val) in metrics {
+        conn.execute(
+            "INSERT INTO repo_structural_metrics (repo_full_name, metric_key, value)
+             VALUES (?, ?, ?)",
+            rusqlite::params![repo, key, val],
+        )
+        .unwrap();
+    }
+}
+
 pub fn seed_all_fixtures(conn: &Connection) {
     seed_rich_example(conn);
     seed_one_absent_axis(conn);
@@ -148,6 +165,17 @@ fn seed_one_absent_axis(conn: &Connection) {
         [],
     )
     .unwrap();
+    seed_inventory(
+        conn,
+        project_id,
+        "spring-team02",
+        &[
+            ("endpoint_count", 4.0),
+            ("entity_count", 2.0),
+            ("production_loc", 2500.0),
+            ("production_statement_count", 900.0),
+        ],
+    );
 }
 
 fn seed_zero_delivery(conn: &Connection) {
@@ -184,6 +212,16 @@ fn seed_zero_delivery(conn: &Connection) {
         [],
     )
     .unwrap();
+    seed_inventory(
+        conn,
+        project_id,
+        "spring-team03",
+        &[
+            ("endpoint_count", 2.0),
+            ("production_loc", 1500.0),
+            ("production_statement_count", 500.0),
+        ],
+    );
 }
 
 fn seed_security_flags(conn: &Connection) {
@@ -234,18 +272,21 @@ fn seed_security_flags(conn: &Connection) {
         params![sprint_id],
     )
     .unwrap();
+    seed_inventory(
+        conn,
+        project_id,
+        "org/sec-repo",
+        &[
+            ("endpoint_count", 6.0),
+            ("controller_count", 3.0),
+            ("production_loc", 3000.0),
+            ("production_statement_count", 1100.0),
+        ],
+    );
     conn.execute(
-        "INSERT INTO static_analysis_findings
-         (repo_full_name, analyzer, rule_id, severity, category, file_path, message, fingerprint)
-         VALUES ('org/sec-repo', 'pmd', 'R1', 'CRITICAL', 'security', 'Foo.java', 'x', 'fp-sec-1')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO static_analysis_findings
-         (repo_full_name, analyzer, rule_id, severity, category, file_path, message, fingerprint)
-         VALUES ('org/sec-repo', 'pmd', 'R2', 'CRITICAL', 'style', 'Bar.java', 'y', 'fp-sec-2')",
-        [],
+        "INSERT INTO student_artifact_flags (student_id, project_id, flag_type, severity, details)
+         VALUES ('frank', ?, 'ARCHITECTURE_HOTSPOT', 'CRITICAL', '{\"weighted\":12.0}')",
+        params![project_id],
     )
     .unwrap();
 }

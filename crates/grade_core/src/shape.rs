@@ -1,10 +1,12 @@
 //! Structural shaping: task resolution and team aggregation.
 
 use crate::modulation::keep;
+use crate::policy::{
+    is_codequality_hotspot, ARCHITECTURE_HOTSPOT, COMPLEXITY_HOTSPOT, STATIC_ANALYSIS_HOTSPOT,
+};
 use crate::spec::StructuralSpec;
 use crate::types::{
-    AggregateKnobs, AiMaps, CritFinding, FindingKind, ProjectScopes, RawProject, RawTask,
-    StudentScope, TaskScope,
+    AggregateKnobs, AiMaps, ProjectScopes, RawProject, RawTask, StudentScope, TaskScope,
 };
 
 /// Resolve tasks, apply keep modulation from the spec weights, and aggregate.
@@ -74,24 +76,40 @@ pub fn aggregate(
         0.0
     };
 
-    let (crit_sa_count, crit_security_count, crit_cx_count) =
-        count_crit_findings(&raw.crit_findings);
+    let (crit_sa_count, crit_security_count, crit_cx_count) = (0.0, 0.0, 0.0);
 
     let mut per_student: Vec<StudentScope> = raw
         .students
         .iter()
         .map(|s| {
-            let crit_count = raw
+            let mut crit_count = 0.0;
+            let mut arch_blame = 0.0;
+            let mut cx_blame = 0.0;
+            let mut sa_blame = 0.0;
+            for f in raw
                 .student_flags
                 .iter()
                 .filter(|f| f.student_id == s.student_id && f.severity == "CRITICAL")
-                .count() as f64;
+            {
+                let mag = f.weighted.unwrap_or(0.0);
+                match f.flag_type.as_str() {
+                    ARCHITECTURE_HOTSPOT => arch_blame += mag,
+                    COMPLEXITY_HOTSPOT => cx_blame += mag,
+                    STATIC_ANALYSIS_HOTSPOT => sa_blame += mag,
+                    _ if is_codequality_hotspot(&f.flag_type) => {}
+                    _ => crit_count += 1.0,
+                }
+            }
             StudentScope {
                 student_id: s.student_id.clone(),
                 student_eff: 0.0,
                 ai_keep: None,
                 contribution: None,
                 student_critical_count: crit_count,
+                arch_blame,
+                cx_blame,
+                sa_blame,
+                codequality_penalty: 0.0,
             }
         })
         .collect();
@@ -151,30 +169,12 @@ pub fn aggregate(
     }
 }
 
-fn count_crit_findings(findings: &[CritFinding]) -> (f64, f64, f64) {
-    let mut sa = 0.0;
-    let mut security = 0.0;
-    let mut cx = 0.0;
-    for f in findings {
-        match f.kind {
-            FindingKind::StaticAnalysis => {
-                sa += 1.0;
-                if f.category.as_deref() == Some("security") {
-                    security += 1.0;
-                }
-            }
-            FindingKind::Complexity => cx += 1.0,
-        }
-    }
-    (sa, security, cx)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::types::{AxisInputs, RawStudent};
+    use crate::types::{AxisInputs, CritFinding, FindingKind, RawStudent};
 
     fn default_maps() -> AiMaps {
         AiMaps {
@@ -253,6 +253,8 @@ mod tests {
                 student_id: "bob".to_string(),
                 severity: "CRITICAL".to_string(),
                 source: "sprint".to_string(),
+                flag_type: "SOME_FLAG".to_string(),
+                weighted: None,
             }],
         }
     }
@@ -363,7 +365,56 @@ mod tests {
     }
 
     #[test]
-    fn count_security_findings() {
+    fn hotspot_flags_partitioned_from_behavioural_critical_count() {
+        let raw = RawProject {
+            project_id: 5,
+            name: "Hot".to_string(),
+            team_size: 1,
+            axis: AxisInputs {
+                documentation_raw: 0.0,
+                doc_present: false,
+                code_quality_raw: 0.0,
+                cc_pct: 0.0,
+                mutation_score: 0.0,
+                cq_present: false,
+                survival_raw: 0.0,
+                surv_present: false,
+                arch_crit_count: 0.0,
+                arch_warn_count: 0.0,
+                arch_present: false,
+            },
+            inventory: vec![],
+            tasks: vec![],
+            students: vec![RawStudent {
+                student_id: "u".to_string(),
+                full_name: "U".to_string(),
+            }],
+            crit_findings: vec![],
+            student_flags: vec![
+                crate::types::StudentFlag {
+                    student_id: "u".to_string(),
+                    severity: "CRITICAL".to_string(),
+                    source: "artifact".to_string(),
+                    flag_type: ARCHITECTURE_HOTSPOT.to_string(),
+                    weighted: Some(4.0),
+                },
+                crate::types::StudentFlag {
+                    student_id: "u".to_string(),
+                    severity: "CRITICAL".to_string(),
+                    source: "sprint".to_string(),
+                    flag_type: "LOW_SURVIVAL_RATE".to_string(),
+                    weighted: None,
+                },
+            ],
+        };
+        let scopes = aggregate(&raw, &[], &default_knobs());
+        let u = &scopes.students[0];
+        assert!((u.arch_blame - 4.0).abs() < 1e-9);
+        assert!((u.student_critical_count - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn count_security_findings_retired() {
         let raw = RawProject {
             project_id: 3,
             name: "Sec".to_string(),
@@ -404,8 +455,8 @@ mod tests {
             student_flags: vec![],
         };
         let scopes = aggregate(&raw, &[], &default_knobs());
-        assert!((scopes.crit_sa_count - 2.0).abs() < 1e-9);
-        assert!((scopes.crit_security_count - 1.0).abs() < 1e-9);
-        assert!((scopes.crit_cx_count - 1.0).abs() < 1e-9);
+        assert!((scopes.crit_sa_count - 0.0).abs() < 1e-9);
+        assert!((scopes.crit_security_count - 0.0).abs() < 1e-9);
+        assert!((scopes.crit_cx_count - 0.0).abs() < 1e-9);
     }
 }

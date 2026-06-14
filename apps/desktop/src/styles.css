@@ -153,6 +153,11 @@ body {
   font-size: 0.9rem;
 }
 
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
 .sortable-table th.sortable {
   cursor: pointer;
   user-select: none;

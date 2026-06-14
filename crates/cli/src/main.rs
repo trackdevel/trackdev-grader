@@ -291,6 +291,18 @@ enum Command {
         #[command(flatten)]
         projects: ProjectsArg,
     },
+    /// Structural inventory scan (Grading v2). Writes
+    /// `repo_structural_metrics` (breadth/depth counters plus
+    /// `production_statement_count`) and `project_inventory_runs` per
+    /// repo clone. Sprint-free; unchanged git HEAD short-circuits.
+    Inventory {
+        #[command(flatten)]
+        projects: ProjectsArg,
+        /// Re-scan every repo even when git HEAD matches the last successful run.
+        /// Use after upgrading the scanner (e.g. new metric keys) without a new commit.
+        #[arg(long)]
+        force: bool,
+    },
     /// Process metrics (planning, regularity, temporal, collaboration).
     Process {
         #[command(flatten)]
@@ -575,6 +587,37 @@ enum Command {
         /// Resume a partial quality-flags pass (Track B).
         #[arg(long)]
         resume: bool,
+    },
+    /// Suggest hybrid-normalization anchors from the live cohort (Grading v2 Wave 4).
+    ///
+    /// Reads raw metrics from `grading.db`, prints suggested `anchors` floor/ceiling
+    /// values and the projected `project_final` spread. Use `--apply` to patch
+    /// `config/grading.standard.json` (syncs `mi_floor` / legacy weight keys).
+    /// Print per-project grade breakdown (axes, inventory, arch inputs).
+    GradeExplain {
+        #[command(flatten)]
+        projects: ProjectsArg,
+        /// Grade spec JSON (default: config/grading.standard.json)
+        #[arg(long, default_value = "config/grading.standard.json")]
+        spec: PathBuf,
+    },
+    /// Suggest hybrid-normalization anchors from the live cohort (Grading v2 Wave 4).
+    CalibrateAnchors {
+        #[command(flatten)]
+        projects: ProjectsArg,
+        /// Grade spec JSON to read (and optionally write with `--apply`)
+        #[arg(long, default_value = "config/grading.standard.json")]
+        spec: PathBuf,
+        /// Write suggested anchors back into the spec file
+        #[arg(long)]
+        apply: bool,
+        /// Emit full JSON report on stdout
+        #[arg(long)]
+        json: bool,
+        /// Freeze work_scale so the gradable cohort-top work_base reaches this
+        /// grade (v4; uncapped — a stronger cohort may exceed it).
+        #[arg(long, default_value_t = 10.0)]
+        target_top: f64,
     },
     /// Diff two `grading.db` files table-by-table (dual-run verification).
     DiffDb {
@@ -965,6 +1008,25 @@ fn main() -> Result<()> {
                     )
                     .with_context(|| format!("complexity scan failed for sprint_id {sid}"))?;
                 }
+            }
+        }
+        Command::Inventory { projects, force } => {
+            let filter = parse_project_filter(projects.projects);
+            let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
+            for g in &groups {
+                let project_root = entregues_dir.join(&g.name);
+                let written = sprint_grader_project_inventory::scan_project_to_db(
+                    &db.conn,
+                    &project_root,
+                    g.project_id,
+                    force,
+                )
+                .with_context(|| format!("inventory scan failed for project {}", g.name))?;
+                info!(
+                    project = %g.name,
+                    metrics_written = written,
+                    "structural inventory scan complete"
+                );
             }
         }
         Command::Process { projects } => {
@@ -1541,6 +1603,70 @@ fn main() -> Result<()> {
             };
             run_quality_flags(&db, &config_dir, &opts).context("quality-flags failed")?;
         }
+        Command::GradeExplain { projects, spec } => {
+            let filter = parse_project_filter(projects.projects);
+            let spec_path = if spec.is_absolute() {
+                spec
+            } else {
+                project_root.join(spec)
+            };
+            let spec_text = std::fs::read_to_string(&spec_path)
+                .with_context(|| format!("read {}", spec_path.display()))?;
+            let grade_spec: grade_core::GradeSpec = serde_json::from_str(&spec_text)
+                .with_context(|| format!("parse {}", spec_path.display()))?;
+            let report = sprint_grader_orchestration::explain_grades(
+                &db,
+                &today,
+                &grade_spec,
+                filter.as_deref(),
+            )
+            .context("grade-explain failed")?;
+            print!("{report}");
+        }
+        Command::CalibrateAnchors {
+            projects,
+            spec,
+            apply,
+            json,
+            target_top,
+        } => {
+            let filter = parse_project_filter(projects.projects);
+            let spec_path = if spec.is_absolute() {
+                spec
+            } else {
+                project_root.join(spec)
+            };
+            let report = sprint_grader_orchestration::run_calibrate_anchors(
+                &db,
+                &today,
+                &spec_path,
+                filter.as_deref(),
+                target_top,
+            )
+            .context("calibrate-anchors failed")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).context("serialize report")?
+                );
+            } else {
+                println!(
+                    "{}",
+                    sprint_grader_orchestration::format_report_summary(&report)
+                );
+            }
+            if apply {
+                sprint_grader_orchestration::apply_calibration_to_spec_file(&spec_path, &report)
+                    .context("apply anchors to spec")?;
+                info!(path = %spec_path.display(), "wrote calibrated anchors");
+                println!("applied anchors to {}", spec_path.display());
+            } else {
+                println!(
+                    "\nRe-run with --apply to write anchors to {}",
+                    spec_path.display()
+                );
+            }
+        }
         Command::DiffDb {
             db_a,
             db_b,
@@ -1717,5 +1843,15 @@ mod tests {
             .map(|c| c.get_name().to_string())
             .collect();
         assert!(subs.iter().any(|s| s == "quality-flags"));
+    }
+
+    #[test]
+    fn cli_lists_inventory() {
+        let cmd = Cli::command();
+        let subs: Vec<_> = cmd
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        assert!(subs.iter().any(|s| s == "inventory"));
     }
 }

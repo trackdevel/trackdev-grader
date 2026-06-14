@@ -14,14 +14,22 @@
         "student_eff": 13.0,
         "ai_keep": 0.8666666666666667,
         "contribution": 0.8666666666666667,
-        "student_critical_count": 0.0
+        "student_critical_count": 0.0,
+        "arch_blame": 0.0,
+        "cx_blame": 0.0,
+        "sa_blame": 0.0,
+        "codequality_penalty": 0.0
       },
       {
         "student_id": "bob",
         "student_eff": 1.9999999999999996,
         "ai_keep": 0.19999999999999996,
         "contribution": 0.1333333333333333,
-        "student_critical_count": 1.0
+        "student_critical_count": 1.0,
+        "arch_blame": 0.0,
+        "cx_blame": 0.0,
+        "sa_blame": 0.0,
+        "codequality_penalty": 0.0
       }
     ]
   },
@@ -40,7 +48,11 @@
         "student_eff": 10.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "student_critical_count": 0.0
+        "student_critical_count": 0.0,
+        "arch_blame": 0.0,
+        "cx_blame": 0.0,
+        "sa_blame": 0.0,
+        "codequality_penalty": 0.0
       }
     ]
   },
@@ -59,14 +71,22 @@
         "student_eff": 8.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "student_critical_count": 0.0
+        "student_critical_count": 0.0,
+        "arch_blame": 0.0,
+        "cx_blame": 0.0,
+        "sa_blame": 0.0,
+        "codequality_penalty": 0.0
       },
       {
         "student_id": "eve",
         "student_eff": 0.0,
         "ai_keep": null,
         "contribution": 0.0,
-        "student_critical_count": 0.0
+        "student_critical_count": 0.0,
+        "arch_blame": 0.0,
+        "cx_blame": 0.0,
+        "sa_blame": 0.0,
+        "codequality_penalty": 0.0
       }
     ]
   },
@@ -75,8 +95,8 @@
     "sum_eff": 10.0,
     "mean_raw": 10.0,
     "ai_factor": 1.0,
-    "crit_sa_count": 2.0,
-    "crit_security_count": 1.0,
+    "crit_sa_count": 0.0,
+    "crit_security_count": 0.0,
     "crit_cx_count": 0.0,
     "penalty_on": 1.0,
     "students": [
@@ -85,7 +105,11 @@
         "student_eff": 10.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "student_critical_count": 0.0
+        "student_critical_count": 0.0,
+        "arch_blame": 12.0,
+        "cx_blame": 0.0,
+        "sa_blame": 0.0,
+        "codequality_penalty": 0.0
       }
     ]
   }

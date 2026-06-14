@@ -89,4 +89,3 @@ export function extractFreeVars(exprJson: string): string[] {
 
 export { clearLastGoodGrades, getLastGoodGrades, recomputeAll, recomputeFrom } from "./recompute";
 export type { RecomputeFrom, RecomputeResult } from "./recompute";
-export { recomputeCohort };

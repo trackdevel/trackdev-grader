@@ -35,7 +35,13 @@ fn cohort_bounds_shared_across_batch() {
                 arch_warn_count: 0.0,
                 arch_present: false,
             },
-            inventory: vec![],
+            inventory: vec![RepoMetrics {
+                repo_full_name: format!("repo-{id}"),
+                metrics: [("production_loc", 1000.0)]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+            }],
             tasks: vec![],
             students: vec![],
             crit_findings: vec![],
@@ -56,10 +62,7 @@ fn equal_contributors_receive_project_final() {
     let spec = load_spec();
     let inv = |name: &str, metrics: &[(&str, f64)]| RepoMetrics {
         repo_full_name: name.into(),
-        metrics: metrics
-            .iter()
-            .map(|(k, v)| (k.to_string(), *v))
-            .collect(),
+        metrics: metrics.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
     };
     let raw = RawProject {
         project_id: 99,
