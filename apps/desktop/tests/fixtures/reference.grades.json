@@ -2,30 +2,42 @@
   {
     "project": {
       "project_id": 1,
-      "quality_grade": 10.0,
-      "quality_penalized": 10.0,
+      "quality_grade": 0.0,
+      "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 0.6,
-      "final_grade": 7.5,
+      "final_grade": 9.42,
       "review_gate": null,
       "team_size": 2,
       "axes": [
         {
-          "key": "quality",
+          "key": "size",
           "raw": null,
-          "score": 10.0,
+          "score": 7.25,
           "present": true
         },
         {
           "key": "complexity",
           "raw": null,
-          "score": 5.0,
+          "score": 7.5,
           "present": true
         },
         {
-          "key": "size",
+          "key": "quality",
           "raw": null,
-          "score": 5.0,
+          "score": 0.0,
+          "present": false
+        },
+        {
+          "key": "work_base",
+          "raw": null,
+          "score": 9.41872,
+          "present": true
+        },
+        {
+          "key": "quality_multiplier",
+          "raw": null,
+          "score": 1.0,
           "present": true
         }
       ]
@@ -37,8 +49,9 @@
         "effective_points": 13.0,
         "ai_keep": 0.8666666666666667,
         "contribution": 0.8666666666666667,
-        "base_grade": 13.0,
+        "base_grade": 16.33,
         "student_penalty": 0.0,
+        "codequality_penalty": 0.0,
         "final_grade": 10.0,
         "review_gate": null
       },
@@ -48,9 +61,10 @@
         "effective_points": 1.9999999999999996,
         "ai_keep": 0.19999999999999996,
         "contribution": 0.1333333333333333,
-        "base_grade": 2.0,
+        "base_grade": 2.51,
         "student_penalty": 0.75,
-        "final_grade": 1.25,
+        "codequality_penalty": 0.0,
+        "final_grade": 1.76,
         "review_gate": null
       }
     ]
@@ -62,15 +76,15 @@
       "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 1.0,
-      "final_grade": 0.0,
+      "final_grade": 4.85,
       "review_gate": null,
       "team_size": 1,
       "axes": [
         {
-          "key": "quality",
+          "key": "size",
           "raw": null,
-          "score": 0.0,
-          "present": false
+          "score": 3.8124999999999996,
+          "present": true
         },
         {
           "key": "complexity",
@@ -79,10 +93,22 @@
           "present": false
         },
         {
-          "key": "size",
+          "key": "quality",
           "raw": null,
           "score": 0.0,
           "present": false
+        },
+        {
+          "key": "work_base",
+          "raw": null,
+          "score": 4.852549999999999,
+          "present": true
+        },
+        {
+          "key": "quality_multiplier",
+          "raw": null,
+          "score": 1.0,
+          "present": true
         }
       ]
     },
@@ -93,9 +119,10 @@
         "effective_points": 10.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "base_grade": 0.0,
+        "base_grade": 4.85,
         "student_penalty": 0.0,
-        "final_grade": 0.0,
+        "codequality_penalty": 0.0,
+        "final_grade": 4.85,
         "review_gate": null
       }
     ]
@@ -107,15 +134,15 @@
       "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 1.0,
-      "final_grade": 0.0,
+      "final_grade": 2.55,
       "review_gate": null,
       "team_size": 2,
       "axes": [
         {
-          "key": "quality",
+          "key": "size",
           "raw": null,
-          "score": 0.0,
-          "present": false
+          "score": 2.0,
+          "present": true
         },
         {
           "key": "complexity",
@@ -124,10 +151,22 @@
           "present": false
         },
         {
-          "key": "size",
+          "key": "quality",
           "raw": null,
           "score": 0.0,
           "present": false
+        },
+        {
+          "key": "work_base",
+          "raw": null,
+          "score": 2.5456,
+          "present": true
+        },
+        {
+          "key": "quality_multiplier",
+          "raw": null,
+          "score": 1.0,
+          "present": true
         }
       ]
     },
@@ -138,9 +177,10 @@
         "effective_points": 8.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "base_grade": 0.0,
+        "base_grade": 5.09,
         "student_penalty": 0.0,
-        "final_grade": 0.0,
+        "codequality_penalty": 0.0,
+        "final_grade": 5.09,
         "review_gate": null
       },
       {
@@ -151,6 +191,7 @@
         "contribution": 0.0,
         "base_grade": 0.0,
         "student_penalty": 0.0,
+        "codequality_penalty": 0.0,
         "final_grade": 0.0,
         "review_gate": "NO_DELIVERY"
       }
@@ -159,18 +200,18 @@
   {
     "project": {
       "project_id": 4,
-      "quality_grade": 6.36,
-      "quality_penalized": 6.36,
+      "quality_grade": 0.0,
+      "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 1.0,
-      "final_grade": 6.36,
+      "final_grade": 6.73,
       "review_gate": null,
       "team_size": 1,
       "axes": [
         {
-          "key": "quality",
+          "key": "size",
           "raw": null,
-          "score": 6.363636363636363,
+          "score": 5.2875,
           "present": true
         },
         {
@@ -180,10 +221,22 @@
           "present": false
         },
         {
-          "key": "size",
+          "key": "quality",
           "raw": null,
           "score": 0.0,
           "present": false
+        },
+        {
+          "key": "work_base",
+          "raw": null,
+          "score": 6.7299299999999995,
+          "present": true
+        },
+        {
+          "key": "quality_multiplier",
+          "raw": null,
+          "score": 1.0,
+          "present": true
         }
       ]
     },
@@ -194,9 +247,10 @@
         "effective_points": 10.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "base_grade": 6.36,
+        "base_grade": 6.73,
         "student_penalty": 0.0,
-        "final_grade": 6.36,
+        "codequality_penalty": 1.0,
+        "final_grade": 5.73,
         "review_gate": null
       }
     ]

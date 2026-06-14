@@ -26,7 +26,7 @@ describe("validateSpec", () => {
   it("rejects forward reference in project formulas", () => {
     const spec = loadBundledDefault();
     const bad: GradeSpec = structuredClone(spec);
-    bad.formulas.project[0].expr = { op: "var", name: "quality_composite" };
+    bad.formulas.project[0].expr = { op: "var", name: "student_final" };
     const result = validateSpec(bad);
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -51,7 +51,7 @@ describe("validateSpec", () => {
     const text = JSON.stringify(spec, null, 2);
     const roundTripped = parseSpecJson(text);
     expect(roundTripped.meta.decimals).toBe(spec.meta.decimals);
-    expect(roundTripped.weights.w_doc).toBe(spec.weights.w_doc);
+    expect(roundTripped.weights.w_quality).toBe(spec.weights.w_quality);
   });
 
   it("collects free vars from nested expr", () => {
@@ -102,7 +102,7 @@ describe("validateSpec — manual fields", () => {
   });
 
   it("rejects a field name that collides with a weight", () => {
-    const result = validateSpec(withField("w_doc"));
+    const result = validateSpec(withField("w_quality"));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toContain("reserved");
   });
@@ -114,7 +114,7 @@ describe("validateSpec — manual fields", () => {
   });
 
   it("rejects a field name that collides with a formula output name", () => {
-    const result = validateSpec(withField("quality_composite"));
+    const result = validateSpec(withField("project_final"));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toContain("reserved");
   });

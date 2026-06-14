@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 
 import {
+  hasGradableArtifact,
   loadRawProject,
   sprintIdsUpToCurrent,
 } from "../src/data/projection";
@@ -12,10 +13,15 @@ import type {
   GradeOutput,
   ProjectScopes,
   RawProject,
+  RepoMetrics,
   SqlExecutor,
   StructuralSpec,
 } from "../src/data/types";
-import { initEngineWithBytes, recompute, recomputeStructural } from "../src/engine/index";
+import {
+  initEngineWithBytes,
+  recomputeCohort,
+  recomputeStructural,
+} from "../src/engine/index";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureDir = join(here, "fixtures");
@@ -56,6 +62,84 @@ function assertScopesClose(actual: ProjectScopes, expected: ProjectScopes, label
   }
 }
 
+describe("loadInventory", () => {
+  it("returns empty when repo_structural_metrics table is missing", async () => {
+    const db = new Database(":memory:");
+    db.exec(`
+      CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT);
+      CREATE TABLE students (id TEXT PRIMARY KEY, full_name TEXT, team_project_id INTEGER);
+      CREATE TABLE pull_requests (
+        id TEXT PRIMARY KEY, pr_number INTEGER, repo_full_name TEXT,
+        url TEXT, title TEXT, state TEXT, merged INTEGER
+      );
+      CREATE TABLE pr_authors (pr_id TEXT, student_id TEXT);
+      CREATE TABLE architecture_violations (repo_full_name TEXT, severity TEXT, rule_kind TEXT);
+      CREATE TABLE architecture_runs (repo_full_name TEXT, status TEXT);
+      CREATE TABLE student_artifact_flags (
+        project_id INTEGER, student_id TEXT, severity TEXT, flag_type TEXT, details TEXT
+      );
+      INSERT INTO projects VALUES (1, 'T');
+      INSERT INTO students VALUES ('s1', 'S', 1);
+      INSERT INTO pull_requests VALUES ('pr1', 1, 'spring-api', '', '', 'MERGED', 1);
+      INSERT INTO pr_authors VALUES ('pr1', 's1');
+    `);
+    const exec = makeExecutor(db);
+    try {
+      const raw = await loadRawProject(exec, 1, []);
+      expect(raw.inventory).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("hasGradableArtifact", () => {
+  function rawWith(inventory: RepoMetrics[]): RawProject {
+    return {
+      project_id: 1,
+      name: "t",
+      team_size: 1,
+      axis: {
+        documentation_raw: 0,
+        doc_present: false,
+        code_quality_raw: 0,
+        cc_pct: 0,
+        mutation_score: 0,
+        cq_present: false,
+        survival_raw: 0,
+        surv_present: false,
+        arch_crit_count: 0,
+        arch_warn_count: 0,
+        arch_present: false,
+      },
+      inventory,
+      tasks: [],
+      students: [],
+      crit_findings: [],
+      student_flags: [],
+    };
+  }
+
+  it("is false without scanned code mass", () => {
+    expect(hasGradableArtifact(rawWith([]))).toBe(false);
+    // Invariant I1: structural counts alone (no production LOC/statements) don't qualify.
+    expect(
+      hasGradableArtifact(rawWith([{ repo_full_name: "r", metrics: { endpoint_count: 5 } }])),
+    ).toBe(false);
+  });
+
+  it("is true with production_loc or production_statement_count", () => {
+    expect(
+      hasGradableArtifact(rawWith([{ repo_full_name: "r", metrics: { production_loc: 500 } }])),
+    ).toBe(true);
+    expect(
+      hasGradableArtifact(
+        rawWith([{ repo_full_name: "r", metrics: { production_statement_count: 10 } }]),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("projection on reference.db", () => {
   const dbPath = join(fixtureDir, "reference.db");
   const rawFixturePath = join(fixtureDir, "reference.raw_projects.json");
@@ -89,18 +173,24 @@ describe("projection on reference.db", () => {
     }
   });
 
-  it("WASM full grade matches reference.grades.json", async () => {
+  it("WASM cohort grade matches reference.grades.json", async () => {
+    // v4: axis bounds AND the code-quality percentile bands are cohort-wide, so
+    // grade the whole cohort once (as the app does via recomputeAll), not
+    // per-project — a cohort-of-1 would use different bounds and percentiles.
     const gradesPath = join(fixtureDir, "reference.grades.json");
     const expected: Array<{
-      project: { final_grade: number; quality_grade: number; ai_factor: number };
+      project: { project_id: number; final_grade: number; quality_grade: number; ai_factor: number };
       students: Array<{ student_id: string; final_grade: number }>;
     }> = JSON.parse(readFileSync(gradesPath, "utf8"));
     const expectedRaw: RawProject[] = JSON.parse(readFileSync(rawFixturePath, "utf8"));
     const spec = loadSpec();
     await initEngineWithBytes(readFileSync(wasmPath));
     const tol = 0.005;
+    const cohort = await recomputeCohort(expectedRaw, spec);
+    const byId = new Map(cohort.projects.map((p) => [p.project_id, p.output]));
     for (let i = 0; i < projectIds.length; i += 1) {
-      const out = (await recompute(expectedRaw[i], spec)) as GradeOutput;
+      const out = byId.get(projectIds[i]) as GradeOutput;
+      expect(out, `grade for project ${projectIds[i]}`).toBeDefined();
       const exp = expected[i];
       expect(Math.abs(out.grades.project_final - exp.project.final_grade)).toBeLessThanOrEqual(tol);
       expect(Math.abs(out.grades.quality_grade - exp.project.quality_grade)).toBeLessThanOrEqual(tol);

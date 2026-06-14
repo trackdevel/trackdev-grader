@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { loadBundledDefault } from "../src/config/load";
 import { checkParity } from "../src/logic/parity";
 import type { GradeOutput } from "../src/data/types";
-import { initEngineWithBytes, recompute } from "../src/engine/index";
+import { initEngineWithBytes, recomputeCohort } from "../src/engine/index";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const wasmPath = join(here, "../pkg/grade_core_wasm_bg.wasm");
@@ -18,9 +18,12 @@ describe("parity banner", () => {
       readFileSync(join(here, "fixtures/reference.raw_projects.json"), "utf8"),
     );
     await initEngineWithBytes(readFileSync(wasmPath));
+    // Cohort grade (as the app does via recomputeAll): v4 bounds + percentile
+    // bands are cohort-wide, so a per-project grade would diverge.
+    const cohort = await recomputeCohort(rawProjects, spec);
     const grades = new Map<number, GradeOutput>();
-    for (const raw of rawProjects) {
-      grades.set(raw.project_id, (await recompute(raw, spec)) as GradeOutput);
+    for (const entry of cohort.projects) {
+      grades.set(entry.project_id, entry.output);
     }
     const result = checkParity(spec, grades, spec);
     expect(result.state).toBe("standard");
