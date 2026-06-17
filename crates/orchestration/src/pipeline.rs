@@ -1352,14 +1352,24 @@ pub fn run_pipeline(
         }
     }
 
-    // Grading v2 Wave 1: structural inventory (size/complexity raw metrics).
-    // Artifact-shape, sprint-free; head_sha gate inside scan_project_to_db.
+    // Grading v2 Wave 1 + EXTRA_TECH: structural inventory (size/complexity raw
+    // metrics) plus the "extra technologies vs. baseline" diff. Artifact-shape,
+    // sprint-free; head_sha + scanner_version gate inside scan_project_to_db.
+    // Both config files degrade gracefully when absent.
+    let tech_catalog = sprint_grader_project_inventory::TechnologyCatalog::load(
+        &opts.config_dir.join("technology_catalog.toml"),
+    );
+    let inventory_baseline = sprint_grader_project_inventory::InventoryBaseline::load(
+        &opts.config_dir.join("inventory_baseline.toml"),
+    );
     for g in &groups {
         let project_root = opts.entregues_dir.join(&g.name);
         if let Err(e) = sprint_grader_project_inventory::scan_project_to_db(
             &db.conn,
             &project_root,
             g.project_id,
+            &tech_catalog,
+            &inventory_baseline,
             false,
         ) {
             warn!(project = %g.name, error = %e, "project inventory scan failed");

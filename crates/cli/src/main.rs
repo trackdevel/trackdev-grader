@@ -303,6 +303,17 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// (Re)generate the EXTRA_TECH baseline manifest from the two reference
+    /// starter repos. Run rarely — only when the course starter changes.
+    InventoryBaseline {
+        /// Path to the Android starter repo.
+        android: PathBuf,
+        /// Path to the Spring starter repo.
+        spring: PathBuf,
+        /// Output TOML path.
+        #[arg(long, default_value = "config/inventory_baseline.toml")]
+        out: PathBuf,
+    },
     /// Process metrics (planning, regularity, temporal, collaboration).
     Process {
         #[command(flatten)]
@@ -1013,12 +1024,20 @@ fn main() -> Result<()> {
         Command::Inventory { projects, force } => {
             let filter = parse_project_filter(projects.projects);
             let groups = resolve_all_sprint_tuples(&db, &today, filter.as_deref())?;
+            let tech_catalog = sprint_grader_project_inventory::TechnologyCatalog::load(
+                &config_dir.join("technology_catalog.toml"),
+            );
+            let inventory_baseline = sprint_grader_project_inventory::InventoryBaseline::load(
+                &config_dir.join("inventory_baseline.toml"),
+            );
             for g in &groups {
                 let project_root = entregues_dir.join(&g.name);
                 let written = sprint_grader_project_inventory::scan_project_to_db(
                     &db.conn,
                     &project_root,
                     g.project_id,
+                    &tech_catalog,
+                    &inventory_baseline,
                     force,
                 )
                 .with_context(|| format!("inventory scan failed for project {}", g.name))?;
@@ -1028,6 +1047,25 @@ fn main() -> Result<()> {
                     "structural inventory scan complete"
                 );
             }
+        }
+        Command::InventoryBaseline {
+            android,
+            spring,
+            out,
+        } => {
+            let baseline = sprint_grader_project_inventory::generate_baseline(&android, &spring);
+            let toml = baseline
+                .to_toml_string()
+                .context("failed to serialize inventory baseline")?;
+            std::fs::write(&out, toml)
+                .with_context(|| format!("failed to write baseline to {}", out.display()))?;
+            info!(
+                out = %out.display(),
+                android_deps = baseline.android.dependencies.len(),
+                spring_deps = baseline.spring.dependencies.len(),
+                android_commit = baseline.android.source_commit.as_deref().unwrap_or("?"),
+                "EXTRA_TECH inventory baseline written"
+            );
         }
         Command::Process { projects } => {
             let filter = parse_project_filter(projects.projects);
