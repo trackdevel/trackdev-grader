@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
 
 import { parseInfix, type Expr } from "../config/infix";
-import { openSpecFile, parseSpecJson, saveSpecAs, specToJson } from "../config/load";
+import { openSpecFile, parseSpecJson } from "../config/load";
 import { validateSpec } from "../config/validate";
-import type { FormulaDef, GradeSpec, ManualFields, RawProject } from "../data/types";
+import type { ConstantDef, FormulaDef, GradeSpec, ManualFields, RawProject } from "../data/types";
+import ConstantsSection from "./ConstantsSection";
 import ExprTree from "./ExprTree";
 import ManualFieldsSection from "./ManualFieldsSection";
 
@@ -24,7 +24,7 @@ type Props = {
   specPath: string | null;
   onChange: (spec: GradeSpec) => void;
   onReset: () => void;
-  onSpecPath: (path: string | null) => void;
+  onLoadSpec: (spec: GradeSpec, path: string | null) => void;
 };
 
 export default function FormulaView({
@@ -35,7 +35,7 @@ export default function FormulaView({
   specPath,
   onChange,
   onReset,
-  onSpecPath,
+  onLoadSpec,
 }: Props) {
   const [fileError, setFileError] = useState<string | null>(null);
 
@@ -43,24 +43,9 @@ export default function FormulaView({
     try {
       const opened = await openSpecFile();
       if (opened) {
-        onChange(opened.spec);
-        onSpecPath(opened.path);
+        onLoadSpec(opened.spec, opened.path);
         setFileError(null);
       }
-    } catch (e) {
-      setFileError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const handleSave = async () => {
-    try {
-      if (specPath) {
-        await writeTextFile(specPath, specToJson(spec));
-      } else {
-        const path = await saveSpecAs(spec);
-        if (path) onSpecPath(path);
-      }
-      setFileError(null);
     } catch (e) {
       setFileError(e instanceof Error ? e.message : String(e));
     }
@@ -88,6 +73,10 @@ export default function FormulaView({
     onChange({ ...spec, manual_fields });
   };
 
+  const setConstants = (constants: ConstantDef[]) => {
+    onChange({ ...spec, constants });
+  };
+
   return (
     <section className="view">
       <h3>Formula</h3>
@@ -100,9 +89,6 @@ export default function FormulaView({
         <button type="button" onClick={() => void handleOpen()}>
           Open spec…
         </button>
-        <button type="button" onClick={() => void handleSave()}>
-          Save spec…
-        </button>
         <button type="button" onClick={onReset}>
           Reset to bundled default
         </button>
@@ -112,6 +98,7 @@ export default function FormulaView({
           <span className="badge standard">✓ standard</span>
         )}
         {specPath && <span className="meta">{specPath}</span>}
+        <span className="meta">Use <strong>Save</strong> in the header to persist changes.</span>
       </div>
 
       {(validationError || fileError) && (
@@ -136,6 +123,9 @@ export default function FormulaView({
       <AdvancedJsonEditor spec={spec} onChange={onChange} />
 
       <ParametersSection spec={spec} onChange={onChange} />
+
+      <h3 className="custom-fields-title">Constants</h3>
+      <ConstantsSection constants={spec.constants ?? []} onChange={setConstants} />
 
       <h3 className="custom-fields-title">Custom fields</h3>
       <ManualFieldsSection
