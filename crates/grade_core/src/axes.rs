@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::cohort::{hybrid_normalize, CohortBounds};
 use crate::policy::{count_crit_findings, has_gradable_artifact};
-use crate::spec::GradeSpec;
+use crate::spec::{ExtraTechComponent, GradeSpec};
 use crate::types::{RawProject, RepoMetrics};
 
 /// Per-project 0–10 axis scores injected into formula scope during `grade_cohort`.
@@ -61,6 +61,87 @@ pub fn repo_kind(repo_full_name: &str) -> &'static str {
     } else {
         "spring"
     }
+}
+
+/// EXTRA_TECH aggregate: a raw weighted count of "extra technologies vs.
+/// baseline" across the project's repos. Breadth (`extra_dependency_count`) is
+/// counted per-unit; each curated depth feature is saturated to `[0,1]` (via
+/// `extra_tech_cap`, except the already-bounded `fcm_android_room_store/2`) then
+/// weighted. All weights/caps come from `spec.weights` with defaults, so the
+/// value is deterministic (no cohort coupling) and the professor tunes it in the
+/// desktop. Returns `(extra_tech, components)`; components list only signals with
+/// `raw > 0`.
+pub fn compute_extra_tech(raw: &RawProject, spec: &GradeSpec) -> (f64, Vec<ExtraTechComponent>) {
+    let sum = |key: &str| -> f64 {
+        raw.inventory
+            .iter()
+            .map(|r| r.metrics.get(key).copied().unwrap_or(0.0))
+            .sum()
+    };
+    let w = |name: &str, default: f64| spec.weights.get(name).copied().unwrap_or(default);
+    let cap = w("extra_tech_cap", 3.0).max(1.0);
+    let sat = |x: f64| x.min(cap) / cap;
+
+    let dep = sum("extra_dependency_count");
+    let fcm_send = sum("fcm_send_call_count");
+    let fcm_room = sum("fcm_android_room_store");
+    let spec_defs = sum("specification_def_count");
+    let email = sum("email_send_site_count");
+    let gfx = sum("graphics_custom_draw_count");
+    let av = sum("av_usage_count");
+
+    // (key, raw, weight, normalized contribution-per-weight)
+    let entries: [(&str, f64, f64, f64); 7] = [
+        ("extra_dependency_count", dep, w("w_extra_dep", 1.0), dep),
+        (
+            "fcm_send_call_count",
+            fcm_send,
+            w("w_fcm_spring", 2.0),
+            sat(fcm_send),
+        ),
+        (
+            "fcm_android_room_store",
+            fcm_room,
+            w("w_fcm_android", 3.0),
+            (fcm_room / 2.0).min(1.0),
+        ),
+        (
+            "specification_def_count",
+            spec_defs,
+            w("w_spec", 3.0),
+            sat(spec_defs),
+        ),
+        (
+            "email_send_site_count",
+            email,
+            w("w_email", 2.0),
+            sat(email),
+        ),
+        (
+            "graphics_custom_draw_count",
+            gfx,
+            w("w_graphics", 2.0),
+            sat(gfx),
+        ),
+        ("av_usage_count", av, w("w_av", 2.0), sat(av)),
+    ];
+
+    let mut total = 0.0;
+    let mut components = Vec::new();
+    for (key, raw_val, weight, normalized) in entries {
+        if raw_val <= 0.0 {
+            continue;
+        }
+        let contribution = normalized * weight;
+        total += contribution;
+        components.push(ExtraTechComponent {
+            key: key.to_string(),
+            raw: raw_val,
+            weight,
+            contribution,
+        });
+    }
+    (total, components)
 }
 
 /// Collect all scalar samples for cohort bounds (project-level + per-repo inventory).
@@ -499,6 +580,54 @@ mod tests {
         });
         let d = violation_density_raw(&raw).expect("density");
         assert!((d - 0.5).abs() < 1e-9);
+    }
+
+    fn empty_spec() -> GradeSpec {
+        GradeSpec {
+            meta: crate::spec::Meta::default(),
+            weights: BTreeMap::new(),
+            anchors: BTreeMap::new(),
+            models: BTreeMap::new(),
+            levels: BTreeMap::new(),
+            formulas: crate::spec::Formulas::default(),
+            manual_fields: Default::default(),
+            constants: vec![],
+        }
+    }
+
+    #[test]
+    fn compute_extra_tech_weights_breadth_and_depth() {
+        let mut raw = project_with_inventory();
+        // spring repo: 3 new deps + 5 Specification defs + 1 FCM send
+        raw.inventory[0]
+            .metrics
+            .insert("extra_dependency_count".into(), 3.0);
+        raw.inventory[0]
+            .metrics
+            .insert("specification_def_count".into(), 5.0);
+        raw.inventory[0]
+            .metrics
+            .insert("fcm_send_call_count".into(), 1.0);
+        // android repo: room-store 2 + av usage 6
+        raw.inventory[1]
+            .metrics
+            .insert("fcm_android_room_store".into(), 2.0);
+        raw.inventory[1]
+            .metrics
+            .insert("av_usage_count".into(), 6.0);
+
+        let (total, comps) = compute_extra_tech(&raw, &empty_spec());
+        // defaults cap=3: dep 3*1=3; spec sat(5)=1 *3=3; fcm_send sat(1)=1/3 *2=0.667;
+        // room (2/2)=1 *3=3; av sat(6)=1 *2=2  →  total ≈ 11.667
+        assert!((total - 11.6667).abs() < 0.01, "total={total}");
+        assert_eq!(comps.len(), 5);
+        let dep = comps
+            .iter()
+            .find(|c| c.key == "extra_dependency_count")
+            .unwrap();
+        assert_eq!(dep.contribution, 3.0);
+        // Zero-valued signals (graphics, email) are omitted from the breakdown.
+        assert!(comps.iter().all(|c| c.key != "graphics_custom_draw_count"));
     }
 
     #[test]

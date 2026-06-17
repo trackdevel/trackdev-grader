@@ -187,7 +187,26 @@ pub struct ProjectGrades {
     pub project_final: f64,
     pub team_size: i64,
     pub axes: Vec<AxisGrade>,
+    /// EXTRA_TECH aggregate: weighted "extra technologies vs. baseline" units.
+    /// Injected into the project formula scope as `extra_tech` at default weight 0
+    /// (grade-inert until a formula references it).
+    #[serde(default)]
+    pub extra_tech: f64,
+    /// Per-signal breakdown of `extra_tech` (only signals with raw > 0).
+    #[serde(default)]
+    pub extra_tech_components: Vec<ExtraTechComponent>,
     pub students: Vec<StudentGrades>,
+}
+
+/// One contribution to a project's `extra_tech` aggregate: the signal key, the
+/// raw value summed across the project's repos, the spec weight applied, and the
+/// resulting points (`contribution`). The sum of `contribution` is `extra_tech`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtraTechComponent {
+    pub key: String,
+    pub raw: f64,
+    pub weight: f64,
+    pub contribution: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

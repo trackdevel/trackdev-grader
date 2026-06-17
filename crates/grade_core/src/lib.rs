@@ -37,9 +37,9 @@ pub use policy::{
 };
 pub use shape::{aggregate, resolve_tasks, structural_scopes};
 pub use spec::{
-    AxisGrade, CodeQualityComponent, ConstantDef, Formulas, GradeOutput, GradeSpec, GradeTrees,
-    ManualFieldDef, ManualFields, Meta, NamedNode, ProjectGrades, StructuralMeta, StructuralOutput,
-    StructuralSpec, StudentGrades,
+    AxisGrade, CodeQualityComponent, ConstantDef, ExtraTechComponent, Formulas, GradeOutput,
+    GradeSpec, GradeTrees, ManualFieldDef, ManualFields, Meta, NamedNode, ProjectGrades,
+    StructuralMeta, StructuralOutput, StructuralSpec, StudentGrades,
 };
 pub use types::{
     AggregateKnobs, AiMaps, AxisInputs, CritFinding, FindingKind, ProjectScopes, RawProject,
