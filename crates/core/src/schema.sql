@@ -868,6 +868,7 @@ CREATE TABLE IF NOT EXISTS project_inventory_runs (
     head_sha       TEXT,
     diagnostics    TEXT,
     scanned_at     TEXT    NOT NULL,           -- ISO-8601 UTC
+    scanner_version TEXT,                      -- EXTRA_TECH: invalidates HEAD cache on key/detector change
     PRIMARY KEY (repo_full_name)
 );
 
@@ -881,6 +882,25 @@ CREATE TABLE IF NOT EXISTS repo_structural_metrics (
 
 CREATE INDEX IF NOT EXISTS idx_repo_structural_metrics_repo
     ON repo_structural_metrics(repo_full_name);
+
+-- EXTRA_TECH: itemized "extra technologies vs. baseline" for a repo. The
+-- numeric counts live in `repo_structural_metrics` (REAL-only); this table
+-- carries the human-readable names + evidence for the report and desktop.
+-- One row per (technology, category); `source` records how it was detected.
+-- Re-populated per scan via DELETE WHERE repo_full_name = ? then INSERT.
+CREATE TABLE IF NOT EXISTS repo_extra_technologies (
+    repo_full_name TEXT NOT NULL,
+    technology     TEXT NOT NULL,   -- catalog name or bare coordinate
+    category       TEXT NOT NULL,   -- fcm | specifications | email | graphics | av | dependency
+    source         TEXT NOT NULL,   -- gradle | ast | both
+    evidence       TEXT,            -- file:line or dependency coordinate
+    depth          REAL NOT NULL DEFAULT 0,
+    head_sha       TEXT,
+    PRIMARY KEY (repo_full_name, technology, category)
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_extra_tech_repo
+    ON repo_extra_technologies(repo_full_name);
 
 -- Per-team ownership snapshot (T-P2.3). `truck_factor` is the smallest k
 -- such that the top-k authors jointly own >=95% of statements attributed in

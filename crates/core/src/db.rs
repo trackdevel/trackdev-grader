@@ -65,6 +65,9 @@ impl Database {
             // can derive classic complexity findings without re-parsing.
             ("method_metrics", "start_line", "INTEGER"),
             ("method_metrics", "end_line", "INTEGER"),
+            // EXTRA_TECH: scanner version on inventory runs invalidates the
+            // HEAD-SHA cache when the metric-key set / detectors change.
+            ("project_inventory_runs", "scanner_version", "TEXT"),
         ];
         for (table, column, coltype) in migrations {
             let existing: Vec<String> = self.column_names(table)?;
@@ -1413,6 +1416,7 @@ mod tests {
             "llm_quality_flag",
             "project_inventory_runs",
             "repo_structural_metrics",
+            "repo_extra_technologies",
         ];
 
         let conn = Connection::open_in_memory().unwrap();
