@@ -10,14 +10,16 @@ use crate::formula::{eval, EvalError, Scope};
 use crate::policy::has_gradable_artifact;
 use crate::shape::{aggregate, resolve_tasks};
 use crate::spec::{
-    AxisGrade, GradeOutput, GradeSpec, GradeTrees, NamedNode, ProjectGrades, StudentGrades,
-    StudentTree, TaskTree,
+    AxisGrade, CodeQualityComponent, GradeOutput, GradeSpec, GradeTrees, NamedNode, ProjectGrades,
+    StudentGrades, StudentTree, TaskTree,
 };
 use crate::types::{ProjectScopes, RawProject, TaskScope};
 
 struct CohortCtx {
     axes: ProjectAxisScores,
-    codequality_penalties: BTreeMap<(i64, String), f64>,
+    /// Per-(project, student) breakdown of the code-quality penalty; the capped
+    /// sum of each list's `points` is the student's `codequality_penalty`.
+    codequality_components: BTreeMap<(i64, String), Vec<CodeQualityComponent>>,
 }
 
 /// Grade an entire cohort: compute hybrid bounds from gradable projects, then grade
@@ -38,7 +40,7 @@ pub fn grade_cohort(
         let scopes = project_scopes(raw, spec)?;
         scoped.push((raw.project_id, scopes));
     }
-    let cq_penalties = codequality_penalties(&scoped, &spec.weights);
+    let cq_components = codequality_penalty_components(&scoped, &spec.weights);
 
     let mut graded = Vec::with_capacity(gradable.len());
     for raw in &gradable {
@@ -55,7 +57,7 @@ pub fn grade_cohort(
             scopes,
             Some(&CohortCtx {
                 axes,
-                codequality_penalties: cq_penalties.clone(),
+                codequality_components: cq_components.clone(),
             }),
         )?;
         graded.push(CohortProjectGrade {
@@ -79,7 +81,7 @@ pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalErro
             &scopes,
             Some(&CohortCtx {
                 axes: absent_project_axes(),
-                codequality_penalties: BTreeMap::new(),
+                codequality_components: BTreeMap::new(),
             }),
         );
     }
@@ -96,9 +98,10 @@ pub fn grade(raw: &RawProject, spec: &GradeSpec) -> Result<GradeOutput, EvalErro
 fn project_scopes(raw: &RawProject, spec: &GradeSpec) -> Result<ProjectScopes, EvalError> {
     let maps = spec.ai_maps();
     let resolved = resolve_tasks(raw, &maps);
+    let weights = weights_with_constants(spec);
     let mut task_keeps = Vec::with_capacity(resolved.len());
     for task_scope in &resolved {
-        let mut scope = task_scope_to_formula_scope(task_scope, &spec.weights);
+        let mut scope = task_scope_to_formula_scope(task_scope, &weights);
         for fd in &spec.formulas.task {
             let node = eval(&fd.expr, &scope, &fd.name, &fd.infix)?;
             scope.insert(fd.name.clone(), node.value);
@@ -110,17 +113,30 @@ fn project_scopes(raw: &RawProject, spec: &GradeSpec) -> Result<ProjectScopes, E
 }
 
 /// Cohort-wide per-student code-quality penalty from percentile bands per signal.
-fn codequality_penalties(
+/// The three blame signals, paired with their `StudentScope` field index used
+/// by the ranking loop (3 = arch, 4 = cx, 5 = sa) and the display name.
+const CQ_DIMENSIONS: [(usize, &str); 3] = [
+    (3, "architecture"),
+    (4, "complexity"),
+    (5, "static_analysis"),
+];
+
+/// Per-(project, student) breakdown of the code-quality penalty. For each blame
+/// signal, students are ranked cohort-wide by blame-per-point; the top
+/// `cq_crit_pct` land in the critical band and the next `cq_warn_pct` in the
+/// warning band, each contributing `cq_crit_pts` / `cq_warn_pts`. The overall
+/// `cq_cap` is applied later when the components are summed (see
+/// `grade_project_with_scopes`), so it is intentionally not used here.
+fn codequality_penalty_components(
     scoped: &[(i64, ProjectScopes)],
     weights: &BTreeMap<String, f64>,
-) -> BTreeMap<(i64, String), f64> {
+) -> BTreeMap<(i64, String), Vec<CodeQualityComponent>> {
     let cq_min_points = weights.get("cq_min_points").copied().unwrap_or(1.0);
     let cq_abs_floor = weights.get("cq_abs_floor").copied().unwrap_or(0.0);
     let cq_crit_pct = weights.get("cq_crit_pct").copied().unwrap_or(0.10);
     let cq_warn_pct = weights.get("cq_warn_pct").copied().unwrap_or(0.30);
     let cq_crit_pts = weights.get("cq_crit_pts").copied().unwrap_or(1.0);
     let cq_warn_pts = weights.get("cq_warn_pts").copied().unwrap_or(0.5);
-    let cq_cap = weights.get("cq_cap").copied().unwrap_or(3.0);
 
     let mut rows: Vec<(i64, String, f64, f64, f64, f64)> = Vec::new();
     for (project_id, scopes) in scoped {
@@ -136,9 +152,9 @@ fn codequality_penalties(
         }
     }
 
-    let mut out: BTreeMap<(i64, String), f64> = BTreeMap::new();
-    for blame_idx in 3usize..=5 {
-        let mut ranked: Vec<(i64, String, f64)> = rows
+    let mut out: BTreeMap<(i64, String), Vec<CodeQualityComponent>> = BTreeMap::new();
+    for (blame_idx, dimension) in CQ_DIMENSIONS {
+        let mut ranked: Vec<(i64, String, f64, f64)> = rows
             .iter()
             .filter_map(|(pid, sid, eff, arch, cx, sa)| {
                 let blame = match blame_idx {
@@ -153,11 +169,11 @@ fn codequality_penalties(
                 if bpp < cq_abs_floor {
                     return None;
                 }
-                Some((*pid, sid.clone(), bpp))
+                Some((*pid, sid.clone(), blame, bpp))
             })
             .collect();
         ranked.sort_by(|a, b| {
-            b.2.partial_cmp(&a.2)
+            b.3.partial_cmp(&a.3)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.1.cmp(&b.1))
         });
@@ -167,22 +183,26 @@ fn codequality_penalties(
         }
         let crit_cutoff = (n as f64 * cq_crit_pct).ceil() as usize;
         let warn_cutoff = (n as f64 * cq_warn_pct).ceil() as usize;
-        for (i, (pid, sid, _bpp)) in ranked.iter().enumerate() {
-            let tier = if i < crit_cutoff {
-                cq_crit_pts
+        for (i, (pid, sid, blame, bpp)) in ranked.iter().enumerate() {
+            let (tier, points) = if i < crit_cutoff {
+                ("critical", cq_crit_pts)
             } else if i < warn_cutoff {
-                cq_warn_pts
+                ("warning", cq_warn_pts)
             } else {
-                0.0
+                ("", 0.0)
             };
-            if tier > 0.0 {
-                let entry = out.entry((*pid, sid.clone())).or_insert(0.0);
-                *entry += tier;
+            if points > 0.0 {
+                out.entry((*pid, sid.clone()))
+                    .or_default()
+                    .push(CodeQualityComponent {
+                        dimension: dimension.to_string(),
+                        blame: *blame,
+                        blame_per_point: *bpp,
+                        tier: tier.to_string(),
+                        points,
+                    });
             }
         }
-    }
-    for pen in out.values_mut() {
-        *pen = pen.min(cq_cap);
     }
     out
 }
@@ -195,12 +215,13 @@ fn grade_project_with_scopes(
 ) -> Result<GradeOutput, EvalError> {
     let maps = spec.ai_maps();
     let resolved = resolve_tasks(raw, &maps);
+    let weights = weights_with_constants(spec);
 
     let mut task_keeps: Vec<(TaskScope, f64)> = Vec::with_capacity(resolved.len());
     let mut task_trees = Vec::with_capacity(resolved.len());
 
     for task_scope in &resolved {
-        let mut scope = task_scope_to_formula_scope(task_scope, &spec.weights);
+        let mut scope = task_scope_to_formula_scope(task_scope, &weights);
         let mut keep_node = None;
         for fd in &spec.formulas.task {
             let node = eval(&fd.expr, &scope, &fd.name, &fd.infix)?;
@@ -224,7 +245,7 @@ fn grade_project_with_scopes(
 
     let manual = spec.manual_field_values(raw.project_id);
     let axis_scores = cohort.map(|c| &c.axes);
-    let mut project_scope = build_project_scope(raw, scopes, &spec.weights, &manual, axis_scores);
+    let mut project_scope = build_project_scope(raw, scopes, &weights, &manual, axis_scores);
     let mut project_tree = Vec::new();
     for fd in &spec.formulas.project {
         let node = eval(&fd.expr, &project_scope, &fd.name, &fd.infix)?;
@@ -255,13 +276,21 @@ fn grade_project_with_scopes(
             .map(|(t, _)| t.raw_points)
             .sum();
 
-        let cq_penalty = cohort
+        let cq_components = cohort
             .and_then(|c| {
-                c.codequality_penalties
+                c.codequality_components
                     .get(&(raw.project_id, stu.student_id.clone()))
-                    .copied()
+                    .cloned()
             })
-            .unwrap_or(0.0);
+            .unwrap_or_default();
+        let cq_cap = spec.weights.get("cq_cap").copied().unwrap_or(3.0);
+        // Clamp to [0, cap]; `.max(0.0)` also normalises the empty-sum -0.0.
+        let cq_penalty = cq_components
+            .iter()
+            .map(|c| c.points)
+            .sum::<f64>()
+            .min(cq_cap)
+            .max(0.0);
 
         let mut stu_scope = project_scope.clone();
         stu_scope.insert("student_eff".into(), stu.student_eff);
@@ -307,6 +336,7 @@ fn grade_project_with_scopes(
             base_grade: round_grade(base_grade, spec.meta.decimals, spec.meta.quantize_final),
             student_penalty,
             codequality_penalty: cq_penalty,
+            codequality_components: cq_components,
             student_final,
         });
         student_trees.push(StudentTree {
@@ -339,6 +369,17 @@ fn grade_project_with_scopes(
             tasks: task_trees,
         },
     })
+}
+
+/// Weights plus user-defined constants, for formula-scope injection. Constants
+/// never clobber a real weight (a name collision is a spec-validation error),
+/// matching the defensive `or_insert` used for manual fields.
+fn weights_with_constants(spec: &GradeSpec) -> BTreeMap<String, f64> {
+    let mut w = spec.weights.clone();
+    for (k, v) in spec.constant_values() {
+        w.entry(k).or_insert(v);
+    }
+    w
 }
 
 fn task_scope_to_formula_scope(task: &TaskScope, weights: &BTreeMap<String, f64>) -> Scope {
@@ -769,6 +810,46 @@ mod tests {
     }
 
     #[test]
+    fn constant_reaches_project_final() {
+        use crate::spec::{ConstantDef, FormulaDef};
+        let mut spec = load_spec();
+        spec.constants.push(ConstantDef {
+            name: "bonus_k".into(),
+            value: 3.0,
+            description: String::new(),
+        });
+        // Wire the constant straight into project_final.
+        let pf: FormulaDef = serde_json::from_str(
+            r#"{"name":"project_final","infix":"bonus_k","expr":{"op":"var","name":"bonus_k"}}"#,
+        )
+        .unwrap();
+        let idx = spec
+            .formulas
+            .project
+            .iter()
+            .position(|f| f.name == "project_final")
+            .unwrap();
+        spec.formulas.project[idx] = pf;
+
+        let out = grade(&mk_raw(99), &spec).unwrap();
+        assert!((out.grades.project_final - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn constant_does_not_clobber_a_weight() {
+        use crate::spec::ConstantDef;
+        let mut spec = load_spec();
+        let floor = spec.weights.get("floor_keep").copied().expect("floor_keep");
+        spec.constants.push(ConstantDef {
+            name: "floor_keep".into(),
+            value: 999.0,
+            description: String::new(),
+        });
+        let merged = weights_with_constants(&spec);
+        assert_eq!(merged.get("floor_keep").copied(), Some(floor));
+    }
+
+    #[test]
     fn codequality_penalty_ranks_per_point_and_caps() {
         use crate::policy::ARCHITECTURE_HOTSPOT;
         use crate::types::{RepoMetrics, StudentFlag};
@@ -865,6 +946,29 @@ mod tests {
         assert!((pen("s3") - 0.5).abs() < 1e-9);
         assert!((pen("s4") - 0.0).abs() < 1e-9);
         assert!((pen("s10") - 0.0).abs() < 1e-9);
+
+        // The per-signal breakdown explains each penalty: the capped sum of a
+        // student's component points equals codequality_penalty.
+        let comps = |sid: &str| {
+            cohort
+                .projects
+                .iter()
+                .flat_map(|p| p.output.grades.students.iter())
+                .find(|s| s.student_id == sid)
+                .unwrap()
+                .codequality_components
+                .clone()
+        };
+        let c1 = comps("s1");
+        assert_eq!(c1.len(), 1);
+        assert_eq!(c1[0].dimension, "architecture");
+        assert_eq!(c1[0].tier, "critical");
+        assert!((c1[0].points - 1.0).abs() < 1e-9);
+        assert!((c1[0].blame - 50.0).abs() < 1e-9); // bpp 5.0 * eff 10.0
+        let c2 = comps("s2");
+        assert_eq!(c2[0].tier, "warning");
+        assert!((c2[0].points - 0.5).abs() < 1e-9);
+        assert!(comps("s4").is_empty());
     }
 
     #[test]

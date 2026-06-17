@@ -102,6 +102,7 @@
       "floor": 0.0
     }
   },
+  "constants": [],
   "formulas": {
     "project": [
       {
@@ -378,12 +379,12 @@
     "arch_k": 0.8392,
     "arch_norm": 3.575,
     "cq_abs_floor": 0.0,
-    "cq_cap": 3.0,
+    "cq_cap": 1.0,
     "cq_crit_pct": 0.1,
-    "cq_crit_pts": 1.0,
+    "cq_crit_pts": 0.5,
     "cq_min_points": 1.0,
     "cq_warn_pct": 0.3,
-    "cq_warn_pts": 0.5,
+    "cq_warn_pts": 0.25,
     "crit_flag_points": 0.75,
     "density_ceiling": 1.0,
     "floor_keep": 0.2,
@@ -398,7 +399,7 @@
     "quality_floor": 0.5,
     "student_penalty_cap": 1.0,
     "undeclared_level_l": 0.5,
-    "undeclared_model_m": 1.0,
+    "undeclared_model_m": 0.0,
     "w_android": 0.6,
     "w_arch": 0.3,
     "w_complexity": 0.3,

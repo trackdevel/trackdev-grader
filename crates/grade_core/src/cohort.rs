@@ -342,6 +342,7 @@ mod tests {
             levels: BTreeMap::new(),
             formulas: Default::default(),
             manual_fields: Default::default(),
+            constants: Vec::new(),
         };
         let bounds = compute_cohort_bounds(&projects, &spec);
         let mi = bounds.metrics.get("code_quality_raw").expect("mi");
