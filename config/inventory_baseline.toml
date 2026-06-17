@@ -1,0 +1,64 @@
+[android]
+dependencies = [
+    "androidx.appcompat:appcompat",
+    "androidx.constraintlayout:constraintlayout",
+    "androidx.core:core-splashscreen",
+    "androidx.hilt:hilt-navigation-fragment",
+    "androidx.lifecycle:lifecycle-livedata",
+    "androidx.lifecycle:lifecycle-viewmodel",
+    "androidx.navigation:navigation-fragment",
+    "androidx.navigation:navigation-ui",
+    "androidx.recyclerview:recyclerview",
+    "androidx.room:room-compiler",
+    "androidx.room:room-runtime",
+    "com.google.android.material:material",
+    "com.google.dagger:hilt-android",
+    "com.google.dagger:hilt-compiler",
+    "com.squareup.okhttp3:logging-interceptor",
+    "com.squareup.okhttp3:okhttp-urlconnection",
+    "com.squareup.retrofit2:converter-gson",
+    "com.squareup.retrofit2:retrofit",
+]
+source_commit = "05e885f86b98bd914bb2fe7a4f83259f7b5b4147"
+
+[android.feature_metrics]
+av_usage_count = 0.0
+email_send_site_count = 0.0
+fcm_android_room_store = 0.0
+fcm_send_call_count = 0.0
+fcm_sending_endpoint_count = 0.0
+graphics_custom_draw_count = 0.0
+spec_executor_repo_count = 0.0
+specification_def_count = 0.0
+
+[spring]
+dependencies = [
+    "com.mysql:mysql-connector-j",
+    "com.squareup.okhttp3:okhttp",
+    "io.minio:minio",
+    "org.jetbrains:annotations",
+    "org.mapstruct.extensions.spring:mapstruct-spring-annotations",
+    "org.mapstruct.extensions.spring:mapstruct-spring-extensions",
+    "org.mapstruct:mapstruct",
+    "org.mapstruct:mapstruct-processor",
+    "org.mariadb.jdbc:mariadb-java-client",
+    "org.projectlombok:lombok",
+    "org.springdoc:springdoc-openapi-starter-webmvc-ui",
+    "org.springframework.boot:spring-boot-starter-actuator",
+    "org.springframework.boot:spring-boot-starter-data-jdbc",
+    "org.springframework.boot:spring-boot-starter-data-jpa",
+    "org.springframework.boot:spring-boot-starter-security",
+    "org.springframework.boot:spring-boot-starter-validation",
+    "org.springframework.boot:spring-boot-starter-web",
+]
+source_commit = "abad57510a1afe160f8c47c967ff270e037cb484"
+
+[spring.feature_metrics]
+av_usage_count = 0.0
+email_send_site_count = 0.0
+fcm_android_room_store = 0.0
+fcm_send_call_count = 0.0
+fcm_sending_endpoint_count = 0.0
+graphics_custom_draw_count = 0.0
+spec_executor_repo_count = 0.0
+specification_def_count = 0.0

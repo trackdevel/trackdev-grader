@@ -1,0 +1,79 @@
+# EXTRA_TECH technology catalog (Layer A breadth).
+#
+# Maps Gradle dependency coordinates (`group:artifact`, version stripped) to a
+# named technology + category. Used by `crates/project_inventory` to itemize the
+# "extra technologies vs. baseline" a team added on top of the starter repos.
+#
+# `category` lines up with the curated AST detectors so a coordinate can
+# corroborate an AST finding:
+#   fcm | specifications | email | graphics | av | dependency
+# `dependency` is the catch-all for any other extra library — still counted as
+# breadth (each new coordinate = one unit toward `extra_dependency_count`).
+#
+# This file mirrors the built-in default in `catalog.rs::default_catalog`; when
+# absent the built-in default is used. Add entries freely; matching is exact on
+# `group:artifact`, case-insensitive.
+#
+# NOTE: image-loading libraries (Glide/Picasso) are intentionally `dependency`,
+# not `graphics` — graphics depth means custom drawing (see the AST detector).
+
+[[technology]]
+name = "Firebase Cloud Messaging"
+category = "fcm"
+coordinates = [
+    "com.google.firebase:firebase-admin",
+    "com.google.firebase:firebase-messaging",
+    "com.google.firebase:firebase-bom",
+]
+
+[[technology]]
+name = "Email (Spring Mail)"
+category = "email"
+coordinates = ["org.springframework.boot:spring-boot-starter-mail"]
+
+[[technology]]
+name = "Media3 / ExoPlayer"
+category = "av"
+coordinates = [
+    "androidx.media3:media3-exoplayer",
+    "androidx.media3:media3-ui",
+    "com.google.android.exoplayer:exoplayer",
+]
+
+[[technology]]
+name = "Image loading (Glide)"
+category = "dependency"
+coordinates = [
+    "com.github.bumptech.glide:glide",
+    "jp.wasabeef:glide-transformations",
+]
+
+[[technology]]
+name = "Image loading (Picasso)"
+category = "dependency"
+coordinates = ["com.squareup.picasso:picasso"]
+
+[[technology]]
+name = "Maps (osmdroid)"
+category = "dependency"
+coordinates = ["org.osmdroid:osmdroid-android"]
+
+[[technology]]
+name = "QR scanning (ZXing)"
+category = "dependency"
+coordinates = ["com.journeyapps:zxing-android-embedded"]
+
+[[technology]]
+name = "Payments (Stripe)"
+category = "dependency"
+coordinates = ["com.stripe:stripe-java", "com.stripe:stripe-android"]
+
+[[technology]]
+name = "Spring AI"
+category = "dependency"
+coordinates = ["org.springframework.ai:spring-ai-bom"]
+
+[[technology]]
+name = "RxJava"
+category = "dependency"
+coordinates = ["io.reactivex.rxjava2:rxjava"]

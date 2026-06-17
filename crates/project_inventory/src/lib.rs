@@ -6,6 +6,10 @@
 
 mod inventory;
 
+pub mod baseline;
+pub mod catalog;
+pub mod detect;
+pub mod gradle;
 pub mod metrics;
 
 use std::path::Path;
@@ -15,6 +19,10 @@ use rusqlite::{params, Connection};
 use sprint_grader_architecture::scanner::{scan_repo, ScannedFile};
 use tracing::{info, warn};
 
+pub use baseline::{InventoryBaseline, StackBaseline};
+pub use catalog::{Stack, TechnologyCatalog, TechnologyEntry};
+pub use detect::{detect_depth, DepthScan, FeatureFinding};
+pub use gradle::scan_gradle_coords;
 pub use inventory::{is_production_main_source, scan_files};
 pub use metrics::ALL_KEYS;
 
@@ -22,6 +30,12 @@ const STATUS_OK: &str = "OK";
 const STATUS_SKIPPED_HEAD_UNCHANGED: &str = "SKIPPED_HEAD_UNCHANGED";
 const STATUS_SKIPPED_NO_SOURCES: &str = "SKIPPED_NO_SOURCES";
 const STATUS_CRASHED: &str = "CRASHED";
+
+/// Bumped whenever the set of emitted metric keys or detector semantics change,
+/// so the HEAD-SHA cache is invalidated automatically (a repo whose `main` has
+/// not moved is still re-scanned when this differs from the recorded run). Bump
+/// this instead of relying on a one-time `force` from the pipeline.
+const SCANNER_VERSION: &str = "extra_tech_v1";
 
 /// Outcome of a single-repo inventory scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,15 +62,20 @@ fn git_head_sha(repo_path: &Path) -> Option<String> {
     }
 }
 
-fn cached_head_sha(conn: &Connection, repo_full_name: &str) -> Option<String> {
+/// Last successful run's `(head_sha, scanner_version)` for cache invalidation.
+fn cached_run(conn: &Connection, repo_full_name: &str) -> Option<(Option<String>, Option<String>)> {
     conn.query_row(
-        "SELECT head_sha FROM project_inventory_runs
+        "SELECT head_sha, scanner_version FROM project_inventory_runs
          WHERE repo_full_name = ? AND status = ?",
         params![repo_full_name, STATUS_OK],
-        |r| r.get::<_, Option<String>>(0),
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        },
     )
     .ok()
-    .flatten()
 }
 
 struct RunRecord<'a> {
@@ -75,8 +94,8 @@ fn record_run(conn: &Connection, run: RunRecord<'_>) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO project_inventory_runs
             (repo_full_name, project_id, status, metric_count, file_count,
-             duration_ms, head_sha, diagnostics, scanned_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             duration_ms, head_sha, diagnostics, scanned_at, scanner_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             run.repo_full_name,
             run.project_id,
@@ -87,6 +106,7 @@ fn record_run(conn: &Connection, run: RunRecord<'_>) -> rusqlite::Result<()> {
             run.head_sha,
             run.diagnostics,
             now,
+            SCANNER_VERSION,
         ],
     )?;
     Ok(())
@@ -122,6 +142,105 @@ fn production_files(files: &[ScannedFile]) -> Vec<&ScannedFile> {
         .collect()
 }
 
+/// One itemized "extra technology" row for `repo_extra_technologies`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtraTechRow {
+    pub technology: String,
+    pub category: String,
+    pub source: String,
+    pub evidence: String,
+    pub depth: f64,
+}
+
+const CURATED_CATEGORIES: &[&str] = &["fcm", "email", "av", "specifications", "graphics"];
+
+/// Merge AST feature findings with new (non-baseline) Gradle coordinates into a
+/// deduplicated `(technology, category)` set. A coordinate in a curated category
+/// that already has an AST row upgrades that row's `source` to `both`; other new
+/// coordinates become their own `gradle` rows (depth = number of coordinates).
+fn build_extra_technologies(
+    features: &[FeatureFinding],
+    new_coords: &[String],
+    catalog: &TechnologyCatalog,
+) -> Vec<ExtraTechRow> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<(String, String), ExtraTechRow> = BTreeMap::new();
+    for f in features {
+        let key = (f.technology.clone(), f.category.clone());
+        let row = map.entry(key).or_insert_with(|| ExtraTechRow {
+            technology: f.technology.clone(),
+            category: f.category.clone(),
+            source: "ast".into(),
+            evidence: f.evidence.clone(),
+            depth: 0.0,
+        });
+        row.depth += f.depth;
+        if row.evidence.is_empty() {
+            row.evidence = f.evidence.clone();
+        }
+    }
+    for coord in new_coords {
+        let (name, cat) = catalog
+            .classify(coord)
+            .map(|(n, c)| (n.to_string(), c.to_string()))
+            .unwrap_or_else(|| (coord.clone(), "dependency".to_string()));
+        // A curated-category dependency corroborates an existing AST finding.
+        if matches!(cat.as_str(), "fcm" | "email" | "av") {
+            let mut corroborated = false;
+            for row in map.values_mut() {
+                if row.category == cat {
+                    if row.source == "ast" {
+                        row.source = "both".into();
+                    }
+                    corroborated = true;
+                }
+            }
+            if corroborated {
+                continue;
+            }
+        }
+        let key = (name.clone(), cat.clone());
+        let row = map.entry(key).or_insert_with(|| ExtraTechRow {
+            technology: name,
+            category: cat,
+            source: "gradle".into(),
+            evidence: coord.clone(),
+            depth: 0.0,
+        });
+        row.depth += 1.0;
+    }
+    map.into_values().collect()
+}
+
+fn persist_extra_technologies(
+    conn: &Connection,
+    repo_full_name: &str,
+    head_sha: Option<&str>,
+    rows: &[ExtraTechRow],
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM repo_extra_technologies WHERE repo_full_name = ?",
+        params![repo_full_name],
+    )?;
+    for r in rows {
+        conn.execute(
+            "INSERT OR REPLACE INTO repo_extra_technologies
+                (repo_full_name, technology, category, source, evidence, depth, head_sha)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                repo_full_name,
+                r.technology,
+                r.category,
+                r.source,
+                r.evidence,
+                r.depth,
+                head_sha
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 /// Scan one cloned repo and persist structural metrics. Idempotent per
 /// `(repo_full_name)`; skips when HEAD matches the last successful run
 /// unless `force` is true (e.g. scanner added a new metric key).
@@ -130,16 +249,20 @@ pub fn scan_repo_to_db(
     repo_path: &Path,
     repo_full_name: &str,
     project_id: i64,
+    catalog: &TechnologyCatalog,
+    baseline: &InventoryBaseline,
     force: bool,
 ) -> rusqlite::Result<ScanSummary> {
     let started = Instant::now();
     let head = git_head_sha(repo_path);
 
     if !force {
-        if let (Some(current), Some(cached)) =
-            (head.as_deref(), cached_head_sha(conn, repo_full_name))
+        if let (Some(current), Some((cached_head, cached_ver))) =
+            (head.as_deref(), cached_run(conn, repo_full_name))
         {
-            if current == cached {
+            if cached_head.as_deref() == Some(current)
+                && cached_ver.as_deref() == Some(SCANNER_VERSION)
+            {
                 let kept: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM repo_structural_metrics WHERE repo_full_name = ?",
@@ -202,8 +325,43 @@ pub fn scan_repo_to_db(
         });
     }
 
-    let metrics = inventory::scan_files(&files);
+    let stack = Stack::from_repo_name(repo_full_name);
+    let stack_base = baseline.for_stack(stack);
+
+    // Existing structural metrics (21 keys).
+    let mut metrics = inventory::scan_files(&files);
+
+    // EXTRA_TECH depth keys, baseline-subtracted (extra = max(0, student - base)).
+    let depth = detect::detect_depth(&files, stack);
+    for (k, v) in depth.metrics {
+        let extra = (v - stack_base.feature(&k)).max(0.0);
+        metrics.insert(k, extra);
+    }
+
+    // EXTRA_TECH breadth: new (non-baseline) Gradle coordinates. `extra_dependency_count`
+    // counts only generic (non-curated) extras; curated coords feed the depth keys.
+    let coords = gradle::scan_gradle_coords(repo_path);
+    let base_deps = stack_base.dep_set();
+    let new_coords: Vec<String> = coords
+        .into_iter()
+        .filter(|c| !base_deps.contains(c))
+        .collect();
+    let dep_count = new_coords
+        .iter()
+        .filter(|c| {
+            catalog
+                .classify(c)
+                .map(|(_, cat)| !CURATED_CATEGORIES.contains(&cat))
+                .unwrap_or(true)
+        })
+        .count();
+    metrics.insert(metrics::EXTRA_DEPENDENCY_COUNT.into(), dep_count as f64);
+
     let written = persist_metrics(conn, repo_full_name, head.as_deref(), &metrics)?;
+
+    let techs = build_extra_technologies(&depth.features, &new_coords, catalog);
+    persist_extra_technologies(conn, repo_full_name, head.as_deref(), &techs)?;
+
     record_run(
         conn,
         RunRecord {
@@ -221,6 +379,7 @@ pub fn scan_repo_to_db(
         repo = repo_full_name,
         files = prod.len(),
         metrics = written,
+        extra_techs = techs.len(),
         "project inventory scan complete"
     );
     Ok(ScanSummary {
@@ -245,11 +404,15 @@ fn resolve_qualified_repo_name(conn: &Connection, bare: &str) -> Option<String> 
     .filter(|s| s.contains('/'))
 }
 
-/// Scan every repo directory under `project_root`.
+/// Scan every repo directory under `project_root`. `catalog` + `baseline` drive
+/// the EXTRA_TECH Layer-A diff (load once via `TechnologyCatalog::load` /
+/// `InventoryBaseline::load`; both degrade gracefully when their TOML is absent).
 pub fn scan_project_to_db(
     conn: &Connection,
     project_root: &Path,
     project_id: i64,
+    catalog: &TechnologyCatalog,
+    baseline: &InventoryBaseline,
     force: bool,
 ) -> rusqlite::Result<usize> {
     if !project_root.is_dir() {
@@ -271,7 +434,15 @@ pub fn scan_project_to_db(
         let repo_path = entry.path();
         let bare = entry.file_name().to_string_lossy().into_owned();
         let repo_full_name = resolve_qualified_repo_name(conn, &bare).unwrap_or(bare);
-        match scan_repo_to_db(conn, &repo_path, &repo_full_name, project_id, force) {
+        match scan_repo_to_db(
+            conn,
+            &repo_path,
+            &repo_full_name,
+            project_id,
+            catalog,
+            baseline,
+            force,
+        ) {
             Ok(summary) => total += summary.metrics_written,
             Err(e) => {
                 warn!(repo = %repo_full_name, error = %e, "project inventory scan failed");
@@ -293,6 +464,33 @@ pub fn scan_project_to_db(
         }
     }
     Ok(total)
+}
+
+/// Scan the two reference starter repos and produce a baseline manifest, for the
+/// `inventory-baseline` CLI to (re)generate `config/inventory_baseline.toml`.
+/// The starter is constant per cohort, so this is run rarely and checked in.
+pub fn generate_baseline(android_repo: &Path, spring_repo: &Path) -> InventoryBaseline {
+    InventoryBaseline {
+        android: scan_stack_baseline(android_repo, Stack::Android),
+        spring: scan_stack_baseline(spring_repo, Stack::Spring),
+    }
+}
+
+fn scan_stack_baseline(repo_path: &Path, stack: Stack) -> StackBaseline {
+    let files = scan_repo(repo_path);
+    let depth = detect::detect_depth(&files, stack);
+    let dependencies: Vec<String> = gradle::scan_gradle_coords(repo_path).into_iter().collect();
+    // `extra_dependency_count` is a diff output, not a baseline level — drop it.
+    let feature_metrics = depth
+        .metrics
+        .into_iter()
+        .filter(|(k, _)| k != metrics::EXTRA_DEPENDENCY_COUNT)
+        .collect();
+    StackBaseline {
+        dependencies,
+        source_commit: git_head_sha(repo_path),
+        feature_metrics,
+    }
 }
 
 #[cfg(test)]
@@ -343,7 +541,9 @@ mod tests {
         )
         .unwrap();
 
-        let s1 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, false).unwrap();
+        let cat = TechnologyCatalog::default_catalog();
+        let base = InventoryBaseline::default();
+        let s1 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, &cat, &base, false).unwrap();
         assert!(!s1.skipped_unchanged);
         assert_eq!(s1.metrics_written, ALL_KEYS.len());
 
@@ -357,11 +557,11 @@ mod tests {
             .unwrap();
         assert!((endpoints - 1.0).abs() < 1e-9);
 
-        let s2 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, false).unwrap();
+        let s2 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, &cat, &base, false).unwrap();
         assert!(s2.skipped_unchanged);
         assert_eq!(s2.metrics_written, 0);
 
-        let s3 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, true).unwrap();
+        let s3 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, &cat, &base, true).unwrap();
         assert!(!s3.skipped_unchanged);
         assert_eq!(s3.metrics_written, ALL_KEYS.len());
     }
