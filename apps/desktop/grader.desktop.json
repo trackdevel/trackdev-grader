@@ -1,4 +1,5 @@
 {
   "version": 1,
-  "grading_db": "/home/imartin/Dropbox/work/git/trackdev/trackdev-grader/data/entregues/grading.db"
+  "grading_db": "/home/imartin/Dropbox/work/git/trackdev/trackdev-grader/data/entregues/grading.db",
+  "grading_spec": "grading.custom.json"
 }

@@ -37,11 +37,36 @@ fn join_path(base_dir: String, file_name: String) -> Result<String, String> {
         .into_owned())
 }
 
+#[tauri::command]
+fn parent_dir(path: String) -> Result<String, String> {
+    config_parent(&path).map(|p| p.to_string_lossy().into_owned())
+}
+
 fn config_parent(config_path: &str) -> Result<PathBuf, String> {
     Path::new(config_path)
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| format!("config path has no parent: {config_path}"))
+}
+
+/// Open an http(s) URL in the user's default browser. The webview would
+/// otherwise navigate away from the app on a plain `<a href>` click, so the
+/// frontend intercepts task/PR links and routes them here. Restricted to
+/// http(s) so it can never shell-execute an arbitrary string.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(format!("refusing to open non-http url: {url}"));
+    }
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
+    result.map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -55,6 +80,8 @@ pub fn run() {
             resolve_stored_path,
             relativize_path,
             join_path,
+            parent_dir,
+            open_external,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -97,5 +124,13 @@ mod tests {
         let resolved =
             resolve_stored_path("/any/grader.desktop.json".into(), abs.clone()).expect("resolve");
         assert_eq!(resolved, abs);
+    }
+
+    #[test]
+    fn parent_dir_returns_containing_directory() {
+        let dir = tmp_dir();
+        let file = dir.join("grader.desktop.json");
+        let parent = parent_dir(file.to_string_lossy().into_owned()).expect("parent");
+        assert_eq!(parent, dir.to_string_lossy());
     }
 }
