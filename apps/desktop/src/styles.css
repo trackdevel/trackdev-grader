@@ -183,6 +183,19 @@ body {
   color: #cbd5e1;
 }
 
+/* Collapsible variant (e.g. Per-task keep): summary styled like the h4 above. */
+details.tree-formula-block > summary {
+  cursor: pointer;
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+details.tree-formula-block[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
 .tree-node {
   margin: 0.25rem 0;
 }
@@ -272,6 +285,13 @@ td {
 
 th {
   color: #9aa7b8;
+  font-weight: 600;
+}
+
+.totals-row th,
+.totals-row td {
+  border-top: 2px solid #3b82f6;
+  color: #e7ecf3;
   font-weight: 600;
 }
 
@@ -406,6 +426,61 @@ button.small {
 
 .custom-fields-title {
   margin-top: 2rem;
+}
+
+.manual-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0.5rem 0 0;
+  border-bottom: 1px solid #243044;
+}
+
+.manual-tab {
+  color: #9aa7b8;
+  background: transparent;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: 8px 8px 0 0;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.manual-tab:hover {
+  color: #e7ecf3;
+  background: #1a2332;
+}
+
+.manual-tab.active {
+  color: #e7ecf3;
+  background: #1a2332;
+  border-color: #243044;
+  border-bottom-color: #3b82f6;
+}
+
+.manual-values-table {
+  margin: 0.5rem 0 1.5rem;
+}
+
+.manual-values-table td:first-child {
+  white-space: nowrap;
+}
+
+.manual-values-table input[type="number"] {
+  width: 6rem;
+}
+
+.manual-note {
+  width: 100%;
+  min-width: 18rem;
+  resize: vertical;
+}
+
+/* Read-only multiline explanation on the Project page. */
+.manual-note-cell {
+  white-space: pre-wrap;
+  color: #cbd5e1;
 }
 
 @media (max-width: 720px) {

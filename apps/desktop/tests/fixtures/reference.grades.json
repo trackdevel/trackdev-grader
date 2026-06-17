@@ -5,7 +5,7 @@
       "quality_grade": 0.0,
       "quality_penalized": 0.0,
       "project_penalty": 0.0,
-      "ai_factor": 0.6,
+      "ai_factor": 0.68,
       "final_grade": 9.42,
       "review_gate": null,
       "team_size": 2,
@@ -46,10 +46,10 @@
       {
         "student_id": "alice",
         "raw_points": 15.0,
-        "effective_points": 13.0,
-        "ai_keep": 0.8666666666666667,
-        "contribution": 0.8666666666666667,
-        "base_grade": 16.33,
+        "effective_points": 15.0,
+        "ai_keep": 1.0,
+        "contribution": 0.8823529411764706,
+        "base_grade": 16.62,
         "student_penalty": 0.0,
         "codequality_penalty": 0.0,
         "final_grade": 10.0,
@@ -60,11 +60,11 @@
         "raw_points": 10.0,
         "effective_points": 1.9999999999999996,
         "ai_keep": 0.19999999999999996,
-        "contribution": 0.1333333333333333,
-        "base_grade": 2.51,
+        "contribution": 0.11764705882352938,
+        "base_grade": 2.22,
         "student_penalty": 0.75,
         "codequality_penalty": 0.0,
-        "final_grade": 1.76,
+        "final_grade": 1.47,
         "review_gate": null
       }
     ]
@@ -249,8 +249,8 @@
         "contribution": 1.0,
         "base_grade": 6.73,
         "student_penalty": 0.0,
-        "codequality_penalty": 1.0,
-        "final_grade": 5.73,
+        "codequality_penalty": 0.5,
+        "final_grade": 6.23,
         "review_gate": null
       }
     ]

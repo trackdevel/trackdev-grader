@@ -1,18 +1,24 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   APP_CONFIG_FILENAME,
+  defaultAppConfigPath,
+  defaultSpecPathFor,
   loadAppConfigFromCwd,
   openAppConfigFile,
+  planSpecFlush,
+  promptConfigPath,
   saveAppConfig,
-  saveAppConfigAs,
-  saveAppConfigToCwd,
 } from "../config/appConfig";
+import { saveSpecToPath } from "../config/load";
 import type { GradeSpec, LoadedDb } from "../data/types";
 
 type Props = {
   appConfigPath: string | null;
   loadedDb: LoadedDb | null;
+  spec: GradeSpec;
+  edited: boolean;
+  dirty: boolean;
   specPath: string | null;
   onConfigApplied: (result: {
     configPath: string;
@@ -21,14 +27,21 @@ type Props = {
     specPath: string | null;
   }) => void;
   onConfigPath: (path: string | null) => void;
+  onSpecPath: (path: string | null) => void;
+  onSaved: () => void;
 };
 
 export default function ConfigToolbar({
   appConfigPath,
   loadedDb,
+  spec,
+  edited,
+  dirty,
   specPath,
   onConfigApplied,
   onConfigPath,
+  onSpecPath,
+  onSaved,
 }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,20 +87,47 @@ export default function ConfigToolbar({
     }
   };
 
+  /**
+   * Flush the in-memory spec to disk so the session pointer references current
+   * formulas + custom fields rather than a stale file, and return the spec path
+   * to record. A never-saved (bundled-default) spec is written to a default
+   * file beside the session — no Save-As dialog, so the user is never asked
+   * "which file?" and can't accidentally aim the pointer at the config itself.
+   */
+  const flushSpec = async (configPath: string): Promise<string | null> => {
+    const plan = planSpecFlush(specPath, edited);
+    if (plan.action === "write") {
+      await saveSpecToPath(spec, plan.path);
+      return plan.path;
+    }
+    if (plan.action === "write-default") {
+      const target = await defaultSpecPathFor(configPath);
+      await saveSpecToPath(spec, target);
+      onSpecPath(target);
+      return target;
+    }
+    return specPath;
+  };
+
+  /** Save everything (spec + session pointer) to a single destination. */
+  const persist = async (configPath: string) => {
+    const dbPath = loadedDb?.path ?? null;
+    const flushed = await flushSpec(configPath);
+    if (!dbPath && !flushed) {
+      setError("Open a grading.db or edit the grading spec before saving");
+      return;
+    }
+    await saveAppConfig(configPath, dbPath, flushed);
+    onConfigPath(configPath);
+    onSaved();
+    setError(null);
+  };
+
   const handleSave = async () => {
     setError(null);
     setLoading(true);
     try {
-      const dbPath = loadedDb?.path ?? null;
-      if (!dbPath && !specPath) {
-        setError("Open a grading.db or grading spec before saving configuration");
-        return;
-      }
-      const path = appConfigPath
-        ? await saveAppConfig(appConfigPath, dbPath, specPath)
-        : await saveAppConfigToCwd(dbPath, specPath);
-      onConfigPath(path);
-      setError(null);
+      await persist(appConfigPath ?? (await defaultAppConfigPath()));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -99,13 +139,8 @@ export default function ConfigToolbar({
     setError(null);
     setLoading(true);
     try {
-      const dbPath = loadedDb?.path ?? null;
-      if (!dbPath && !specPath) {
-        setError("Open a grading.db or grading spec before saving configuration");
-        return;
-      }
-      const path = await saveAppConfigAs(dbPath, specPath);
-      if (path) onConfigPath(path);
+      const chosen = await promptConfigPath();
+      if (chosen) await persist(chosen);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -113,20 +148,47 @@ export default function ConfigToolbar({
     }
   };
 
+  // Ctrl/Cmd-S triggers the one Save. The ref always holds the latest closure
+  // so the listener sees current props without re-binding every render.
+  const saveRef = useRef<() => void>(() => {});
+  saveRef.current = () => {
+    if (!loading) void handleSave();
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        saveRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   return (
     <div className="db-toolbar config-toolbar">
-      <button type="button" onClick={() => void handleSave()} disabled={loading}>
-        {loading ? "Saving…" : "Save configuration"}
+      <button
+        type="button"
+        onClick={() => void handleSave()}
+        disabled={loading}
+        title="Save formulas, custom fields, and the database/spec paths (Ctrl/Cmd-S)"
+      >
+        {loading ? "Saving…" : "Save"}
       </button>
       <button type="button" onClick={() => void handleSaveAs()} disabled={loading}>
-        Save configuration as…
+        Save as…
       </button>
       <button type="button" onClick={() => void handleLoad()} disabled={loading}>
-        Load configuration…
+        Load…
       </button>
       <button type="button" className="small" onClick={() => void handleReloadCwd()} disabled={loading}>
         Reload {APP_CONFIG_FILENAME}
       </button>
+      {dirty && (
+        <span className="badge edited" title="Unsaved changes">
+          ● unsaved
+        </span>
+      )}
       {appConfigPath && <span className="meta">Config: {appConfigPath}</span>}
       {error && <span className="error">{error}</span>}
     </div>

@@ -1,4 +1,4 @@
-import type { LoadedDb, GradeOutput } from "../data/types";
+import type { GradeOutput, GradeSpec, LoadedDb } from "../data/types";
 import { axisScore, qualityEff } from "../logic/gradeAxes";
 import { projectReviewGate } from "../logic/gates";
 import { fmtNum } from "./SortableTable";
@@ -8,6 +8,7 @@ import { studentHref } from "../hooks/useHashRoute";
 type Props = {
   db: LoadedDb;
   grades: Map<number, GradeOutput>;
+  spec: GradeSpec;
   projectId: number;
 };
 
@@ -37,7 +38,7 @@ const AXIS_LABELS: Record<string, string> = {
   architecture: "Architecture score",
 };
 
-export default function ProjectDetail({ db, grades, projectId }: Props) {
+export default function ProjectDetail({ db, grades, spec, projectId }: Props) {
   const raw = db.projects.find((p) => p.project_id === projectId);
   const out = grades.get(projectId);
   const diag = db.diagnostics.get(projectId);
@@ -45,6 +46,10 @@ export default function ProjectDetail({ db, grades, projectId }: Props) {
   if (!raw || !out) {
     return <p className="error">Project not found.</p>;
   }
+
+  const manualDefs = spec.manual_fields?.defs ?? [];
+  const manualValues = spec.manual_fields?.values?.[String(projectId)] ?? {};
+  const manualNotes = spec.manual_fields?.notes?.[String(projectId)] ?? {};
 
   const gate = diag ? projectReviewGate(diag) : null;
   const axisPairs: Array<[string, string | number | null]> = out.grades.axes.map((a) => [
@@ -63,6 +68,14 @@ export default function ProjectDetail({ db, grades, projectId }: Props) {
   const projectFlags = (diag?.flags ?? []).filter(
     (f) => f.student_id === `PROJECT_${projectId}` || f.severity === "CRITICAL",
   );
+
+  // Contribution breakdown: raw estimation points → raw share → AI-weighted
+  // points → final contribution share. Sums are over the listed students so the
+  // share columns add up to 1.0 by construction.
+  const students = out.grades.students;
+  const sumRaw = students.reduce((acc, s) => acc + s.raw_points, 0);
+  const sumEff = students.reduce((acc, s) => acc + s.effective_points, 0);
+  const sumFinalShare = students.reduce((acc, s) => acc + (s.contribution ?? 0), 0);
 
   return (
     <div className="detail-page">
@@ -88,6 +101,41 @@ export default function ProjectDetail({ db, grades, projectId }: Props) {
           ]}
         />
       </section>
+
+      {manualDefs.length > 0 && (
+        <section className="detail-section">
+          <h3>Custom fields</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>field</th>
+                <th>value</th>
+                <th>explanation</th>
+              </tr>
+            </thead>
+            <tbody>
+              {manualDefs.map((d) => {
+                const override = manualValues[d.name];
+                const value = override === undefined ? d.value : override;
+                const note = manualNotes[d.name];
+                return (
+                  <tr key={d.name}>
+                    <td>
+                      {d.name}
+                      {d.description ? <span className="hint"> — {d.description}</span> : null}
+                    </td>
+                    <td>
+                      {fmtNum(value)}
+                      {override === undefined ? <span className="hint"> (default)</span> : null}
+                    </td>
+                    <td className="manual-note-cell">{note ?? ""}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </section>
+      )}
 
       <section className="detail-section">
         <h3>Quality axes</h3>
@@ -130,6 +178,54 @@ export default function ProjectDetail({ db, grades, projectId }: Props) {
                   </tr>
                 );
               })}
+          </tbody>
+        </table>
+      </section>
+
+      <section className="detail-section">
+        <h3>Contribution breakdown</h3>
+        <p className="hint">
+          Raw estimation points give each student a raw share of the team; the declared-AI
+          discount turns them into AI-weighted points, whose shares are the final contribution
+          used for grading. Both “contribution” columns are fractions of 1.0.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>student</th>
+              <th>raw points</th>
+              <th>raw contribution</th>
+              <th>weighted points (AI)</th>
+              <th>final contribution</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...students]
+              .sort((a, b) => b.effective_points - a.effective_points)
+              .map((s) => {
+                const meta = raw.students.find((x) => x.student_id === s.student_id);
+                const rawShare = sumRaw > 0 ? s.raw_points / sumRaw : null;
+                return (
+                  <tr key={s.student_id}>
+                    <td>
+                      <a className="entity-link" href={studentHref(projectId, s.student_id)}>
+                        {meta?.full_name ?? s.student_id}
+                      </a>
+                    </td>
+                    <td>{fmtNum(s.raw_points, 2)}</td>
+                    <td>{rawShare != null ? fmtNum(rawShare, 3) : "—"}</td>
+                    <td>{fmtNum(s.effective_points, 2)}</td>
+                    <td>{s.contribution != null ? fmtNum(s.contribution, 3) : "—"}</td>
+                  </tr>
+                );
+              })}
+            <tr className="totals-row">
+              <th>Team total</th>
+              <td>{fmtNum(sumRaw, 2)}</td>
+              <td>{sumRaw > 0 ? fmtNum(1, 3) : "—"}</td>
+              <td>{fmtNum(sumEff, 2)}</td>
+              <td>{sumEff > 0 ? fmtNum(sumFinalShare, 3) : "—"}</td>
+            </tr>
           </tbody>
         </table>
       </section>

@@ -86,16 +86,21 @@ export const STUDENT_STRUCTURAL = [
   "codequality_penalty",
 ] as const;
 
-export function taskKnownScope(weightKeys: string[]): Set<string> {
-  return new Set([...weightKeys, ...TASK_SCOPE]);
+export function taskKnownScope(
+  weightKeys: string[],
+  constantNames: string[] = [],
+): Set<string> {
+  return new Set([...weightKeys, ...constantNames, ...TASK_SCOPE]);
 }
 
 export function projectKnownScope(
   weightKeys: string[],
   manualNames: string[] = [],
+  constantNames: string[] = [],
 ): Set<string> {
   return new Set([
     ...weightKeys,
+    ...constantNames,
     ...RAW_SCOPE,
     ...STRUCTURAL_SCOPE,
     ...V2_AXIS_SCOPE,
@@ -107,9 +112,11 @@ export function studentKnownScope(
   weightKeys: string[],
   projectFormulaNames: string[],
   manualNames: string[] = [],
+  constantNames: string[] = [],
 ): Set<string> {
   return new Set([
     ...weightKeys,
+    ...constantNames,
     ...RAW_SCOPE,
     ...STRUCTURAL_SCOPE,
     ...V2_AXIS_SCOPE,

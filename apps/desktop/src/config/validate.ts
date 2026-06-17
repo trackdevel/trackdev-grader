@@ -11,6 +11,7 @@ import {
   studentKnownScope,
   TASK_SCOPE,
   taskKnownScope,
+  V2_AXIS_SCOPE,
 } from "./scopes";
 import gradingSchema from "../../config/grading.schema.json";
 
@@ -40,14 +41,18 @@ export function validateSpec(spec: GradeSpec): ValidationResult {
   }
 
   const weightKeys = Object.keys(spec.weights ?? {});
-
-  const manualErr = lintManualFields(spec, weightKeys);
-  if (manualErr) return manualErr;
+  const constantNames = (spec.constants ?? []).map((c) => c.name);
   const manualNames = (spec.manual_fields?.defs ?? []).map((d) => d.name);
+
+  const constErr = lintConstants(spec, weightKeys, manualNames);
+  if (constErr) return constErr;
+
+  const manualErr = lintManualFields(spec, weightKeys, constantNames);
+  if (manualErr) return manualErr;
 
   const taskErr = lintFormulaGroup(
     spec.formulas?.task ?? [],
-    taskKnownScope(weightKeys),
+    taskKnownScope(weightKeys, constantNames),
     "task",
   );
   if (taskErr) return taskErr;
@@ -55,7 +60,7 @@ export function validateSpec(spec: GradeSpec): ValidationResult {
   const projectNames: string[] = [];
   const projectErr = lintFormulaGroupOrdered(
     spec.formulas?.project ?? [],
-    projectKnownScope(weightKeys, manualNames),
+    projectKnownScope(weightKeys, manualNames, constantNames),
     "project",
     projectNames,
   );
@@ -63,7 +68,7 @@ export function validateSpec(spec: GradeSpec): ValidationResult {
 
   const studentErr = lintFormulaGroupOrdered(
     spec.formulas?.student ?? [],
-    studentKnownScope(weightKeys, projectNames, manualNames),
+    studentKnownScope(weightKeys, projectNames, manualNames, constantNames),
     "student",
     [],
   );
@@ -82,6 +87,7 @@ const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 function lintManualFields(
   spec: GradeSpec,
   weightKeys: string[],
+  constantNames: string[],
 ): ValidationResult | null {
   const defs = spec.manual_fields?.defs ?? [];
   if (defs.length === 0) return null;
@@ -94,6 +100,7 @@ function lintManualFields(
 
   const reserved = new Set<string>([
     ...weightKeys,
+    ...constantNames,
     ...RAW_SCOPE,
     ...STRUCTURAL_SCOPE,
     ...STUDENT_STRUCTURAL,
@@ -115,10 +122,62 @@ function lintManualFields(
     if (reserved.has(d.name)) {
       return {
         ok: false,
-        message: `Manual field name '${d.name}' is reserved (collides with a weight, scope variable, or formula name)`,
+        message: `Manual field name '${d.name}' is reserved (collides with a weight, constant, scope variable, or formula name)`,
       };
     }
     seen.add(d.name);
+  }
+  return null;
+}
+
+/**
+ * Lint global constant definitions: each name must be a valid identifier,
+ * unique, and must not collide with a weight, scope variable, manual field, or
+ * formula name — constants are injected into every formula scope as variables.
+ */
+function lintConstants(
+  spec: GradeSpec,
+  weightKeys: string[],
+  manualNames: string[],
+): ValidationResult | null {
+  const consts = spec.constants ?? [];
+  if (consts.length === 0) return null;
+
+  const formulaNames = [
+    ...(spec.formulas?.task ?? []),
+    ...(spec.formulas?.project ?? []),
+    ...(spec.formulas?.student ?? []),
+  ].map((f) => f.name);
+
+  const reserved = new Set<string>([
+    ...weightKeys,
+    ...manualNames,
+    ...RAW_SCOPE,
+    ...STRUCTURAL_SCOPE,
+    ...STUDENT_STRUCTURAL,
+    ...TASK_SCOPE,
+    ...V2_AXIS_SCOPE,
+    ...formulaNames,
+  ]);
+
+  const seen = new Set<string>();
+  for (const c of consts) {
+    if (!IDENTIFIER_RE.test(c.name)) {
+      return {
+        ok: false,
+        message: `Constant name '${c.name}' is not a valid identifier (letters, digits, underscore; cannot start with a digit)`,
+      };
+    }
+    if (seen.has(c.name)) {
+      return { ok: false, message: `Duplicate constant name '${c.name}'` };
+    }
+    if (reserved.has(c.name)) {
+      return {
+        ok: false,
+        message: `Constant name '${c.name}' is reserved (collides with a weight, scope variable, manual field, or formula name)`,
+      };
+    }
+    seen.add(c.name);
   }
   return null;
 }

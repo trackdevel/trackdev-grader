@@ -25,6 +25,9 @@ export function parseSpecJson(text: string): GradeSpec {
   if (!spec.manual_fields) {
     spec.manual_fields = { defs: [], values: {} };
   }
+  if (!spec.constants) {
+    spec.constants = [];
+  }
   return spec;
 }
 

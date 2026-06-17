@@ -29,7 +29,7 @@ export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
 
   const grader = useGrader(loadedDb?.projects ?? NO_PROJECTS);
-  const { setSpec, setSpecPath } = grader;
+  const { loadSpec } = grader;
   const { route } = useHashRoute();
   const activeTab = topTabOf(route);
 
@@ -42,8 +42,7 @@ export default function App() {
         setAppConfigPath(applied.configPath);
         if (applied.db) setLoadedDb(applied.db);
         if (applied.spec) {
-          setSpec(applied.spec);
-          setSpecPath(applied.specPath);
+          loadSpec(applied.spec, applied.specPath);
         }
       } catch (e) {
         if (!cancelled) {
@@ -54,7 +53,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [setSpec, setSpecPath]);
+  }, [loadSpec]);
 
   const parity = useMemo(
     () => checkParity(grader.spec, grader.grades, grader.bundledDefault),
@@ -69,8 +68,7 @@ export default function App() {
   }) => {
     if (result.db) setLoadedDb(result.db);
     if (result.spec) {
-      setSpec(result.spec);
-      setSpecPath(result.specPath);
+      loadSpec(result.spec, result.specPath);
     }
     setAppConfigPath(result.configPath);
   };
@@ -84,9 +82,14 @@ export default function App() {
         <ConfigToolbar
           appConfigPath={appConfigPath}
           loadedDb={loadedDb}
+          spec={grader.spec}
+          edited={grader.edited}
+          dirty={grader.dirty}
           specPath={grader.specPath}
           onConfigApplied={applyConfigSession}
           onConfigPath={setAppConfigPath}
+          onSpecPath={grader.setSpecPath}
+          onSaved={grader.markSaved}
         />
         {bootError && <p className="error">Startup config: {bootError}</p>}
       </header>
@@ -119,7 +122,7 @@ export default function App() {
             specPath={grader.specPath}
             onChange={grader.setSpec}
             onReset={grader.resetSpec}
-            onSpecPath={grader.setSpecPath}
+            onLoadSpec={grader.loadSpec}
           />
         ) : loadedDb === null ? (
           <p className="meta">Open a grading.db to browse students and projects.</p>
@@ -140,6 +143,7 @@ export default function App() {
             key={route.projectId}
             db={loadedDb}
             grades={grader.grades}
+            spec={grader.spec}
             projectId={route.projectId}
           />
         )}

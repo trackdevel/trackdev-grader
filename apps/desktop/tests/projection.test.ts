@@ -201,3 +201,95 @@ describe("projection on reference.db", () => {
     }
   });
 });
+
+describe("loadRawProject AI sprint gating", () => {
+  function seedGatingDb(): Database.Database {
+    const db = new Database(":memory:");
+    db.exec(readFileSync(join(repoRoot, "crates/core/src/schema.sql"), "utf8"));
+    db.exec(`
+      INSERT INTO projects (id, slug, name) VALUES (1, 'team-01', 'Team 01');
+      INSERT INTO students (id, full_name, team_project_id) VALUES ('alice', 'Alice', 1);
+      INSERT INTO sprints (id, project_id, name, start_date, end_date) VALUES
+        (100, 1, 'S1', '2026-01-01', '2026-01-15'),
+        (200, 1, 'S2', '2026-02-01', '2026-02-15'),
+        (300, 1, 'S3', '2026-03-01', '2026-03-15');
+      INSERT INTO tasks (id, task_key, name, type, status, estimation_points, assignee_id, sprint_id) VALUES
+        (1, 'T-1', 'a', 'TASK', 'DONE', 5, 'alice', 100),
+        (2, 'T-2', 'b', 'TASK', 'DONE', 7, 'alice', 300);
+      INSERT INTO task_ai_usage (task_id, model_value, level_value, declared) VALUES
+        (1, 'GPT-5.5', 'E', 1),
+        (2, 'GPT-5.5', 'E', 1);
+    `);
+    return db;
+  }
+
+  it("ignores AI declared before the allowed ordinal (sprints 1-2 keep 100%)", async () => {
+    const db = seedGatingDb();
+    const exec = makeExecutor(db);
+    try {
+      // ordinal 3 → sprints 1 and 2 are AI-forbidden.
+      const raw = await loadRawProject(exec, 1, [100, 200, 300], 3);
+      const early = raw.tasks.find((t) => t.raw_points === 5)!;
+      const late = raw.tasks.find((t) => t.raw_points === 7)!;
+      expect(early.ai_model).toBeNull();
+      expect(early.ai_level).toBeNull();
+      expect(early.declared).toBe(false);
+      expect(late.ai_model).toBe("GPT-5.5");
+      expect(late.ai_level).toBe("E");
+      expect(late.declared).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("keeps every declaration when ordinal defaults to 1 (no restriction)", async () => {
+    const db = seedGatingDb();
+    const exec = makeExecutor(db);
+    try {
+      const raw = await loadRawProject(exec, 1, [100, 200, 300]);
+      expect(raw.tasks).toHaveLength(2);
+      expect(raw.tasks.every((t) => t.declared && t.ai_model === "GPT-5.5")).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("constants in formulas (WASM)", () => {
+  const rawFixturePath = join(fixtureDir, "reference.raw_projects.json");
+
+  it("a constant injected into project_final flows through the engine", async () => {
+    const raws: RawProject[] = JSON.parse(readFileSync(rawFixturePath, "utf8"));
+    const spec = loadSpec();
+    spec.constants = [{ name: "flat_grade", value: 0, description: "" }];
+    // Wire project_final straight to the constant so the effect is unambiguous.
+    const idx = spec.formulas.project.findIndex((f) => f.name === "project_final");
+    spec.formulas.project[idx] = {
+      name: "project_final",
+      infix: "flat_grade",
+      expr: { op: "var", name: "flat_grade" },
+    };
+    await initEngineWithBytes(readFileSync(wasmPath));
+
+    const zero = await recomputeCohort(raws, spec);
+    expect(zero.projects[0].output.grades.project_final).toBeCloseTo(0, 6);
+
+    spec.constants[0].value = 5;
+    const five = await recomputeCohort(raws, spec);
+    expect(five.projects[0].output.grades.project_final).toBeCloseTo(5, 6);
+  });
+
+  it("manual-field explanation notes are ignored by the engine (grades unchanged)", async () => {
+    const raws: RawProject[] = JSON.parse(readFileSync(rawFixturePath, "utf8"));
+    const spec = loadSpec();
+    await initEngineWithBytes(readFileSync(wasmPath));
+    const before = (await recomputeCohort(raws, spec)).projects[0].output.grades.project_final;
+    spec.manual_fields = {
+      defs: [],
+      values: {},
+      notes: { "1": { anything: "a multiline\nexplanation" } },
+    };
+    const after = (await recomputeCohort(raws, spec)).projects[0].output.grades.project_final;
+    expect(after).toBeCloseTo(before, 9);
+  });
+});

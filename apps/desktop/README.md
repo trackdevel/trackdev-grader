@@ -81,14 +81,20 @@ Click **Open grading.db** (in the header) and choose a `.db` file. The app loads
 
 On launch, if the process working directory contains **`grader.desktop.json`**, the app loads that session file automatically (database and grading-spec paths inside it are resolved relative to the config file's folder).
 
-Session toolbar (header):
+Session toolbar (header) — **one Save for everything**. The session file and
+the grading spec are two files on disk (the spec is portable, version-controlled
+policy; the session file is a local bookmark of which db + spec you opened), but
+you never choose between them: one button persists both.
 
 | Action | Effect |
 |--------|--------|
-| **Save configuration** | Writes `grader.desktop.json` in the cwd, or overwrites the config file you loaded |
-| **Save configuration as…** | Pick a path for a new session file |
-| **Load configuration…** | Open a `grader.desktop.json` (or compatible JSON) from disk |
+| **Save** (Ctrl/Cmd-S) | Writes both files at once: flushes the grading spec (formulas + custom fields) to its file, then writes `grader.desktop.json` pointing at the db + spec. A spec that was never saved is written to `grading.custom.json` beside the session file automatically — no "which file?" prompt |
+| **Save as…** | Pick a new location for the session file; the spec is flushed beside it |
+| **Load…** | Open a `grader.desktop.json` (or compatible JSON) from disk |
 | **Reload grader.desktop.json** | Re-read the cwd session file without a file dialog |
+
+An **● unsaved** badge appears next to **Save** whenever the spec has edits that
+aren't on disk yet; it clears once you save.
 
 Example `grader.desktop.json` (paths relative to the config file):
 
@@ -131,8 +137,9 @@ Also on this tab:
 Toolbar actions:
 
 - **Open spec…** — load a custom `*.json` grading spec from disk
-- **Save spec…** — write the current spec (to the open file, or pick a new path)
-- **Reset to bundled default** — restore `config/grading.standard.json` from the repo
+- **Reset to bundled default** — restore `config/grading.standard.json` from the repo (keeps your custom fields)
+
+Saving is handled by the single **Save** in the header — there is no separate "save spec" button to forget.
 
 ### 4. Parity banner
 
@@ -151,7 +158,7 @@ Every field becomes a variable available in the **project** and **student** form
 student_final = clamp(0.8*student_base + 0.2*oral_presentation - student_penalty, 0, 10)
 ```
 
-Definitions and values are stored in the grading spec JSON under `manual_fields`, so **Save spec…** persists them and they travel with the file. **Reset to bundled default** restores the standard formulas but **keeps** your manual fields (they are data, not logic). Deleting a field that already has entered values asks for confirmation first.
+Definitions and values are stored in the grading spec JSON under `manual_fields`, so **Save** in the header persists them (it flushes the spec before writing the session pointer) and they travel with the file. **Reset to bundled default** restores the standard formulas but **keeps** your manual fields (they are data, not logic). Deleting a field that already has entered values asks for confirmation first.
 
 ## Developer commands
 

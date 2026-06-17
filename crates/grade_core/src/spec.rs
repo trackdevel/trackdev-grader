@@ -27,6 +27,21 @@ pub struct GradeSpec {
     /// per-project value overrides. Empty by default; absent in older specs.
     #[serde(default)]
     pub manual_fields: ManualFields,
+    /// Named global constants injected into every formula scope (task, project,
+    /// student). Empty by default; absent in older specs.
+    #[serde(default)]
+    pub constants: Vec<ConstantDef>,
+}
+
+/// A named global constant usable in any formula. `name` is the formula
+/// identifier, `value` the number substituted, `description` a human label.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConstantDef {
+    pub name: String,
+    #[serde(default)]
+    pub value: f64,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// Manual per-project fields: shared definitions + per-project value overrides.
@@ -129,6 +144,14 @@ impl GradeSpec {
         }
     }
 
+    /// Constant `name → value` map for injection into every formula scope.
+    pub fn constant_values(&self) -> BTreeMap<String, f64> {
+        self.constants
+            .iter()
+            .map(|c| (c.name.clone(), c.value))
+            .collect()
+    }
+
     /// Resolve manual-field `name → value` for one project: each defined
     /// field takes the project's override if present, else its default.
     /// Returns an empty map when no fields are defined.
@@ -175,6 +198,23 @@ pub struct AxisGrade {
     pub present: bool,
 }
 
+/// One negative contribution to a student's code-quality penalty: which signal
+/// fired, the per-student blame, and the penalty points it adds. The capped sum
+/// of `points` over a student's components equals `codequality_penalty`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeQualityComponent {
+    /// Signal: "architecture", "complexity", or "static_analysis".
+    pub dimension: String,
+    /// Raw per-student blame magnitude summed from that signal's hotspot flags.
+    pub blame: f64,
+    /// Blame per effective point — the quantity ranked across the cohort.
+    pub blame_per_point: f64,
+    /// Cohort band the student landed in: "critical" or "warning".
+    pub tier: String,
+    /// Penalty points this signal contributes (before the overall cap).
+    pub points: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudentGrades {
     pub student_id: String,
@@ -186,6 +226,9 @@ pub struct StudentGrades {
     pub student_penalty: f64,
     #[serde(default)]
     pub codequality_penalty: f64,
+    /// Per-signal breakdown of `codequality_penalty` (empty when no penalty).
+    #[serde(default)]
+    pub codequality_components: Vec<CodeQualityComponent>,
     pub student_final: f64,
 }
 

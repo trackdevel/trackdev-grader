@@ -14,10 +14,31 @@ use grade_core::{
 use rusqlite::{params, Connection};
 use sprint_grader_core::Database;
 
+/// Sprint ordinal (1-based) from which AI usage counts toward the keep
+/// discount. AI was forbidden in the course's first two sprints, so any
+/// declaration there is void and those tasks keep 100% of their points.
+/// The desktop projection (`apps/desktop/src/data/projection.ts`) mirrors
+/// this value — keep them in sync.
+pub const AI_ALLOWED_FROM_SPRINT_ORDINAL: u32 = 3;
+
+/// No sprint restriction (every sprint counts AI) — used by reference fixtures.
+const AI_ALLOWED_FROM_FIRST_SPRINT: u32 = 1;
+
 pub fn load_raw_project(
     conn: &Connection,
     project_id: i64,
     sprint_ids: &[i64],
+) -> rusqlite::Result<RawProject> {
+    load_raw_project_gated(conn, project_id, sprint_ids, AI_ALLOWED_FROM_FIRST_SPRINT)
+}
+
+/// As [`load_raw_project`], but AI declarations in sprints before
+/// `ai_allowed_from_ordinal` are ignored (the tasks keep 100%).
+pub fn load_raw_project_gated(
+    conn: &Connection,
+    project_id: i64,
+    sprint_ids: &[i64],
+    ai_allowed_from_ordinal: u32,
 ) -> rusqlite::Result<RawProject> {
     let name: String = conn.query_row(
         "SELECT name FROM projects WHERE id = ?",
@@ -58,7 +79,7 @@ pub fn load_raw_project(
         team_size,
         axis,
         inventory: load_inventory(conn, &inventory_repos)?,
-        tasks: load_tasks(conn, project_id, sprint_ids)?,
+        tasks: load_tasks(conn, project_id, sprint_ids, ai_allowed_from_ordinal)?,
         students: load_students(conn, project_id)?,
         crit_findings: vec![],
         student_flags: load_student_flags(conn, project_id, sprint_ids)?,
@@ -130,17 +151,25 @@ fn load_tasks(
     conn: &Connection,
     project_id: i64,
     sprint_ids: &[i64],
+    ai_allowed_from_ordinal: u32,
 ) -> rusqlite::Result<Vec<RawTask>> {
     if sprint_ids.is_empty() {
         return Ok(Vec::new());
     }
+    // `sprint_ids` is ordered by start_date ascending, so the first
+    // `ordinal - 1` entries are the AI-forbidden early sprints. Tasks there are
+    // treated as undeclared (AI ignored) so they keep 100% of their points.
+    let forbidden_count = ai_allowed_from_ordinal.saturating_sub(1) as usize;
+    let ai_forbidden_sprints: std::collections::HashSet<i64> =
+        sprint_ids.iter().take(forbidden_count).copied().collect();
+
     let placeholders = sprint_ids
         .iter()
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT t.assignee_id, t.estimation_points,
+        "SELECT t.sprint_id, t.assignee_id, t.estimation_points,
                 tai.model_value, tai.level_value, tai.declared
          FROM tasks t
          JOIN students s ON s.id = t.assignee_id
@@ -159,22 +188,24 @@ fn load_tasks(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(bind), |r| {
         Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, Option<String>>(2)?,
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
             r.get::<_, Option<String>>(3)?,
-            r.get::<_, Option<i64>>(4)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<i64>>(5)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (assignee_id, raw_pts, model, level, declared_flag) = row?;
+        let (sprint_id, assignee_id, raw_pts, model, level, declared_flag) = row?;
+        let ai_forbidden = ai_forbidden_sprints.contains(&sprint_id);
         out.push(RawTask {
             assignee_id,
             raw_points: raw_pts as f64,
-            ai_model: model,
-            ai_level: level,
-            declared: declared_flag.unwrap_or(0) == 1,
+            ai_model: if ai_forbidden { None } else { model },
+            ai_level: if ai_forbidden { None } else { level },
+            declared: !ai_forbidden && declared_flag.unwrap_or(0) == 1,
         });
     }
     Ok(out)
@@ -295,8 +326,9 @@ pub fn load_cohort_raw_projects(
         let sprint_ids = db
             .sprint_ids_up_to_current(pid, today)
             .with_context(|| format!("sprint_ids for project_id {pid}"))?;
-        let raw = load_raw_project(&db.conn, pid, &sprint_ids)
-            .with_context(|| format!("load_raw_project project_id {pid}"))?;
+        let raw =
+            load_raw_project_gated(&db.conn, pid, &sprint_ids, AI_ALLOWED_FROM_SPRINT_ORDINAL)
+                .with_context(|| format!("load_raw_project project_id {pid}"))?;
         if has_gradable_artifact(&raw) {
             out.push(raw);
         }
@@ -326,5 +358,91 @@ fn resolve_project_ids(db: &Database, project_filter: Option<&[String]>) -> Resu
                 .collect::<rusqlite::Result<Vec<i64>>>()?;
             Ok(ids)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Project with three ascending sprints and a declared-AI task in sprint 1
+    /// (5 pts) and sprint 3 (7 pts). Returns the kept tempdir + open Database.
+    fn seed_three_sprint_project() -> (tempfile::TempDir, Database) {
+        let dir = tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("g.db")).expect("open db");
+        db.create_tables().expect("schema");
+        let c = &db.conn;
+        c.execute(
+            "INSERT INTO projects (id, slug, name) VALUES (1, 'team-01', 'Team 01')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO students (id, username, github_login, full_name, team_project_id)
+             VALUES ('alice', 'alice', 'alice', 'Alice', 1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO sprints (id, project_id, name, start_date, end_date) VALUES
+               (100, 1, 'S1', '2026-01-01', '2026-01-15'),
+               (200, 1, 'S2', '2026-02-01', '2026-02-15'),
+               (300, 1, 'S3', '2026-03-01', '2026-03-15')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO tasks (id, task_key, name, type, status, estimation_points, assignee_id, sprint_id) VALUES
+               (1, 'T-1', 'a', 'TASK', 'DONE', 5, 'alice', 100),
+               (2, 'T-2', 'b', 'TASK', 'DONE', 7, 'alice', 300)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO task_ai_usage (task_id, model_value, level_value, declared, captured_at) VALUES
+               (1, 'GPT-5.5', 'E', 1, '2026-01-02'),
+               (2, 'GPT-5.5', 'E', 1, '2026-03-02')",
+            [],
+        )
+        .unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn ai_declarations_in_forbidden_early_sprints_are_ignored() {
+        let (_dir, db) = seed_three_sprint_project();
+        let sprint_ids = [100i64, 200, 300];
+
+        // ordinal 3 → sprints 1 and 2 are AI-forbidden. The sprint-1 task (5 pts)
+        // is forced undeclared; the sprint-3 task (7 pts) keeps its declaration.
+        let tasks = load_tasks(&db.conn, 1, &sprint_ids, 3).expect("load tasks");
+        let early = tasks
+            .iter()
+            .find(|t| t.raw_points == 5.0)
+            .expect("sprint-1 task");
+        let late = tasks
+            .iter()
+            .find(|t| t.raw_points == 7.0)
+            .expect("sprint-3 task");
+        assert!(early.ai_model.is_none(), "forbidden sprint clears model");
+        assert!(early.ai_level.is_none(), "forbidden sprint clears level");
+        assert!(!early.declared, "forbidden sprint marks task undeclared");
+        assert_eq!(late.ai_model.as_deref(), Some("GPT-5.5"));
+        assert_eq!(late.ai_level.as_deref(), Some("E"));
+        assert!(late.declared);
+    }
+
+    #[test]
+    fn ordinal_one_imposes_no_sprint_restriction() {
+        let (_dir, db) = seed_three_sprint_project();
+        let sprint_ids = [100i64, 200, 300];
+        // ordinal 1 (the reference-fixture / no-restriction value): every task
+        // keeps whatever it declared, regardless of sprint.
+        let tasks = load_tasks(&db.conn, 1, &sprint_ids, 1).expect("load tasks");
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks
+            .iter()
+            .all(|t| t.declared && t.ai_model.as_deref() == Some("GPT-5.5")));
     }
 }

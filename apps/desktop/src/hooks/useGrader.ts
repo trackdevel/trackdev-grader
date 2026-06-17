@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { loadBundledDefault } from "../config/load";
 import { dryRunSpec, isEditedSpec, validateSpec } from "../config/validate";
@@ -14,11 +14,19 @@ export type GraderState = {
   recomputeError: string | null;
   grades: Map<number, GradeOutput>;
   loading: boolean;
+  /** Spec differs from the bundled standard (drives the parity banner). */
   edited: boolean;
+  /** Spec has changes not yet written to disk (drives the Save indicator). */
+  dirty: boolean;
   specPath: string | null;
+  /** Apply an in-app edit: recomputes and marks the spec dirty. */
   setSpec: (spec: GradeSpec) => void;
+  /** Load a spec from disk (session or Open spec…): clean, not dirty. */
+  loadSpec: (spec: GradeSpec, path: string | null) => void;
   resetSpec: () => void;
   setSpecPath: (path: string | null) => void;
+  /** Clear the dirty flag after a successful save. */
+  markSaved: () => void;
 };
 
 async function gradeProbe(raw: RawProject, spec: GradeSpec): Promise<GradeOutput> {
@@ -28,14 +36,29 @@ async function gradeProbe(raw: RawProject, spec: GradeSpec): Promise<GradeOutput
 
 export function useGrader(rawProjects: RawProject[]): GraderState {
   const bundledDefault = useMemo(() => loadBundledDefault(), []);
-  const [spec, setSpec] = useState<GradeSpec>(() => loadBundledDefault());
+  const [spec, setSpecState] = useState<GradeSpec>(() => loadBundledDefault());
   const [specPath, setSpecPath] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [recomputeError, setRecomputeError] = useState<string | null>(null);
   const [grades, setGrades] = useState<Map<number, GradeOutput>>(new Map());
   const [loading, setLoading] = useState(false);
 
   const edited = isEditedSpec(spec, bundledDefault);
+
+  // An in-app edit always dirties the spec; loading from disk does not.
+  const setSpec = useCallback((next: GradeSpec) => {
+    setSpecState(next);
+    setDirty(true);
+  }, []);
+
+  const loadSpec = useCallback((next: GradeSpec, path: string | null) => {
+    setSpecState(next);
+    setSpecPath(path);
+    setDirty(false);
+  }, []);
+
+  const markSaved = useCallback(() => setDirty(false), []);
 
   // Debounced recompute. The `cancelled` flag makes superseded runs drop
   // their results, so rapid spec edits can't commit grades out of order.
@@ -81,15 +104,21 @@ export function useGrader(rawProjects: RawProject[]): GraderState {
     };
   }, [spec, rawProjects]);
 
-  const resetSpec = () => {
+  const resetSpec = useCallback(() => {
     // Reset restores the bundled grading *logic* but preserves professor-entered
     // manual fields (definitions + per-project values), which are data, not logic.
-    setSpec((prev) => {
+    // It changes the in-memory spec, so it counts as an unsaved edit.
+    setSpecState((prev) => {
       const d = loadBundledDefault();
-      return { ...d, manual_fields: prev.manual_fields ?? d.manual_fields };
+      return {
+        ...d,
+        manual_fields: prev.manual_fields ?? d.manual_fields,
+        constants: prev.constants ?? d.constants,
+      };
     });
     setSpecPath(null);
-  };
+    setDirty(true);
+  }, []);
 
   return {
     spec,
@@ -99,9 +128,12 @@ export function useGrader(rawProjects: RawProject[]): GraderState {
     grades,
     loading,
     edited,
+    dirty,
     specPath,
     setSpec,
+    loadSpec,
     resetSpec,
     setSpecPath,
+    markSaved,
   };
 }

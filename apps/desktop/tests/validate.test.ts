@@ -141,4 +141,78 @@ describe("validateSpec — manual fields", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toContain("Duplicate");
   });
+
+  it("accepts per-project multiline explanation notes alongside values", () => {
+    const spec = structuredClone(loadBundledDefault());
+    spec.manual_fields = {
+      defs: [{ name: "oral", value: 0, description: "" }],
+      values: { "1": { oral: 5 } },
+      notes: { "1": { oral: "Strong defense.\nSecond line of reasoning." } },
+    };
+    expect(validateSpec(spec).ok).toBe(true);
+  });
+});
+
+describe("validateSpec — constants", () => {
+  function withConstant(name: string, value = 1): GradeSpec {
+    const spec = structuredClone(loadBundledDefault());
+    spec.constants = [{ name, value, description: "" }];
+    return spec;
+  }
+
+  it("accepts a constant referenced in a task formula", () => {
+    const spec = withConstant("frontend_weight", 0.5);
+    spec.formulas.task[0].expr = { op: "var", name: "frontend_weight" };
+    expect(validateSpec(spec).ok).toBe(true);
+  });
+
+  it("accepts a constant referenced in project and student formulas", () => {
+    const spec = withConstant("extra_credit", 1.1);
+    spec.formulas.project[0].expr = { op: "var", name: "extra_credit" };
+    const base = spec.formulas.student.find((f) => f.name === "student_base")!;
+    base.expr = {
+      op: "mul",
+      factors: [
+        { op: "var", name: "student_eff" },
+        { op: "var", name: "extra_credit" },
+      ],
+    };
+    expect(validateSpec(spec).ok).toBe(true);
+  });
+
+  it("rejects a constant name that collides with a weight", () => {
+    const result = validateSpec(withConstant("w_quality"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("reserved");
+  });
+
+  it("rejects a constant that collides with a manual field", () => {
+    const spec = withConstant("shared_name");
+    spec.manual_fields = {
+      defs: [{ name: "shared_name", value: 0, description: "" }],
+      values: {},
+    };
+    const result = validateSpec(spec);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("reserved");
+  });
+
+  it("rejects an invalid constant identifier", () => {
+    for (const bad of ["2bad", "has space", "with-dash"]) {
+      const result = validateSpec(withConstant(bad));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.message).toMatch(/identifier|pattern/);
+    }
+  });
+
+  it("rejects duplicate constant names", () => {
+    const spec = structuredClone(loadBundledDefault());
+    spec.constants = [
+      { name: "k", value: 1, description: "" },
+      { name: "k", value: 2, description: "" },
+    ];
+    const result = validateSpec(spec);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("Duplicate");
+  });
 });

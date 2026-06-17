@@ -36,6 +36,7 @@ const emptyDiag = (): ProjectDiagnostics => ({
   flags: [],
   aiDetect: [],
   plagiarism: false,
+  tasks: [],
 });
 
 describe("review gates", () => {

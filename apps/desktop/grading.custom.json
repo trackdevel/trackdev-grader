@@ -2,104 +2,104 @@
   "$schema": "./grading.schema.json",
   "anchors": {
     "activity_count": {
-      "ceiling": 11.0,
-      "floor": 0.0
+      "ceiling": 11,
+      "floor": 0
     },
     "arch_weighted": {
       "ceiling": 7.15,
-      "floor": 0.0
+      "floor": 0
     },
     "avg_cc_per_controller": {
       "ceiling": 1.64,
-      "floor": 0.0
+      "floor": 0
     },
     "avg_cc_per_fragment": {
-      "ceiling": 4.0,
-      "floor": 0.0
+      "ceiling": 4,
+      "floor": 0
     },
     "avg_statements_per_endpoint": {
       "ceiling": 3.94,
-      "floor": 0.0
+      "floor": 0
     },
     "code_quality_raw": {
-      "ceiling": 98.0,
-      "floor": 85.0
+      "ceiling": 98,
+      "floor": 85
     },
     "controller_count": {
-      "ceiling": 22.0,
-      "floor": 0.0
+      "ceiling": 22,
+      "floor": 0
     },
     "custom_query_count": {
       "ceiling": 58.3,
-      "floor": 0.0
+      "floor": 0
     },
     "endpoint_count": {
       "ceiling": 159.5,
-      "floor": 0.0
+      "floor": 0
     },
     "entity_count": {
       "ceiling": 30.7,
-      "floor": 0.0
+      "floor": 0
     },
     "fragment_count": {
       "ceiling": 46.2,
-      "floor": 0.0
+      "floor": 0
     },
     "mutation_score": {
-      "ceiling": 1.0,
-      "floor": 0.0
+      "ceiling": 1,
+      "floor": 0
     },
     "nav_dispatch_count": {
       "ceiling": 70.4,
-      "floor": 0.0
+      "floor": 0
     },
     "nav_dispatch_density": {
       "ceiling": 1.89,
-      "floor": 0.0
+      "floor": 0
     },
     "observe_call_count": {
       "ceiling": 166.1,
-      "floor": 0.0
+      "floor": 0
     },
     "production_loc": {
       "ceiling": 22214.1,
-      "floor": 0.0
+      "floor": 0
     },
     "production_statement_count": {
       "ceiling": 12523.1,
-      "floor": 0.0
+      "floor": 0
     },
     "reactive_state_field_count": {
       "ceiling": 119.9,
-      "floor": 0.0
+      "floor": 0
     },
     "reactive_wiring_density": {
       "ceiling": 4.15,
-      "floor": 0.0
+      "floor": 0
     },
     "repository_count": {
-      "ceiling": 11.0,
-      "floor": 0.0
+      "ceiling": 11,
+      "floor": 0
     },
     "room_database_count": {
       "ceiling": 1.1,
-      "floor": 0.0
+      "floor": 0
     },
     "scheduled_task_count": {
       "ceiling": 4.4,
-      "floor": 0.0
+      "floor": 0
     },
     "service_count": {
       "ceiling": 25.3,
-      "floor": 0.0
+      "floor": 0
     },
     "viewmodel_count": {
       "ceiling": 50.6,
-      "floor": 0.0
+      "floor": 0
     },
     "violation_density": {
-      "ceiling": 1.0,
-      "floor": 0.0
+      "ceiling": 1,
+      "floor": 0
     }
   },
   "constants": [],
@@ -327,15 +327,42 @@
     ]
   },
   "levels": {
-    "A": 0.0,
+    "A": 0,
     "B": 0.25,
     "C": 0.5,
     "D": 0.75,
-    "E": 1.0
+    "E": 1
   },
   "manual_fields": {
-    "defs": [],
-    "values": {}
+    "defs": [
+      {
+        "name": "execution",
+        "value": 5,
+        "description": "Execution quality"
+      },
+      {
+        "name": "ui",
+        "value": 5,
+        "description": "UI quality"
+      },
+      {
+        "name": "extras",
+        "value": 0,
+        "description": "Extra technology used "
+      }
+    ],
+    "values": {
+      "8": {
+        "execution": 9,
+        "ui": 9,
+        "extras": 8
+      }
+    },
+    "notes": {
+      "8": {
+        "extras": "- Xat complet\n- Crypto"
+      }
+    }
   },
   "meta": {
     "decimals": 2,
@@ -344,20 +371,20 @@
       "student_final"
     ],
     "penalty_mode": "subtractive",
-    "quantize_final": 0.0
+    "quantize_final": 0
   },
   "models": {
-    "Cap": 0.0,
+    "Cap": 0,
     "Copilot-Auto": 0.7,
     "Cursor": 0.9,
     "DeepSeek-v4": 0.85,
-    "GPT-5.2-codex": 1.0,
-    "GPT-5.3-codex": 1.0,
-    "GPT-5.4": 1.0,
-    "GPT-5.5": 1.0,
-    "Gemini-3.1": 1.0,
+    "GPT-5.2-codex": 1,
+    "GPT-5.3-codex": 1,
+    "GPT-5.4": 1,
+    "GPT-5.5": 1,
+    "Gemini-3.1": 1,
     "Kimi-2.6": 0.85,
-    "Opus-4.6-4.7": 1.0,
+    "Opus-4.6-4.7": 1,
     "Sonnet-4.6": 0.9
   },
   "notes": [
@@ -374,32 +401,32 @@
   "title": "Grading v4 — work-scaled project grade, author-charged code-quality penalties",
   "version": "4.0.0",
   "weights": {
-    "ai_strength": 1.0,
-    "arch_cap": 3.0,
+    "ai_strength": 1,
+    "arch_cap": 3,
     "arch_k": 0.8392,
     "arch_norm": 3.575,
-    "cq_abs_floor": 0.0,
-    "cq_cap": 1.0,
+    "cq_abs_floor": 0,
+    "cq_cap": 1,
     "cq_crit_pct": 0.1,
     "cq_crit_pts": 0.5,
-    "cq_min_points": 1.0,
+    "cq_min_points": 1,
     "cq_warn_pct": 0.3,
     "cq_warn_pts": 0.25,
     "crit_flag_points": 0.75,
-    "density_ceiling": 1.0,
+    "density_ceiling": 1,
     "floor_keep": 0.2,
-    "inventory_count_ceiling": 50.0,
-    "inventory_density_ceiling": 10.0,
-    "inventory_depth_ceiling": 30.0,
-    "mi_ceiling": 98.0,
-    "mi_floor": 85.0,
+    "inventory_count_ceiling": 50,
+    "inventory_density_ceiling": 10,
+    "inventory_depth_ceiling": 30,
+    "mi_ceiling": 98,
+    "mi_floor": 85,
     "prod_loc_ceiling": 22214.1,
-    "prod_stmt_ceiling": 12000.0,
+    "prod_stmt_ceiling": 12000,
     "quality_blend": 0.5,
     "quality_floor": 0.5,
-    "student_penalty_cap": 1.0,
+    "student_penalty_cap": 1,
     "undeclared_level_l": 0.5,
-    "undeclared_model_m": 0.0,
+    "undeclared_model_m": 0,
     "w_android": 0.6,
     "w_arch": 0.3,
     "w_complexity": 0.3,
