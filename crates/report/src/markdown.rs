@@ -2037,6 +2037,81 @@ fn write_section_b(
 /// student-friendly prose. The static-analysis sub-block is gated on
 /// `include_static_analysis` so the team-facing
 /// `sync-reports --push` view can opt out.
+fn table_exists_simple(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+/// EXTRA_TECH: "Extra technologies vs. baseline" — the libraries and features a
+/// team introduced on top of the course starter repos, from
+/// `repo_extra_technologies` (artifact-shape, sprint-free). Silent when there
+/// are none so minimal-fixture renders stay quiet.
+fn write_extra_technologies_section(
+    buf: &mut String,
+    conn: &Connection,
+    project_id: i64,
+    heading_level: usize,
+) -> rusqlite::Result<()> {
+    if !table_exists_simple(conn, "repo_extra_technologies") {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT t.category, t.technology, t.source, t.depth, COALESCE(t.evidence, '')
+         FROM repo_extra_technologies t
+         JOIN project_inventory_runs r ON r.repo_full_name = t.repo_full_name
+         WHERE r.project_id = ?
+         ORDER BY t.category ASC, t.depth DESC, t.technology ASC",
+    )?;
+    let rows = stmt
+        .query_map([project_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let h = "#".repeat(heading_level);
+    let _ = writeln!(buf, "{} Extra technologies vs. baseline\n", h);
+    let _ = writeln!(
+        buf,
+        "Libraries and features this team introduced on top of the course starter \
+repos (new Gradle dependencies + AST-detected feature usage). `source` is how it \
+was detected (`gradle`, `ast`, or `both`); `depth` is the usage count.\n"
+    );
+    let _ = writeln!(buf, "| Category | Technology | Source | Depth | Evidence |");
+    let _ = writeln!(buf, "|---|---|---|---|---|");
+    for (category, technology, source, depth, evidence) in rows {
+        let depth_s = if depth.fract() == 0.0 {
+            format!("{}", depth as i64)
+        } else {
+            format!("{depth:.1}")
+        };
+        let ev = if evidence.is_empty() {
+            String::new()
+        } else {
+            format!("`{evidence}`")
+        };
+        let _ = writeln!(
+            buf,
+            "| {category} | {technology} | {source} | {depth_s} | {ev} |"
+        );
+    }
+    let _ = writeln!(buf);
+    Ok(())
+}
+
 fn write_artifact_section(
     buf: &mut String,
     conn: &Connection,
@@ -3809,6 +3884,7 @@ fn generate_markdown_report_multi_to_path_inner(
     // once before the per-sprint loop. Grades the code as delivered;
     // per-sprint sections cover the behavioural narrative.
     write_artifact_section(&mut buf, conn, project_id, 2, include_static_analysis)?;
+    write_extra_technologies_section(&mut buf, conn, project_id, 2)?;
 
     for (idx, sid) in sprint_ids_ordered.iter().enumerate() {
         let (sprint_name, start, end) = conn
@@ -5653,5 +5729,47 @@ mod tests {
         );
         assert!(!body.contains("grading attribution"));
         assert!(!body.contains("COMPLEXITY_HOTSPOT band"));
+    }
+
+    #[test]
+    fn extra_technologies_section_renders_rows_and_is_silent_when_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE project_inventory_runs (repo_full_name TEXT PRIMARY KEY,
+                project_id INTEGER, status TEXT, scanned_at TEXT);
+             CREATE TABLE repo_extra_technologies (repo_full_name TEXT, technology TEXT,
+                category TEXT, source TEXT, evidence TEXT, depth REAL,
+                PRIMARY KEY (repo_full_name, technology, category));",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO projects (id, name) VALUES (1, 'T')", [])
+            .unwrap();
+
+        // No rows → section is silent.
+        let mut buf = String::new();
+        write_extra_technologies_section(&mut buf, &conn, 1, 2).unwrap();
+        assert!(buf.is_empty(), "expected silent section, got: {buf}");
+
+        conn.execute(
+            "INSERT INTO project_inventory_runs (repo_full_name, project_id, status, scanned_at)
+             VALUES ('org/spring-x', 1, 'OK', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repo_extra_technologies
+                (repo_full_name, technology, category, source, evidence, depth)
+             VALUES ('org/spring-x', 'Spring Data Specifications', 'specifications', 'ast',
+                     'F.java:10', 5.0)",
+            [],
+        )
+        .unwrap();
+
+        let mut buf2 = String::new();
+        write_extra_technologies_section(&mut buf2, &conn, 1, 2).unwrap();
+        assert!(buf2.contains("## Extra technologies vs. baseline"));
+        assert!(buf2.contains("| specifications | Spring Data Specifications | ast | 5 |"));
+        assert!(buf2.contains("`F.java:10`"));
     }
 }
