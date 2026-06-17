@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { confirm } from "@tauri-apps/plugin-dialog";
 
 import type { ManualFields, RawProject } from "../data/types";
@@ -8,11 +10,54 @@ type Props = {
   onChange: (next: ManualFields) => void;
 };
 
+/** Rename a field key across a project_id → field → V map, preserving entries. */
+function renameFieldKey<V>(
+  map: Record<string, Record<string, V>>,
+  oldName: string,
+  newName: string,
+): Record<string, Record<string, V>> {
+  // Transiently blank name (mid-edit): leave entries under the old key rather
+  // than dropping them — they're recoverable once a real name is typed.
+  if (!newName) return map;
+  const out: Record<string, Record<string, V>> = {};
+  for (const [pid, row] of Object.entries(map)) {
+    const next = { ...row };
+    if (oldName in next) {
+      next[newName] = next[oldName];
+      delete next[oldName];
+    }
+    out[pid] = next;
+  }
+  return out;
+}
+
+/** Drop a field key from every row of a project_id → field → V map. */
+function dropFieldKey<V>(
+  map: Record<string, Record<string, V>>,
+  name: string,
+): Record<string, Record<string, V>> {
+  const out: Record<string, Record<string, V>> = {};
+  for (const [pid, row] of Object.entries(map)) {
+    const next = { ...row };
+    delete next[name];
+    out[pid] = next;
+  }
+  return out;
+}
+
 /**
  * Custom (manual) fields: professor-entered per-project numbers that become
- * variables usable in the project and student formulas.
+ * variables usable in the project and student formulas. Each per-project value
+ * may carry a free-text explanation (display/audit only; never graded).
  */
 export default function ManualFieldsSection({ fields: mf, projects, onChange }: Props) {
+  const notes = mf.notes ?? {};
+
+  // Which field's per-project values are shown. Index-based and clamped so the
+  // selection survives add/remove/rename happening in the definitions table.
+  const [activeField, setActiveField] = useState(0);
+  const activeIndex = Math.min(Math.max(activeField, 0), mf.defs.length - 1);
+
   const addField = () => {
     const existing = new Set(mf.defs.map((d) => d.name));
     let n = mf.defs.length + 1;
@@ -21,42 +66,28 @@ export default function ManualFieldsSection({ fields: mf, projects, onChange }: 
       n += 1;
       name = `field_${n}`;
     }
-    onChange({ defs: [...mf.defs, { name, value: 0, description: "" }], values: mf.values });
+    onChange({ ...mf, defs: [...mf.defs, { name, value: 0, description: "" }] });
   };
 
   const renameField = (index: number, newName: string) => {
     const oldName = mf.defs[index].name;
     if (newName === oldName) return;
     const defs = mf.defs.map((d, i) => (i === index ? { ...d, name: newName } : d));
-    // Migrate stored per-project values from the old key to the new one.
-    // When the name is transiently blank (mid-edit), leave values under the
-    // old key rather than dropping them — they're recoverable, not destroyed.
-    const values: ManualFields["values"] = {};
-    for (const [pid, row] of Object.entries(mf.values)) {
-      const next = { ...row };
-      if (newName && oldName in next) {
-        next[newName] = next[oldName];
-        delete next[oldName];
-      }
-      values[pid] = next;
-    }
-    onChange({ defs, values });
+    onChange({
+      defs,
+      values: renameFieldKey(mf.values, oldName, newName),
+      notes: renameFieldKey(notes, oldName, newName),
+    });
   };
 
   const setDefault = (index: number, raw: string) => {
     const v = Number(raw);
     if (Number.isNaN(v)) return;
-    onChange({
-      defs: mf.defs.map((d, i) => (i === index ? { ...d, value: v } : d)),
-      values: mf.values,
-    });
+    onChange({ ...mf, defs: mf.defs.map((d, i) => (i === index ? { ...d, value: v } : d)) });
   };
 
   const setDescription = (index: number, description: string) => {
-    onChange({
-      defs: mf.defs.map((d, i) => (i === index ? { ...d, description } : d)),
-      values: mf.values,
-    });
+    onChange({ ...mf, defs: mf.defs.map((d, i) => (i === index ? { ...d, description } : d)) });
   };
 
   const removeField = async (index: number) => {
@@ -66,19 +97,17 @@ export default function ManualFieldsSection({ fields: mf, projects, onChange }: 
     ).length;
     if (affected > 0) {
       const ok = await confirm(
-        `Delete "${def.name}"? This also clears entered values for ${affected} team(s).`,
+        `Delete "${def.name}"? This also clears entered values and explanations for ${affected} team(s).`,
         { title: "Delete custom field", kind: "warning" },
       );
       if (!ok) return;
     }
     const defs = mf.defs.filter((_, i) => i !== index);
-    const values: ManualFields["values"] = {};
-    for (const [pid, row] of Object.entries(mf.values)) {
-      const next = { ...row };
-      delete next[def.name];
-      values[pid] = next;
-    }
-    onChange({ defs, values });
+    onChange({
+      defs,
+      values: dropFieldKey(mf.values, def.name),
+      notes: dropFieldKey(notes, def.name),
+    });
   };
 
   const setValue = (projectId: number, name: string, raw: string) => {
@@ -93,7 +122,20 @@ export default function ManualFieldsSection({ fields: mf, projects, onChange }: 
       row[name] = v;
     }
     values[key] = row;
-    onChange({ defs: mf.defs, values });
+    onChange({ ...mf, values });
+  };
+
+  const setNote = (projectId: number, name: string, raw: string) => {
+    const key = String(projectId);
+    const next: NonNullable<ManualFields["notes"]> = { ...notes };
+    const row = { ...(next[key] ?? {}) };
+    if (raw.trim() === "") {
+      delete row[name];
+    } else {
+      row[name] = raw;
+    }
+    next[key] = row;
+    onChange({ ...mf, notes: next });
   };
 
   return (
@@ -167,44 +209,69 @@ export default function ManualFieldsSection({ fields: mf, projects, onChange }: 
         ) : projects.length === 0 ? (
           <p className="hint">Open a grading.db to enter per-project values.</p>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>team</th>
-                {mf.defs.map((d) => (
-                  <th key={d.name} title={d.description}>
-                    {d.name}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {projects.map((p) => {
-                const row = mf.values[String(p.project_id)] ?? {};
-                return (
-                  <tr key={p.project_id}>
-                    <td>
-                      {p.name} <span className="hint">#{p.project_id}</span>
-                    </td>
-                    {mf.defs.map((d) => {
-                      const v = row[d.name];
+          (() => {
+            const d = mf.defs[activeIndex];
+            return (
+              <>
+                <div className="manual-tabs" role="tablist">
+                  {mf.defs.map((f, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      role="tab"
+                      aria-selected={i === activeIndex}
+                      className={i === activeIndex ? "manual-tab active" : "manual-tab"}
+                      onClick={() => setActiveField(i)}
+                    >
+                      {f.name}
+                    </button>
+                  ))}
+                </div>
+                {d.description ? <p className="hint">{d.description}</p> : null}
+                <table className="manual-values-table">
+                  <thead>
+                    <tr>
+                      <th>team</th>
+                      <th>value</th>
+                      <th>explanation</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {projects.map((p) => {
+                      const v = mf.values[String(p.project_id)]?.[d.name];
+                      const note = notes[String(p.project_id)]?.[d.name];
                       return (
-                        <td key={d.name}>
-                          <input
-                            type="number"
-                            step="any"
-                            value={v === undefined ? "" : v}
-                            placeholder={String(d.value)}
-                            onChange={(e) => setValue(p.project_id, d.name, e.target.value)}
-                          />
-                        </td>
+                        <tr key={p.project_id}>
+                          <td>
+                            {p.name} <span className="hint">#{p.project_id}</span>
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              step="any"
+                              value={v === undefined ? "" : v}
+                              placeholder={String(d.value)}
+                              onChange={(e) => setValue(p.project_id, d.name, e.target.value)}
+                            />
+                          </td>
+                          <td>
+                            <textarea
+                              className="manual-note"
+                              rows={2}
+                              spellCheck={false}
+                              value={note ?? ""}
+                              placeholder="Explain the value (optional)"
+                              onChange={(e) => setNote(p.project_id, d.name, e.target.value)}
+                            />
+                          </td>
+                        </tr>
                       );
                     })}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                  </tbody>
+                </table>
+              </>
+            );
+          })()
         )}
       </fieldset>
     </>

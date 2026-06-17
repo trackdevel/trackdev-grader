@@ -112,6 +112,18 @@ export type ManualFields = {
   defs: ManualFieldDef[];
   /** project_id (as string) → field name → value override. */
   values: Record<string, Record<string, number>>;
+  /**
+   * project_id (as string) → field name → free-text explanation of the value.
+   * Display/audit metadata only; never read by the grading engine.
+   */
+  notes?: Record<string, Record<string, string>>;
+};
+
+/** A named global constant usable in any formula (mirror of grade_core). */
+export type ConstantDef = {
+  name: string;
+  value: number;
+  description: string;
 };
 
 export type MetricAnchor = {
@@ -132,6 +144,8 @@ export type GradeSpec = {
     student: FormulaDef[];
   };
   manual_fields: ManualFields;
+  /** Named global constants usable in any formula. */
+  constants: ConstantDef[];
 };
 
 /** @deprecated use GradeSpec */
@@ -189,6 +203,17 @@ export type AxisGrade = {
   present: boolean;
 };
 
+/** One negative contribution to the code-quality penalty (mirror of grade_core). */
+export type CodeQualityComponent = {
+  /** "architecture" | "complexity" | "static_analysis" */
+  dimension: string;
+  blame: number;
+  blame_per_point: number;
+  /** "critical" | "warning" */
+  tier: string;
+  points: number;
+};
+
 export type StudentGrades = {
   student_id: string;
   raw_points: number;
@@ -199,6 +224,8 @@ export type StudentGrades = {
   student_penalty: number;
   /** v4 cohort-percentile code-quality deduction (mirror of grade_core). */
   codequality_penalty: number;
+  /** Per-signal breakdown of codequality_penalty; empty when no penalty. */
+  codequality_components: CodeQualityComponent[];
   student_final: number;
 };
 

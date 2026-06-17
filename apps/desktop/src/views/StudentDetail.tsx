@@ -1,9 +1,35 @@
+import { invoke } from "@tauri-apps/api/core";
+
 import type { LoadedDb, GradeOutput } from "../data/types";
 import { studentReviewGate } from "../logic/gates";
 import { formatFlagDetails, flagSeverityClass } from "../logic/flagDetails";
 import Tree, { FormulaTreeList } from "./Tree";
 import { fmtNum } from "./SortableTable";
 import { projectHref } from "../hooks/useHashRoute";
+
+/** TrackDev task page; mirrors report::markdown::trackdev_task_url. */
+function trackdevTaskUrl(taskId: number): string {
+  return `https://trackdev.org/dashboard/tasks/${taskId}`;
+}
+
+/** Open in the system browser (Tauri); fall back to a new tab under `pnpm dev`. */
+async function openExternal(url: string): Promise<void> {
+  try {
+    await invoke("open_external", { url });
+  } catch {
+    window.open(url, "_blank", "noreferrer");
+  }
+}
+
+const CQ_DIMENSION_LABELS: Record<string, string> = {
+  architecture: "Architecture conformance",
+  complexity: "Code complexity",
+  static_analysis: "Static analysis",
+};
+
+function cqDimensionLabel(dimension: string): string {
+  return CQ_DIMENSION_LABELS[dimension] ?? dimension;
+}
 
 type Props = {
   db: LoadedDb;
@@ -41,7 +67,9 @@ export default function StudentDetail({ db, grades, projectId, studentId }: Prop
   const gate = diag ? studentReviewGate(raw, diag, studentId, stuGrades.effective_points) : null;
   const studentTree = out.trees.students.find((s) => s.student_id === studentId);
   const taskTrees = out.trees.tasks.filter((t) => t.assignee_id === studentId);
-  const studentTasks = raw.tasks.filter((t) => t.assignee_id === studentId);
+  // Display tasks come from the diagnostics channel (id/key/sprint enrichment);
+  // raw.tasks stays the minimal grade input consumed by the engine and gates.
+  const studentTasks = (diag?.tasks ?? []).filter((t) => t.assignee_id === studentId);
   const studentFlags = (diag?.flags ?? []).filter((f) => f.student_id === studentId);
   const aiRows = (diag?.aiDetect ?? []).filter((a) => a.student_id === studentId);
 
@@ -74,6 +102,61 @@ export default function StudentDetail({ db, grades, projectId, studentId }: Prop
       </section>
 
       <section className="detail-section">
+        <h3>Code-quality penalty breakdown</h3>
+        {stuGrades.codequality_components.length === 0 ? (
+          <p className="hint">No code-quality penalty (−0.00).</p>
+        ) : (
+          (() => {
+            const rawSum = stuGrades.codequality_components.reduce((a, c) => a + c.points, 0);
+            const capped = rawSum > stuGrades.codequality_penalty + 1e-9;
+            return (
+              <>
+                <p className="hint">
+                  Each signal ranks this student against the whole cohort by blame per
+                  effective point: the worst ~10% land in the critical band, the next
+                  ~20% in the warning band. The penalty is the sum of the bands below.
+                </p>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>negative contribution</th>
+                      <th>band</th>
+                      <th>blame</th>
+                      <th>blame / point</th>
+                      <th>points</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stuGrades.codequality_components.map((c, i) => (
+                      <tr
+                        key={i}
+                        className={c.tier === "critical" ? "flag-critical" : "flag-warning"}
+                      >
+                        <td>{cqDimensionLabel(c.dimension)}</td>
+                        <td>{c.tier}</td>
+                        <td>{fmtNum(c.blame, 2)}</td>
+                        <td>{fmtNum(c.blame_per_point, 2)}</td>
+                        <td>−{fmtNum(c.points, 2)}</td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td colSpan={4}>
+                        <strong>Total code-quality penalty</strong>
+                        {capped ? ` (capped from −${fmtNum(rawSum, 2)})` : ""}
+                      </td>
+                      <td>
+                        <strong>−{fmtNum(stuGrades.codequality_penalty, 2)}</strong>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </>
+            );
+          })()
+        )}
+      </section>
+
+      <section className="detail-section">
         <h3>How the final grade is computed</h3>
         {studentTree ? (
           <FormulaTreeList items={studentTree.formulas} />
@@ -81,8 +164,8 @@ export default function StudentDetail({ db, grades, projectId, studentId }: Prop
           <p className="hint">No student formula tree.</p>
         )}
         {taskTrees.length > 0 && (
-          <div className="tree-formula-block">
-            <h4>Per-task keep</h4>
+          <details className="tree-formula-block">
+            <summary>Per-task keep ({taskTrees.length})</summary>
             {taskTrees.map((t, i) => (
               <div key={`${t.assignee_id}-${i}`} className="task-tree">
                 <p className="meta">
@@ -91,7 +174,7 @@ export default function StudentDetail({ db, grades, projectId, studentId }: Prop
                 <Tree node={t.node} />
               </div>
             ))}
-          </div>
+          </details>
         )}
       </section>
 
@@ -103,6 +186,8 @@ export default function StudentDetail({ db, grades, projectId, studentId }: Prop
           <table>
             <thead>
               <tr>
+                <th>task</th>
+                <th>sprint</th>
                 <th>raw_points</th>
                 <th>ai_model</th>
                 <th>ai_level</th>
@@ -110,14 +195,30 @@ export default function StudentDetail({ db, grades, projectId, studentId }: Prop
               </tr>
             </thead>
             <tbody>
-              {studentTasks.map((t, i) => (
-                <tr key={i}>
-                  <td>{t.raw_points}</td>
-                  <td>{t.ai_model ?? ""}</td>
-                  <td>{t.ai_level ?? ""}</td>
-                  <td>{t.declared ? "yes" : "no"}</td>
-                </tr>
-              ))}
+              {studentTasks.map((t, i) => {
+                const url = trackdevTaskUrl(t.task_id);
+                return (
+                  <tr key={t.task_id || i}>
+                    <td>
+                      <a
+                        className="entity-link"
+                        href={url}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void openExternal(url);
+                        }}
+                      >
+                        {t.task_key ?? `#${t.task_id}`}
+                      </a>
+                    </td>
+                    <td>{t.sprint ?? ""}</td>
+                    <td>{t.raw_points}</td>
+                    <td>{t.ai_model ?? ""}</td>
+                    <td>{t.ai_level ?? ""}</td>
+                    <td>{t.declared ? "yes" : "no"}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
