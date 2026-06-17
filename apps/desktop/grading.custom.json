@@ -1,0 +1,440 @@
+{
+  "$schema": "./grading.schema.json",
+  "anchors": {
+    "activity_count": {
+      "ceiling": 11,
+      "floor": 0
+    },
+    "arch_weighted": {
+      "ceiling": 7.15,
+      "floor": 0
+    },
+    "avg_cc_per_controller": {
+      "ceiling": 1.64,
+      "floor": 0
+    },
+    "avg_cc_per_fragment": {
+      "ceiling": 4,
+      "floor": 0
+    },
+    "avg_statements_per_endpoint": {
+      "ceiling": 3.94,
+      "floor": 0
+    },
+    "code_quality_raw": {
+      "ceiling": 98,
+      "floor": 85
+    },
+    "controller_count": {
+      "ceiling": 22,
+      "floor": 0
+    },
+    "custom_query_count": {
+      "ceiling": 58.3,
+      "floor": 0
+    },
+    "endpoint_count": {
+      "ceiling": 159.5,
+      "floor": 0
+    },
+    "entity_count": {
+      "ceiling": 30.7,
+      "floor": 0
+    },
+    "fragment_count": {
+      "ceiling": 46.2,
+      "floor": 0
+    },
+    "mutation_score": {
+      "ceiling": 1,
+      "floor": 0
+    },
+    "nav_dispatch_count": {
+      "ceiling": 70.4,
+      "floor": 0
+    },
+    "nav_dispatch_density": {
+      "ceiling": 1.89,
+      "floor": 0
+    },
+    "observe_call_count": {
+      "ceiling": 166.1,
+      "floor": 0
+    },
+    "production_loc": {
+      "ceiling": 22214.1,
+      "floor": 0
+    },
+    "production_statement_count": {
+      "ceiling": 12523.1,
+      "floor": 0
+    },
+    "reactive_state_field_count": {
+      "ceiling": 119.9,
+      "floor": 0
+    },
+    "reactive_wiring_density": {
+      "ceiling": 4.15,
+      "floor": 0
+    },
+    "repository_count": {
+      "ceiling": 11,
+      "floor": 0
+    },
+    "room_database_count": {
+      "ceiling": 1.1,
+      "floor": 0
+    },
+    "scheduled_task_count": {
+      "ceiling": 4.4,
+      "floor": 0
+    },
+    "service_count": {
+      "ceiling": 25.3,
+      "floor": 0
+    },
+    "viewmodel_count": {
+      "ceiling": 50.6,
+      "floor": 0
+    },
+    "violation_density": {
+      "ceiling": 1,
+      "floor": 0
+    }
+  },
+  "constants": [],
+  "formulas": {
+    "project": [
+      {
+        "expr": {
+          "op": "add",
+          "terms": [
+            {
+              "name": "quality_floor",
+              "op": "var"
+            },
+            {
+              "factors": [
+                {
+                  "name": "quality_blend",
+                  "op": "var"
+                },
+                {
+                  "den": {
+                    "op": "num",
+                    "value": 10
+                  },
+                  "num": {
+                    "name": "quality_eff",
+                    "op": "var"
+                  },
+                  "op": "div"
+                }
+              ],
+              "op": "mul"
+            }
+          ]
+        },
+        "infix": "quality_floor + quality_blend * quality_eff / 10",
+        "name": "quality_multiplier"
+      },
+      {
+        "expr": {
+          "factors": [
+            {
+              "name": "work_base",
+              "op": "var"
+            },
+            {
+              "name": "quality_multiplier",
+              "op": "var"
+            }
+          ],
+          "op": "mul"
+        },
+        "infix": "work_base * quality_multiplier",
+        "name": "project_final"
+      }
+    ],
+    "student": [
+      {
+        "expr": {
+          "factors": [
+            {
+              "name": "penalty_on",
+              "op": "var"
+            },
+            {
+              "args": [
+                {
+                  "name": "student_penalty_cap",
+                  "op": "var"
+                },
+                {
+                  "factors": [
+                    {
+                      "name": "crit_flag_points",
+                      "op": "var"
+                    },
+                    {
+                      "name": "student_critical_count",
+                      "op": "var"
+                    }
+                  ],
+                  "op": "mul"
+                }
+              ],
+              "op": "min"
+            }
+          ],
+          "op": "mul"
+        },
+        "infix": "penalty_on * min(student_penalty_cap, crit_flag_points*student_critical_count)",
+        "name": "student_penalty"
+      },
+      {
+        "expr": {
+          "factors": [
+            {
+              "name": "project_final",
+              "op": "var"
+            },
+            {
+              "name": "student_contribution",
+              "op": "var"
+            },
+            {
+              "name": "team_size",
+              "op": "var"
+            }
+          ],
+          "op": "mul"
+        },
+        "infix": "project_final * student_contribution * team_size",
+        "name": "student_base"
+      },
+      {
+        "expr": {
+          "hi": {
+            "op": "num",
+            "value": 10
+          },
+          "lo": {
+            "op": "num",
+            "value": 0
+          },
+          "op": "clamp",
+          "x": {
+            "lhs": {
+              "lhs": {
+                "name": "student_base",
+                "op": "var"
+              },
+              "op": "sub",
+              "rhs": {
+                "name": "student_penalty",
+                "op": "var"
+              }
+            },
+            "op": "sub",
+            "rhs": {
+              "name": "codequality_penalty",
+              "op": "var"
+            }
+          }
+        },
+        "infix": "clamp(student_base - student_penalty - codequality_penalty, 0, 10)",
+        "name": "student_final"
+      }
+    ],
+    "task": [
+      {
+        "expr": {
+          "lhs": {
+            "op": "num",
+            "value": 1
+          },
+          "op": "sub",
+          "rhs": {
+            "factors": [
+              {
+                "lhs": {
+                  "op": "num",
+                  "value": 1
+                },
+                "op": "sub",
+                "rhs": {
+                  "name": "floor_keep",
+                  "op": "var"
+                }
+              },
+              {
+                "name": "ai_strength",
+                "op": "var"
+              },
+              {
+                "name": "model_m",
+                "op": "var"
+              },
+              {
+                "name": "level_l",
+                "op": "var"
+              }
+            ],
+            "op": "mul"
+          }
+        },
+        "infix": "1 - (1 - floor_keep) * ai_strength * model_m * level_l",
+        "name": "keep"
+      }
+    ]
+  },
+  "inputs": {
+    "raw": [
+      "code_quality_raw",
+      "mutation_score",
+      "arch_crit_count",
+      "arch_warn_count",
+      "team_size",
+      "cq_present",
+      "arch_present",
+      "quality",
+      "complexity",
+      "size",
+      "work_base",
+      "quality_eff",
+      "quality_multiplier",
+      "quality_present",
+      "complexity_present",
+      "size_present",
+      "work_base_present"
+    ],
+    "structural": [
+      "sum_raw",
+      "sum_eff",
+      "student_eff",
+      "contribution",
+      "student_contribution",
+      "student_critical_count",
+      "codequality_penalty",
+      "penalty_on"
+    ],
+    "task": [
+      "raw_points",
+      "model_m",
+      "level_l",
+      "declared"
+    ]
+  },
+  "levels": {
+    "A": 0,
+    "B": 0.25,
+    "C": 0.5,
+    "D": 0.75,
+    "E": 1
+  },
+  "manual_fields": {
+    "defs": [
+      {
+        "name": "execution",
+        "value": 5,
+        "description": "Execution quality"
+      },
+      {
+        "name": "ui",
+        "value": 5,
+        "description": "UI quality"
+      },
+      {
+        "name": "extras",
+        "value": 0,
+        "description": "Extra technology used "
+      }
+    ],
+    "values": {
+      "8": {
+        "execution": 9,
+        "ui": 9,
+        "extras": 8
+      }
+    },
+    "notes": {
+      "8": {
+        "extras": "- Xat complet\n- Crypto"
+      }
+    }
+  },
+  "meta": {
+    "decimals": 2,
+    "final_outputs": [
+      "project_final",
+      "student_final"
+    ],
+    "penalty_mode": "subtractive",
+    "quantize_final": 0
+  },
+  "models": {
+    "Cap": 0,
+    "Copilot-Auto": 0.7,
+    "Cursor": 0.9,
+    "DeepSeek-v4": 0.85,
+    "GPT-5.2-codex": 1,
+    "GPT-5.3-codex": 1,
+    "GPT-5.4": 1,
+    "GPT-5.5": 1,
+    "Gemini-3.1": 1,
+    "Kimi-2.6": 0.85,
+    "Opus-4.6-4.7": 1,
+    "Sonnet-4.6": 0.9
+  },
+  "notes": [
+    "Grading v4: project_final = work_base × quality_multiplier (uncapped — may exceed 10). work_base = present-renorm blend of size (w_size) and complexity (w_complexity), scaled by work_scale so the cohort-top reads 10. quality_multiplier = quality_floor + quality_blend × quality_eff/10.",
+    "quality_eff = absolute-mapped maintainability (code_quality_raw on mi_floor→0 .. mi_ceiling→10, NO cohort-percentile stretch) plus mutation when present, MINUS a subtractive layer-architecture penalty min(arch_cap, arch_k × (arch_crit×2 + arch_warn×0.5)). arch_* counts are layer_dependency only; specific per-file violations are charged to students, not the project.",
+    "Size / complexity / quality axis scores are computed in grade_core::grade_cohort; work_base, quality_eff, and quality_multiplier are injected before project formulas run.",
+    "Story points and ai_factor never enter project_final. AI keep affects only student_eff → student_contribution.",
+    "student_base = project_final × student_contribution × team_size (enrolled roster). student_final subtracts behavioural CRITICAL flags (student_penalty) AND codequality_penalty, clamped to [0,10].",
+    "codequality_penalty: cohort-wide percentile bands per signal (architecture / cyclomatic-complexity / static-analysis), ranked by weighted blame ÷ max(student_eff, cq_min_points). Top cq_crit_pct → cq_crit_pts, next band up to cq_warn_pct → cq_warn_pts, gated by cq_abs_floor, summed across signals and capped at cq_cap. Computed in grade_core::grade_cohort and injected as a per-student variable.",
+    "Formulas are grade_core::Expr AST; infix is human review only.",
+    "Div semantics: 0/0 → 0. Rounding on meta.final_outputs only.",
+    "Anchors auto-calibrated (14 projects): work_scale=1.2728, arch_k=0.8392; project_final 5.98–9.00 → 5.98–9.00. MI/arch/inventory floor & ceiling from cohort min/max; work_scale freezes the cohort-top work_base to the calibration target."
+  ],
+  "title": "Grading v4 — work-scaled project grade, author-charged code-quality penalties",
+  "version": "4.0.0",
+  "weights": {
+    "ai_strength": 1,
+    "arch_cap": 3,
+    "arch_k": 0.8392,
+    "arch_norm": 3.575,
+    "cq_abs_floor": 0,
+    "cq_cap": 1,
+    "cq_crit_pct": 0.1,
+    "cq_crit_pts": 0.5,
+    "cq_min_points": 1,
+    "cq_warn_pct": 0.3,
+    "cq_warn_pts": 0.25,
+    "crit_flag_points": 0.75,
+    "density_ceiling": 1,
+    "floor_keep": 0.2,
+    "inventory_count_ceiling": 50,
+    "inventory_density_ceiling": 10,
+    "inventory_depth_ceiling": 30,
+    "mi_ceiling": 98,
+    "mi_floor": 85,
+    "prod_loc_ceiling": 22214.1,
+    "prod_stmt_ceiling": 12000,
+    "quality_blend": 0.5,
+    "quality_floor": 0.5,
+    "student_penalty_cap": 1,
+    "undeclared_level_l": 0.5,
+    "undeclared_model_m": 0,
+    "w_android": 0.6,
+    "w_arch": 0.3,
+    "w_complexity": 0.3,
+    "w_mi": 0.35,
+    "w_mutation": 0.1,
+    "w_quality": 0.5,
+    "w_size": 0.2,
+    "w_spring": 0.4,
+    "work_scale": 1.2728
+  }
+}
