@@ -4498,13 +4498,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "once_cell",
+ "regex",
  "rusqlite",
+ "serde",
  "sprint-grader-architecture",
  "sprint-grader-core",
  "sprint-grader-quality",
  "tempfile",
+ "toml 0.8.2",
  "tracing",
  "tree-sitter",
+ "walkdir",
 ]
 
 [[package]]

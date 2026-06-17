@@ -5,7 +5,9 @@ use std::process::Command;
 
 use rusqlite::Connection;
 use sprint_grader_core::db::apply_schema;
-use sprint_grader_project_inventory::{metrics, scan_repo_to_db};
+use sprint_grader_project_inventory::{
+    metrics, scan_repo_to_db, InventoryBaseline, TechnologyCatalog,
+};
 use tempfile::TempDir;
 
 fn git_init_commit(dir: &std::path::Path) {
@@ -68,7 +70,10 @@ fn spring_repo_inventory_counts_controllers_endpoints_entities() {
     )
     .unwrap();
 
-    let summary = scan_repo_to_db(&conn, &repo, "org/spring-api", 1, false).expect("scan");
+    let cat = TechnologyCatalog::default_catalog();
+    let base = InventoryBaseline::default();
+    let summary =
+        scan_repo_to_db(&conn, &repo, "org/spring-api", 1, &cat, &base, false).expect("scan");
     assert!(!summary.skipped_unchanged);
     assert!(summary.metrics_written > 0);
 

@@ -36,11 +36,24 @@ export type DisplayTask = {
   declared: boolean;
 };
 
+/** One "extra technology vs. baseline" itemized row (EXTRA_TECH, display-only). */
+export type ProjectTechnology = {
+  repo_full_name: string;
+  technology: string;
+  /** fcm | specifications | email | graphics | av | dependency */
+  category: string;
+  /** gradle | ast | both */
+  source: string;
+  evidence: string | null;
+  depth: number;
+};
+
 export type ProjectDiagnostics = {
   flags: DetailedFlag[];
   aiDetect: AiDetectRow[];
   plagiarism: boolean;
   tasks: DisplayTask[];
+  technologies: ProjectTechnology[];
 };
 
 async function loadDisplayTasks(
@@ -88,6 +101,46 @@ async function loadDisplayTasks(
     ai_model: r.model_value,
     ai_level: r.level_value,
     declared: (r.declared ?? 0) === 1,
+  }));
+}
+
+async function tableExists(db: SqlExecutor, name: string): Promise<boolean> {
+  const rows = await db.select<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?`,
+    [name],
+  );
+  return (rows[0]?.n ?? 0) > 0;
+}
+
+/** EXTRA_TECH: itemized extra technologies for the project's repos, scoped via
+ * `project_inventory_runs`. Empty when the table is absent (pre-EXTRA_TECH DB). */
+async function loadExtraTechnologies(
+  db: SqlExecutor,
+  projectId: number,
+): Promise<ProjectTechnology[]> {
+  if (!(await tableExists(db, "repo_extra_technologies"))) return [];
+  const rows = await db.select<{
+    repo_full_name: string;
+    technology: string;
+    category: string;
+    source: string;
+    evidence: string | null;
+    depth: number;
+  }>(
+    `SELECT t.repo_full_name, t.technology, t.category, t.source, t.evidence, t.depth
+     FROM repo_extra_technologies t
+     JOIN project_inventory_runs r ON r.repo_full_name = t.repo_full_name
+     WHERE r.project_id = ?
+     ORDER BY t.category ASC, t.depth DESC, t.technology ASC`,
+    [projectId],
+  );
+  return rows.map((r) => ({
+    repo_full_name: r.repo_full_name,
+    technology: r.technology,
+    category: r.category,
+    source: r.source,
+    evidence: r.evidence,
+    depth: r.depth,
   }));
 }
 
@@ -176,6 +229,7 @@ export async function loadProjectDiagnostics(
   }
 
   const tasks = await loadDisplayTasks(db, projectId, sprintIds);
+  const technologies = await loadExtraTechnologies(db, projectId);
 
-  return { flags, aiDetect, plagiarism, tasks };
+  return { flags, aiDetect, plagiarism, tasks, technologies };
 }

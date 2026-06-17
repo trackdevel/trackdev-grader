@@ -246,6 +246,10 @@ fn grade_project_with_scopes(
     let manual = spec.manual_field_values(raw.project_id);
     let axis_scores = cohort.map(|c| &c.axes);
     let mut project_scope = build_project_scope(raw, scopes, &weights, &manual, axis_scores);
+    // EXTRA_TECH: inject the aggregate before project formulas run so a formula
+    // can reference `extra_tech`. Default weight 0 → grade-inert until wired.
+    let (extra_tech, extra_tech_components) = crate::axes::compute_extra_tech(raw, spec);
+    project_scope.insert("extra_tech".into(), extra_tech);
     let mut project_tree = Vec::new();
     for fd in &spec.formulas.project {
         let node = eval(&fd.expr, &project_scope, &fd.name, &fd.infix)?;
@@ -358,6 +362,8 @@ fn grade_project_with_scopes(
         ),
         team_size: raw.team_size,
         axes,
+        extra_tech,
+        extra_tech_components,
         students: student_grades,
     };
 

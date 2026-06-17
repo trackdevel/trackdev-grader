@@ -142,6 +142,48 @@ export default function ProjectDetail({ db, grades, spec, projectId }: Props) {
         <KvTable pairs={axisPairs} />
       </section>
 
+      {((out.grades.extra_tech ?? 0) > 0 || (diag?.technologies?.length ?? 0) > 0) && (
+        <section className="detail-section">
+          <h3>Extra technologies vs. baseline</h3>
+          <KvTable
+            pairs={[
+              ["extra_tech (weighted)", fmtNum(out.grades.extra_tech ?? 0)],
+              ...(out.grades.extra_tech_components ?? []).map(
+                (c) =>
+                  [
+                    c.key,
+                    `${fmtNum(c.raw)} × ${fmtNum(c.weight)} = ${fmtNum(c.contribution)}`,
+                  ] as [string, string],
+              ),
+            ]}
+          />
+          {(diag?.technologies?.length ?? 0) > 0 && (
+            <table>
+              <thead>
+                <tr>
+                  <th>technology</th>
+                  <th>category</th>
+                  <th>source</th>
+                  <th>depth</th>
+                  <th>evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(diag?.technologies ?? []).map((t) => (
+                  <tr key={`${t.repo_full_name}:${t.category}:${t.technology}`}>
+                    <td>{t.technology}</td>
+                    <td>{t.category}</td>
+                    <td>{t.source}</td>
+                    <td>{fmtNum(t.depth)}</td>
+                    <td className="hint">{t.evidence ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      )}
+
       <section className="detail-section">
         <h3>Project formula tree</h3>
         <FormulaTreeList items={out.trees.project} />

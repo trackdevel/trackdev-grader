@@ -193,7 +193,19 @@ export type ProjectGrades = {
   project_final: number;
   team_size: number;
   axes: AxisGrade[];
+  /** EXTRA_TECH aggregate (weighted extra-technologies units; mirror of grade_core). */
+  extra_tech?: number;
+  /** Per-signal breakdown of extra_tech (only signals with raw > 0). */
+  extra_tech_components?: ExtraTechComponent[];
   students: StudentGrades[];
+};
+
+/** One contribution to the extra_tech aggregate (mirror of grade_core). */
+export type ExtraTechComponent = {
+  key: string;
+  raw: number;
+  weight: number;
+  contribution: number;
 };
 
 export type AxisGrade = {
