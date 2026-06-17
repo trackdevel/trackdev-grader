@@ -31,6 +31,15 @@ export const WEIGHT_KEYS = [
   "prod_stmt_ceiling",
   "quality_floor",
   "quality_blend",
+  // EXTRA_TECH aggregate weights/cap (default 0-impact until referenced).
+  "w_extra_dep",
+  "w_fcm_spring",
+  "w_fcm_android",
+  "w_spec",
+  "w_email",
+  "w_graphics",
+  "w_av",
+  "extra_tech_cap",
 ] as const;
 
 /** Injected by grade_cohort before project formulas (Grading v3). */
@@ -45,6 +54,8 @@ export const V2_AXIS_SCOPE = [
   "complexity_present",
   "size_present",
   "work_base_present",
+  // EXTRA_TECH aggregate injected before project formulas (mirror of grade.rs).
+  "extra_tech",
 ] as const;
 
 export const RAW_SCOPE = [

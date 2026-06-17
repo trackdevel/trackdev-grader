@@ -435,6 +435,14 @@
     "w_quality": 0.5,
     "w_size": 0.2,
     "w_spring": 0.4,
-    "work_scale": 1.2728
+    "work_scale": 1.2728,
+    "w_extra_dep": 1.0,
+    "w_fcm_spring": 2.0,
+    "w_fcm_android": 3.0,
+    "w_spec": 3.0,
+    "w_email": 2.0,
+    "w_graphics": 2.0,
+    "w_av": 2.0,
+    "extra_tech_cap": 3.0
   }
 }
