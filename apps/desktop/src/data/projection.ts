@@ -188,17 +188,25 @@ async function loadTasks(
   db: SqlExecutor,
   projectId: number,
   sprintIds: number[],
+  aiAllowedFromOrdinal: number,
 ): Promise<RawTask[]> {
   if (sprintIds.length === 0) return [];
+  // `sprintIds` is ordered by start_date ascending, so the first
+  // `ordinal - 1` entries are the AI-forbidden early sprints. Their tasks are
+  // treated as undeclared (AI ignored) so they keep 100% of their points.
+  const forbiddenCount = Math.max(aiAllowedFromOrdinal - 1, 0);
+  const aiForbiddenSprints = new Set(sprintIds.slice(0, forbiddenCount));
+
   const ph = placeholders(sprintIds.length);
   const rows = await db.select<{
+    sprint_id: number;
     assignee_id: string;
     estimation_points: number;
     model_value: string | null;
     level_value: string | null;
     declared: number | null;
   }>(
-    `SELECT t.assignee_id, t.estimation_points,
+    `SELECT t.sprint_id, t.assignee_id, t.estimation_points,
             tai.model_value, tai.level_value, tai.declared
      FROM tasks t
      JOIN students s ON s.id = t.assignee_id
@@ -211,13 +219,16 @@ async function loadTasks(
        AND t.estimation_points IS NOT NULL`,
     [projectId, ...sprintIds],
   );
-  return rows.map((r) => ({
-    assignee_id: r.assignee_id,
-    raw_points: r.estimation_points,
-    ai_model: r.model_value,
-    ai_level: r.level_value,
-    declared: (r.declared ?? 0) === 1,
-  }));
+  return rows.map((r) => {
+    const aiForbidden = aiForbiddenSprints.has(r.sprint_id);
+    return {
+      assignee_id: r.assignee_id,
+      raw_points: r.estimation_points,
+      ai_model: aiForbidden ? null : r.model_value,
+      ai_level: aiForbidden ? null : r.level_value,
+      declared: !aiForbidden && (r.declared ?? 0) === 1,
+    };
+  });
 }
 
 async function loadStudents(db: SqlExecutor, projectId: number): Promise<RawStudent[]> {
@@ -384,10 +395,21 @@ export function hasGradableArtifact(raw: RawProject): boolean {
   return sum("production_loc") > 0 || sum("production_statement_count") > 0;
 }
 
+/**
+ * Sprint ordinal (1-based) from which AI usage counts toward the keep discount.
+ * AI was forbidden in the course's first two sprints, so declarations there are
+ * void and those tasks keep 100%. Mirror of Rust
+ * `grading_projection::raw::AI_ALLOWED_FROM_SPRINT_ORDINAL` — keep in sync.
+ */
+export const AI_ALLOWED_FROM_SPRINT_ORDINAL = 3;
+
 export async function loadRawProject(
   db: SqlExecutor,
   projectId: number,
   sprintIds: number[],
+  // Defaults to 1 (no restriction) so reference-fixture tests stay stable;
+  // production (loadGradingDbFromPath) passes AI_ALLOWED_FROM_SPRINT_ORDINAL.
+  aiAllowedFromOrdinal = 1,
 ): Promise<RawProject> {
   const nameRow = await db.queryRow<{ name: string }>(
     `SELECT name FROM projects WHERE id = ?`,
@@ -425,7 +447,7 @@ export async function loadRawProject(
     team_size: teamRow?.n ?? 0,
     axis,
     inventory: await loadInventory(db, inventoryRepos),
-    tasks: await loadTasks(db, projectId, sprintIds),
+    tasks: await loadTasks(db, projectId, sprintIds, aiAllowedFromOrdinal),
     students: await loadStudents(db, projectId),
     // v4 (T2.3): density is gone; criticals are charged to students via the
     // *_HOTSPOT artifact flags, so the project carries no crit_findings.
