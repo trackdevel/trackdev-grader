@@ -10,7 +10,7 @@
  *   term   := unary (('*' | '/') unary)*
  *   unary  := '-' unary | atom
  *   atom   := number | ident | ident '(' expr (',' expr)* ')' | '(' expr ')'
- *   funcs  := min(...), max(...) with ≥2 args; clamp(x, lo, hi)
+ *   funcs  := min(...), max(...) with ≥2 args; clamp(x, lo, hi); pow(base, exp)
  */
 
 export type Expr =
@@ -22,7 +22,8 @@ export type Expr =
   | { op: "div"; num: Expr; den: Expr }
   | { op: "min"; args: Expr[] }
   | { op: "max"; args: Expr[] }
-  | { op: "clamp"; x: Expr; lo: Expr; hi: Expr };
+  | { op: "clamp"; x: Expr; lo: Expr; hi: Expr }
+  | { op: "pow"; base: Expr; exp: Expr };
 
 type Token =
   | { kind: "num"; value: number; pos: number }
@@ -189,9 +190,14 @@ function makeCall(name: string, args: Expr[], at: number): Expr {
         throw new Error(`clamp() needs exactly 3 arguments: x, lo, hi (position ${at})`);
       }
       return { op: "clamp", x: args[0], lo: args[1], hi: args[2] };
+    case "pow":
+      if (args.length !== 2) {
+        throw new Error(`pow() needs exactly 2 arguments: base, exp (position ${at})`);
+      }
+      return { op: "pow", base: args[0], exp: args[1] };
     default:
       throw new Error(
-        `Unknown function '${name}' (position ${at}); available: min, max, clamp`,
+        `Unknown function '${name}' (position ${at}); available: min, max, clamp, pow`,
       );
   }
 }
@@ -236,5 +242,7 @@ function print(e: Expr, parentPrec: number): string {
       return `${e.op}(${e.args.map((a) => print(a, 0)).join(", ")})`;
     case "clamp":
       return `clamp(${print(e.x, 0)}, ${print(e.lo, 0)}, ${print(e.hi, 0)})`;
+    case "pow":
+      return `pow(${print(e.base, 0)}, ${print(e.exp, 0)})`;
   }
 }

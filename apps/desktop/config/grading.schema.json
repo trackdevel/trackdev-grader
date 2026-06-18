@@ -197,6 +197,16 @@
             "hi": { "$ref": "#/$defs/expr" }
           },
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["op", "base", "exp"],
+          "properties": {
+            "op": { "const": "pow" },
+            "base": { "$ref": "#/$defs/expr" },
+            "exp": { "$ref": "#/$defs/expr" }
+          },
+          "additionalProperties": false
         }
       ]
     }
