@@ -64,6 +64,7 @@ describe("review gates", () => {
           ai_model: "Cap",
           ai_level: "A",
           declared: true,
+          ai_exempt: false,
         },
       ],
     });
@@ -82,6 +83,7 @@ describe("review gates", () => {
         ai_model: "Cap",
         ai_level: "C",
         declared: true,
+        ai_exempt: false,
       },
       {
         assignee_id: "bob",
@@ -89,6 +91,7 @@ describe("review gates", () => {
         ai_model: "Cap",
         ai_level: "E",
         declared: true,
+        ai_exempt: false,
       },
     ];
     expect(maxDeclaredLevel(tasks, "bob")).toBe("E");

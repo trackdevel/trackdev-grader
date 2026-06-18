@@ -234,9 +234,11 @@ describe("loadRawProject AI sprint gating", () => {
       expect(early.ai_model).toBeNull();
       expect(early.ai_level).toBeNull();
       expect(early.declared).toBe(false);
+      expect(early.ai_exempt).toBe(true);
       expect(late.ai_model).toBe("GPT-5.5");
       expect(late.ai_level).toBe("E");
       expect(late.declared).toBe(true);
+      expect(late.ai_exempt).toBe(false);
     } finally {
       db.close();
     }
@@ -248,7 +250,58 @@ describe("loadRawProject AI sprint gating", () => {
     try {
       const raw = await loadRawProject(exec, 1, [100, 200, 300]);
       expect(raw.tasks).toHaveLength(2);
-      expect(raw.tasks.every((t) => t.declared && t.ai_model === "GPT-5.5")).toBe(true);
+      expect(
+        raw.tasks.every((t) => t.declared && t.ai_model === "GPT-5.5" && !t.ai_exempt),
+      ).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("loadRawProject parent USER_STORY AI fallback", () => {
+  function seedParentFallbackDb(): Database.Database {
+    const db = new Database(":memory:");
+    db.exec(readFileSync(join(repoRoot, "crates/core/src/schema.sql"), "utf8"));
+    db.exec(`
+      INSERT INTO projects (id, slug, name) VALUES (1, 'team-01', 'Team 01');
+      INSERT INTO students (id, full_name, team_project_id) VALUES ('alice', 'Alice', 1);
+      INSERT INTO sprints (id, project_id, name, start_date, end_date) VALUES
+        (300, 1, 'S3', '2026-03-01', '2026-03-15');
+      INSERT INTO tasks (id, task_key, name, type, status, estimation_points, assignee_id, sprint_id, parent_task_id) VALUES
+        (10, 'US-1', 'story',    'USER_STORY', 'DONE', NULL, 'alice', 300, NULL),
+        (11, 'T-11', 'inherits', 'TASK',       'DONE', 4,    'alice', 300, 10),
+        (12, 'T-12', 'own',      'TASK',       'DONE', 6,    'alice', 300, 10),
+        (13, 'T-13', 'orphan',   'TASK',       'DONE', 3,    'alice', 300, NULL);
+      INSERT INTO task_ai_usage (task_id, model_value, level_value, declared) VALUES
+        (10, 'GPT-5.5', 'E', 1),
+        (12, 'Cap', 'A', 1);
+    `);
+    return db;
+  }
+
+  it("an unset task inherits its parent story's AI usage; own attribute wins; orphan stays undeclared", async () => {
+    const db = seedParentFallbackDb();
+    const exec = makeExecutor(db);
+    try {
+      // ordinal 1 → no sprint exemption, isolating the parent-fallback logic.
+      const raw = await loadRawProject(exec, 1, [300], 1);
+      expect(raw.tasks).toHaveLength(3); // USER_STORY parent excluded
+
+      const inherits = raw.tasks.find((t) => t.raw_points === 4)!;
+      expect(inherits.ai_model).toBe("GPT-5.5");
+      expect(inherits.ai_level).toBe("E");
+      expect(inherits.declared).toBe(true);
+      expect(inherits.ai_exempt).toBe(false);
+
+      const own = raw.tasks.find((t) => t.raw_points === 6)!;
+      expect(own.ai_model).toBe("Cap");
+      expect(own.declared).toBe(true);
+
+      const orphan = raw.tasks.find((t) => t.raw_points === 3)!;
+      expect(orphan.ai_model).toBeNull();
+      expect(orphan.declared).toBe(false);
+      expect(orphan.ai_exempt).toBe(false);
     } finally {
       db.close();
     }

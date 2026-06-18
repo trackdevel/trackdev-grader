@@ -192,12 +192,14 @@ async function loadTasks(
 ): Promise<RawTask[]> {
   if (sprintIds.length === 0) return [];
   // `sprintIds` is ordered by start_date ascending, so the first
-  // `ordinal - 1` entries are the AI-forbidden early sprints. Their tasks are
-  // treated as undeclared (AI ignored) so they keep 100% of their points.
+  // `ordinal - 1` entries are the AI-forbidden early sprints, whose tasks are
+  // exempt (keep 100%) regardless of declaration.
   const forbiddenCount = Math.max(aiAllowedFromOrdinal - 1, 0);
   const aiForbiddenSprints = new Set(sprintIds.slice(0, forbiddenCount));
 
   const ph = placeholders(sprintIds.length);
+  // `ptai` is the parent USER_STORY's AI usage: a task whose own declaration is
+  // unset inherits its parent's "Ús de IA" attribute. Mirror of raw.rs::load_tasks.
   const rows = await db.select<{
     sprint_id: number;
     assignee_id: string;
@@ -205,12 +207,19 @@ async function loadTasks(
     model_value: string | null;
     level_value: string | null;
     declared: number | null;
+    parent_model_value: string | null;
+    parent_level_value: string | null;
+    parent_declared: number | null;
   }>(
     `SELECT t.sprint_id, t.assignee_id, t.estimation_points,
-            tai.model_value, tai.level_value, tai.declared
+            tai.model_value, tai.level_value, tai.declared,
+            ptai.model_value AS parent_model_value,
+            ptai.level_value AS parent_level_value,
+            ptai.declared    AS parent_declared
      FROM tasks t
      JOIN students s ON s.id = t.assignee_id
      LEFT JOIN task_ai_usage tai ON tai.task_id = t.id
+     LEFT JOIN task_ai_usage ptai ON ptai.task_id = t.parent_task_id
      WHERE s.team_project_id = ?
        AND t.sprint_id IN (${ph})
        AND t.status = 'DONE'
@@ -219,15 +228,37 @@ async function loadTasks(
        AND t.estimation_points IS NOT NULL`,
     [projectId, ...sprintIds],
   );
-  return rows.map((r) => {
-    const aiForbidden = aiForbiddenSprints.has(r.sprint_id);
-    return {
-      assignee_id: r.assignee_id,
-      raw_points: r.estimation_points,
-      ai_model: aiForbidden ? null : r.model_value,
-      ai_level: aiForbidden ? null : r.level_value,
-      declared: !aiForbidden && (r.declared ?? 0) === 1,
-    };
+  // "Set" means the both-present gate: declared === 1 AND model AND level.
+  const isSet = (
+    model: string | null,
+    level: string | null,
+    declared: number | null,
+  ): boolean => (declared ?? 0) === 1 && model !== null && level !== null;
+  return rows.map((r): RawTask => {
+    const base = { assignee_id: r.assignee_id, raw_points: r.estimation_points };
+    if (aiForbiddenSprints.has(r.sprint_id)) {
+      return { ...base, ai_model: null, ai_level: null, declared: false, ai_exempt: true };
+    }
+    // Own attribute → parent USER_STORY's attribute → undeclared.
+    if (isSet(r.model_value, r.level_value, r.declared)) {
+      return {
+        ...base,
+        ai_model: r.model_value,
+        ai_level: r.level_value,
+        declared: true,
+        ai_exempt: false,
+      };
+    }
+    if (isSet(r.parent_model_value, r.parent_level_value, r.parent_declared)) {
+      return {
+        ...base,
+        ai_model: r.parent_model_value,
+        ai_level: r.parent_level_value,
+        declared: true,
+        ai_exempt: false,
+      };
+    }
+    return { ...base, ai_model: null, ai_level: null, declared: false, ai_exempt: false };
   });
 }
 
