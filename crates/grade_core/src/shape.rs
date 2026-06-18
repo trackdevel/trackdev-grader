@@ -15,10 +15,19 @@ pub fn structural_scopes(raw: &RawProject, spec: &StructuralSpec) -> ProjectScop
     let resolved = resolve_tasks(raw, &maps);
     let strength = spec.weights.get("ai_strength").copied().unwrap_or(1.0);
     let floor = spec.weights.get("floor_keep").copied().unwrap_or(0.2);
+    // Genuinely-undeclared tasks keep a flat `undeclared_keep` of their points
+    // (default 1.0 for older specs without the weight). Declared tasks — and
+    // exempt tasks, which `resolve_one_task` maps to declared no-AI scalars —
+    // go through keep modulation. Mirror of the spec task `keep` formula.
+    let undeclared_keep = spec.weights.get("undeclared_keep").copied().unwrap_or(1.0);
     let paired: Vec<(TaskScope, f64)> = resolved
         .into_iter()
         .map(|t| {
-            let k = keep(t.model_m, t.level_l, strength, floor);
+            let k = if t.declared {
+                keep(t.model_m, t.level_l, strength, floor)
+            } else {
+                undeclared_keep
+            };
             (t, k)
         })
         .collect();
@@ -37,6 +46,19 @@ pub fn resolve_tasks(raw: &RawProject, maps: &AiMaps) -> Vec<TaskScope> {
 }
 
 fn resolve_one_task(task: &RawTask, maps: &AiMaps) -> TaskScope {
+    // AI-exempt (e.g. AI-forbidden early sprint): treat as a fully-declared
+    // no-AI task (model_m = level_l = 0) so the keep formula yields 1.0 and the
+    // task keeps 100% of its points, regardless of any (void) declaration.
+    if task.ai_exempt {
+        return TaskScope {
+            assignee_id: task.assignee_id.clone(),
+            raw_points: task.raw_points,
+            model_m: 0.0,
+            level_l: 0.0,
+            declared: true,
+        };
+    }
+
     let both_present = task.declared && task.ai_model.is_some() && task.ai_level.is_some();
 
     let (model_m, level_l) = if both_present {
@@ -222,6 +244,7 @@ mod tests {
                     ai_model: Some("Cap".to_string()),
                     ai_level: Some("A".to_string()),
                     declared: true,
+                    ai_exempt: false,
                 },
                 RawTask {
                     assignee_id: "bob".to_string(),
@@ -229,6 +252,7 @@ mod tests {
                     ai_model: Some("GPT-5.5".to_string()),
                     ai_level: Some("E".to_string()),
                     declared: true,
+                    ai_exempt: false,
                 },
                 RawTask {
                     assignee_id: "alice".to_string(),
@@ -236,6 +260,7 @@ mod tests {
                     ai_model: Some("Cursor".to_string()),
                     ai_level: None,
                     declared: true,
+                    ai_exempt: false,
                 },
             ],
             students: vec![
@@ -277,6 +302,125 @@ mod tests {
         assert!(!cursor_undeclared.declared);
         assert!((cursor_undeclared.model_m - 1.0).abs() < 1e-9);
         assert!((cursor_undeclared.level_l - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resolve_exempt_task_is_full_keep_no_ai() {
+        let maps = default_maps();
+        let exempt = RawTask {
+            assignee_id: "alice".to_string(),
+            raw_points: 8.0,
+            // Even a "worst case" declaration is ignored once exempt.
+            ai_model: Some("GPT-5.5".to_string()),
+            ai_level: Some("E".to_string()),
+            declared: true,
+            ai_exempt: true,
+        };
+        let scope = resolve_one_task(&exempt, &maps);
+        assert!((scope.model_m - 0.0).abs() < 1e-9);
+        assert!((scope.level_l - 0.0).abs() < 1e-9);
+        assert!(scope.declared, "exempt resolves as declared no-AI");
+        // Through the keep modulation this is full retention.
+        assert!((keep(scope.model_m, scope.level_l, 1.0, 0.2) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn structural_scopes_splits_declared_undeclared_and_exempt() {
+        use crate::spec::GradeSpec;
+
+        let mut weights = BTreeMap::new();
+        weights.insert("ai_strength".to_string(), 1.0);
+        weights.insert("floor_keep".to_string(), 0.2);
+        weights.insert("undeclared_keep".to_string(), 0.5);
+        let spec = GradeSpec {
+            meta: Default::default(),
+            weights,
+            anchors: BTreeMap::new(),
+            models: BTreeMap::from([("GPT-5.5".to_string(), 1.0)]),
+            levels: BTreeMap::from([("E".to_string(), 1.0)]),
+            formulas: Default::default(),
+            manual_fields: Default::default(),
+            constants: Vec::new(),
+        };
+
+        let raw = RawProject {
+            project_id: 7,
+            name: "Mixed".to_string(),
+            team_size: 3,
+            axis: AxisInputs {
+                documentation_raw: 0.0,
+                doc_present: false,
+                code_quality_raw: 0.0,
+                cc_pct: 0.0,
+                mutation_score: 0.0,
+                cq_present: false,
+                survival_raw: 0.0,
+                surv_present: false,
+                arch_crit_count: 0.0,
+                arch_warn_count: 0.0,
+                arch_present: false,
+            },
+            inventory: vec![],
+            tasks: vec![
+                // Declared worst-case → keep 0.2 → eff 2.0.
+                RawTask {
+                    assignee_id: "alice".to_string(),
+                    raw_points: 10.0,
+                    ai_model: Some("GPT-5.5".to_string()),
+                    ai_level: Some("E".to_string()),
+                    declared: true,
+                    ai_exempt: false,
+                },
+                // Neither task nor parent declared → undeclared_keep 0.5 → eff 5.0.
+                RawTask {
+                    assignee_id: "bob".to_string(),
+                    raw_points: 10.0,
+                    ai_model: None,
+                    ai_level: None,
+                    declared: false,
+                    ai_exempt: false,
+                },
+                // Exempt (AI-forbidden sprint) → keep 1.0 → eff 10.0.
+                RawTask {
+                    assignee_id: "carol".to_string(),
+                    raw_points: 10.0,
+                    ai_model: None,
+                    ai_level: None,
+                    declared: false,
+                    ai_exempt: true,
+                },
+            ],
+            students: vec![
+                RawStudent {
+                    student_id: "alice".to_string(),
+                    full_name: "Alice".to_string(),
+                },
+                RawStudent {
+                    student_id: "bob".to_string(),
+                    full_name: "Bob".to_string(),
+                },
+                RawStudent {
+                    student_id: "carol".to_string(),
+                    full_name: "Carol".to_string(),
+                },
+            ],
+            crit_findings: vec![],
+            student_flags: vec![],
+        };
+
+        let scopes = structural_scopes(&raw, &spec);
+        let eff = |id: &str| {
+            scopes
+                .students
+                .iter()
+                .find(|s| s.student_id == id)
+                .unwrap()
+                .student_eff
+        };
+        assert!((eff("alice") - 2.0).abs() < 1e-9);
+        assert!((eff("bob") - 5.0).abs() < 1e-9);
+        assert!((eff("carol") - 10.0).abs() < 1e-9);
+        assert!((scopes.sum_eff - 17.0).abs() < 1e-9);
     }
 
     #[test]

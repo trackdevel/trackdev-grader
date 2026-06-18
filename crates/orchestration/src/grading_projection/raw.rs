@@ -168,12 +168,16 @@ fn load_tasks(
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(", ");
+    // `ptai` is the parent USER_STORY's AI usage row (if any): a task whose own
+    // declaration is unset inherits its parent's "Ús de IA" attribute.
     let sql = format!(
         "SELECT t.sprint_id, t.assignee_id, t.estimation_points,
-                tai.model_value, tai.level_value, tai.declared
+                tai.model_value, tai.level_value, tai.declared,
+                ptai.model_value, ptai.level_value, ptai.declared
          FROM tasks t
          JOIN students s ON s.id = t.assignee_id
          LEFT JOIN task_ai_usage tai ON tai.task_id = t.id
+         LEFT JOIN task_ai_usage ptai ON ptai.task_id = t.parent_task_id
          WHERE s.team_project_id = ?
            AND t.sprint_id IN ({placeholders})
            AND t.status = 'DONE'
@@ -194,21 +198,86 @@ fn load_tasks(
             r.get::<_, Option<String>>(3)?,
             r.get::<_, Option<String>>(4)?,
             r.get::<_, Option<i64>>(5)?,
+            r.get::<_, Option<String>>(6)?,
+            r.get::<_, Option<String>>(7)?,
+            r.get::<_, Option<i64>>(8)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (sprint_id, assignee_id, raw_pts, model, level, declared_flag) = row?;
-        let ai_forbidden = ai_forbidden_sprints.contains(&sprint_id);
-        out.push(RawTask {
+        let (sprint_id, assignee_id, raw_pts, model, level, declared, p_model, p_level, p_declared) =
+            row?;
+        out.push(resolve_task_ai(
             assignee_id,
-            raw_points: raw_pts as f64,
-            ai_model: if ai_forbidden { None } else { model },
-            ai_level: if ai_forbidden { None } else { level },
-            declared: !ai_forbidden && declared_flag.unwrap_or(0) == 1,
-        });
+            raw_pts as f64,
+            ai_forbidden_sprints.contains(&sprint_id),
+            (model, level, declared),
+            (p_model, p_level, p_declared),
+        ));
     }
     Ok(out)
+}
+
+/// One task's `(model_value, level_value, declared)` triple from `task_ai_usage`.
+type AiUsageRow = (Option<String>, Option<String>, Option<i64>);
+
+/// Resolve a task's effective AI usage into a [`RawTask`].
+///
+/// Resolution order, matching the course policy:
+/// 1. AI-forbidden early sprint → **exempt** (keeps 100%, declaration void).
+/// 2. The task's own attribute is set → use it.
+/// 3. Otherwise the parent USER_STORY's attribute is set → inherit it.
+/// 4. Neither set → undeclared (the spec's `undeclared_keep` multiplier applies
+///    downstream in `grade_core`).
+///
+/// "Set" means the both-present gate: `declared == 1` AND both model and level
+/// strings present. A partial row counts as unset so the parent (then the
+/// undeclared keep) takes over.
+fn resolve_task_ai(
+    assignee_id: String,
+    raw_points: f64,
+    ai_forbidden: bool,
+    own: AiUsageRow,
+    parent: AiUsageRow,
+) -> RawTask {
+    fn is_set(row: &AiUsageRow) -> bool {
+        row.2.unwrap_or(0) == 1 && row.0.is_some() && row.1.is_some()
+    }
+    if ai_forbidden {
+        return RawTask {
+            assignee_id,
+            raw_points,
+            ai_model: None,
+            ai_level: None,
+            declared: false,
+            ai_exempt: true,
+        };
+    }
+    let source = if is_set(&own) {
+        Some(own)
+    } else if is_set(&parent) {
+        Some(parent)
+    } else {
+        None
+    };
+    match source {
+        Some((model, level, _)) => RawTask {
+            assignee_id,
+            raw_points,
+            ai_model: model,
+            ai_level: level,
+            declared: true,
+            ai_exempt: false,
+        },
+        None => RawTask {
+            assignee_id,
+            raw_points,
+            ai_model: None,
+            ai_level: None,
+            declared: false,
+            ai_exempt: false,
+        },
+    }
 }
 
 fn load_students(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<RawStudent>> {
@@ -428,9 +497,14 @@ mod tests {
         assert!(early.ai_model.is_none(), "forbidden sprint clears model");
         assert!(early.ai_level.is_none(), "forbidden sprint clears level");
         assert!(!early.declared, "forbidden sprint marks task undeclared");
+        assert!(
+            early.ai_exempt,
+            "forbidden sprint marks task exempt (keeps 100%)"
+        );
         assert_eq!(late.ai_model.as_deref(), Some("GPT-5.5"));
         assert_eq!(late.ai_level.as_deref(), Some("E"));
         assert!(late.declared);
+        assert!(!late.ai_exempt, "allowed sprint is not exempt");
     }
 
     #[test]
@@ -443,6 +517,95 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert!(tasks
             .iter()
-            .all(|t| t.declared && t.ai_model.as_deref() == Some("GPT-5.5")));
+            .all(|t| t.declared && t.ai_model.as_deref() == Some("GPT-5.5") && !t.ai_exempt));
+    }
+
+    /// One project, one allowed sprint, a USER_STORY parent (id 10) that carries
+    /// the AI declaration, two child tasks (one inherits, one has its own), and a
+    /// parentless undeclared task.
+    fn seed_parent_fallback_project() -> (tempfile::TempDir, Database) {
+        let dir = tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("g.db")).expect("open db");
+        db.create_tables().expect("schema");
+        let c = &db.conn;
+        c.execute(
+            "INSERT INTO projects (id, slug, name) VALUES (1, 'team-01', 'Team 01')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO students (id, username, github_login, full_name, team_project_id)
+             VALUES ('alice', 'alice', 'alice', 'Alice', 1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO sprints (id, project_id, name, start_date, end_date) VALUES
+               (300, 1, 'S3', '2026-03-01', '2026-03-15')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO tasks (id, task_key, name, type, status, estimation_points, assignee_id, sprint_id, parent_task_id) VALUES
+               (10, 'US-1', 'story',    'USER_STORY', 'DONE', NULL, 'alice', 300, NULL),
+               (11, 'T-11', 'inherits', 'TASK',       'DONE', 4,    'alice', 300, 10),
+               (12, 'T-12', 'own',      'TASK',       'DONE', 6,    'alice', 300, 10),
+               (13, 'T-13', 'orphan',   'TASK',       'DONE', 3,    'alice', 300, NULL)",
+            [],
+        )
+        .unwrap();
+        // The parent story (10) declares GPT-5.5/E; child 12 declares its own Cap/A.
+        c.execute(
+            "INSERT INTO task_ai_usage (task_id, model_value, level_value, declared, captured_at) VALUES
+               (10, 'GPT-5.5', 'E', 1, '2026-03-02'),
+               (12, 'Cap', 'A', 1, '2026-03-02')",
+            [],
+        )
+        .unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn unset_task_inherits_parent_user_story_ai_usage() {
+        let (_dir, db) = seed_parent_fallback_project();
+        // ordinal 1 → no sprint exemption, isolating the parent-fallback logic.
+        let tasks = load_tasks(&db.conn, 1, &[300], 1).expect("load tasks");
+        assert_eq!(tasks.len(), 3, "USER_STORY parent is excluded");
+
+        let inherits = tasks
+            .iter()
+            .find(|t| t.raw_points == 4.0)
+            .expect("child 11");
+        assert_eq!(
+            inherits.ai_model.as_deref(),
+            Some("GPT-5.5"),
+            "unset task inherits the parent story's model"
+        );
+        assert_eq!(inherits.ai_level.as_deref(), Some("E"));
+        assert!(inherits.declared);
+        assert!(!inherits.ai_exempt);
+
+        let own = tasks
+            .iter()
+            .find(|t| t.raw_points == 6.0)
+            .expect("child 12");
+        assert_eq!(
+            own.ai_model.as_deref(),
+            Some("Cap"),
+            "the task's own attribute wins over the parent's"
+        );
+        assert_eq!(own.ai_level.as_deref(), Some("A"));
+        assert!(own.declared);
+
+        let orphan = tasks.iter().find(|t| t.raw_points == 3.0).expect("task 13");
+        assert!(
+            orphan.ai_model.is_none(),
+            "neither own nor parent attribute → undeclared"
+        );
+        assert!(!orphan.declared);
+        assert!(
+            !orphan.ai_exempt,
+            "a genuinely-undeclared task is not exempt (undeclared_keep applies downstream)"
+        );
     }
 }

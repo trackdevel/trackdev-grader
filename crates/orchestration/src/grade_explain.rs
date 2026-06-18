@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use anyhow::Result;
-use grade_core::{compute_project_axes, grade_cohort, GradeSpec};
+use grade_core::{compute_project_axes, grade_cohort, structural_scopes, GradeSpec};
 use sprint_grader_core::Database;
 
 use crate::grading_projection::load_cohort_raw_projects;
@@ -35,11 +35,18 @@ pub fn explain_grades(
         let _ = writeln!(out, "\n=== {} (id={}) ===", raw.name, raw.project_id);
         let _ = writeln!(
             out,
-            "project_final={:.2}  work_base={:.2} (present={})  ×  multiplier={:.3}",
+            "project_final={:.2}  work_base={:.2} (present={})  ×  multiplier={:.3}  ai_factor={:.3}",
             pg.output.grades.project_final,
             axes.work_base,
             axes.work_base_present,
             axes.quality_multiplier,
+            pg.output.grades.ai_factor,
+        );
+        let sc = structural_scopes(raw, spec);
+        let _ = writeln!(
+            out,
+            "  team_size={}  sum_raw={:.1}  sum_eff={:.2}  mean_raw={:.2}  (project_final = (work_base×mult + extra_tech) × ai_factor)",
+            pg.output.grades.team_size, sc.sum_raw, sc.sum_eff, sc.mean_raw,
         );
         let _ = writeln!(
             out,
@@ -110,8 +117,12 @@ pub fn explain_grades(
         for stu in &pg.output.grades.students {
             let _ = writeln!(
                 out,
-                "  {} base={:.2} behavioural_pen={:.2} codequality_pen={:.2} final={:.2}",
+                "  {} raw_pts={:.1} eff_pts={:.2} contrib={:.3} ai_keep={:.2} | base={:.2} (=pf×contrib×size) beh_pen={:.2} cq_pen={:.2} final={:.2}",
                 stu.student_id,
+                stu.raw_points,
+                stu.effective_points,
+                stu.contribution.unwrap_or(0.0),
+                stu.ai_keep.unwrap_or(1.0),
                 stu.base_grade,
                 stu.student_penalty,
                 stu.codequality_penalty,

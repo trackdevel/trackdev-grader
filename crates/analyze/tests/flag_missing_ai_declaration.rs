@@ -19,6 +19,15 @@ fn declare_ai(conn: &Connection, task_id: i64) {
     .unwrap();
 }
 
+/// Attach `task_id` to its parent USER_STORY (`seed_task` always sets NULL).
+fn set_parent(conn: &Connection, task_id: i64, parent_id: i64) {
+    conn.execute(
+        "UPDATE tasks SET parent_task_id = ? WHERE id = ?",
+        params![parent_id, task_id],
+    )
+    .unwrap();
+}
+
 #[test]
 fn warns_for_undeclared_done_task() {
     let conn = common::make_db();
@@ -89,6 +98,79 @@ fn silent_when_declared() {
     assert_eq!(
         common::count_flags_for(&conn, common::SPRINT_ID, "MISSING_AI_DECLARATION", "alice"),
         0
+    );
+}
+
+#[test]
+fn silent_when_parent_user_story_declares_ai() {
+    let conn = common::make_db();
+    common::seed_default_project(&conn);
+    common::seed_student(&conn, "alice");
+    // Parent USER_STORY (400) carries the declaration; the child TASK (401) has
+    // none of its own but inherits it — so no flag.
+    common::seed_task(
+        &conn,
+        400,
+        common::SPRINT_ID,
+        Some("alice"),
+        None,
+        "DONE",
+        "USER_STORY",
+    );
+    declare_ai(&conn, 400);
+    common::seed_task(
+        &conn,
+        401,
+        common::SPRINT_ID,
+        Some("alice"),
+        Some(5),
+        "DONE",
+        "TASK",
+    );
+    set_parent(&conn, 401, 400);
+
+    detect_flags_for_sprint_id(&conn, common::SPRINT_ID, &Config::test_default()).unwrap();
+
+    assert_eq!(
+        common::count_flags_for(&conn, common::SPRINT_ID, "MISSING_AI_DECLARATION", "alice"),
+        0,
+        "child inherits the parent story's declaration"
+    );
+}
+
+#[test]
+fn warns_when_neither_task_nor_parent_declares() {
+    let conn = common::make_db();
+    common::seed_default_project(&conn);
+    common::seed_student(&conn, "bob");
+    // Parent USER_STORY (500) is itself undeclared, and so is its child TASK
+    // (501) — neither has the attribute, so the child flags.
+    common::seed_task(
+        &conn,
+        500,
+        common::SPRINT_ID,
+        Some("bob"),
+        None,
+        "DONE",
+        "USER_STORY",
+    );
+    common::seed_task(
+        &conn,
+        501,
+        common::SPRINT_ID,
+        Some("bob"),
+        Some(5),
+        "DONE",
+        "TASK",
+    );
+    set_parent(&conn, 501, 500);
+
+    detect_flags_for_sprint_id(&conn, common::SPRINT_ID, &Config::test_default()).unwrap();
+
+    assert_eq!(
+        common::count_flags_for(&conn, common::SPRINT_ID, "MISSING_AI_DECLARATION", "bob"),
+        1,
+        "neither own nor parent declared → flag"
     );
 }
 

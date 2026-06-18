@@ -156,6 +156,7 @@ fn load_tasks(
             ai_model: model,
             ai_level: level,
             declared: declared_flag.unwrap_or(0) == 1,
+            ai_exempt: false,
         });
     }
     Ok(out)
