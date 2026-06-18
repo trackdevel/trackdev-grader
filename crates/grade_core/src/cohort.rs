@@ -32,6 +32,11 @@ pub struct MetricBounds {
     pub p10: f64,
     pub p90: f64,
     pub sample_count: usize,
+    /// When true, normalize on a fixed ruler (linear floor→ceiling = 0→10),
+    /// ignoring the cohort p10/p90 band — an ABSOLUTE, cohort-independent score.
+    /// Enabled by the spec weight `absolute_axes`.
+    #[serde(default)]
+    pub absolute: bool,
 }
 
 /// Cohort-wide bounds for every tracked raw metric.
@@ -175,6 +180,8 @@ pub fn resolve_anchor(spec: &GradeSpec, key: &str) -> MetricAnchor {
 /// Build cohort bounds from all projects in the grading batch.
 pub fn compute_cohort_bounds(projects: &[RawProject], spec: &GradeSpec) -> CohortBounds {
     let by_key = collect_cohort_samples(projects);
+    // `absolute_axes` switches every metric to a fixed floor→ceiling ruler.
+    let absolute = spec.weights.get("absolute_axes").copied().unwrap_or(0.0) != 0.0;
 
     let mut metrics = BTreeMap::new();
     for key in by_key.keys() {
@@ -195,6 +202,7 @@ pub fn compute_cohort_bounds(projects: &[RawProject], spec: &GradeSpec) -> Cohor
                 p10: percentile_linear(&sorted, 0.10),
                 p90: percentile_linear(&sorted, 0.90),
                 sample_count: sorted.len(),
+                absolute,
             },
         );
     }
@@ -203,6 +211,14 @@ pub fn compute_cohort_bounds(projects: &[RawProject], spec: &GradeSpec) -> Cohor
 
 /// Map one raw value to 0–10 using hybrid cohort rules.
 pub fn hybrid_normalize(value: f64, bounds: &MetricBounds) -> f64 {
+    // Absolute mode: fixed ruler, linear floor→ceiling = 0→10, cohort-independent.
+    if bounds.absolute {
+        if bounds.ceiling <= bounds.floor {
+            return 0.0;
+        }
+        return (((value - bounds.floor) / (bounds.ceiling - bounds.floor)) * 10.0)
+            .clamp(0.0, 10.0);
+    }
     if value <= bounds.floor {
         if bounds.floor <= 0.0 {
             return 0.0;
@@ -310,10 +326,28 @@ mod tests {
             p10: 2.0,
             p90: 8.0,
             sample_count: 5,
+            absolute: false,
         };
         assert!((hybrid_normalize(2.0, &b) - 2.0).abs() < 1e-9);
         assert!((hybrid_normalize(8.0, &b) - 8.0).abs() < 1e-9);
         assert!((hybrid_normalize(5.0, &b) - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn absolute_mode_is_linear_floor_to_ceiling() {
+        let b = MetricBounds {
+            floor: 0.0,
+            ceiling: 100.0,
+            p10: 2.0,
+            p90: 8.0,
+            sample_count: 5,
+            absolute: true,
+        };
+        // Fixed ruler: value/ceiling × 10, independent of p10/p90.
+        assert!((hybrid_normalize(50.0, &b) - 5.0).abs() < 1e-9);
+        assert!((hybrid_normalize(100.0, &b) - 10.0).abs() < 1e-9);
+        assert!((hybrid_normalize(150.0, &b) - 10.0).abs() < 1e-9); // clamped
+        assert!((hybrid_normalize(0.0, &b) - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -324,6 +358,7 @@ mod tests {
             p10: 3.0,
             p90: 7.0,
             sample_count: 5,
+            absolute: false,
         };
         assert!(hybrid_normalize(0.0, &b) >= 0.0 && hybrid_normalize(0.0, &b) <= 2.0);
         assert!((hybrid_normalize(2.0, &b) - 2.0).abs() < 1e-9);

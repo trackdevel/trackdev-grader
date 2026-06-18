@@ -40,6 +40,12 @@ pub enum Expr {
         lo: Box<Expr>,
         hi: Box<Expr>,
     },
+    /// `base ^ exp` (smooth power; enables gamma grade curves). Errors when the
+    /// result is non-finite (e.g. a negative base with a fractional exponent).
+    Pow {
+        base: Box<Expr>,
+        exp: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,6 +139,19 @@ fn eval_inner(expr: &Expr, scope: &Scope) -> Result<(f64, Vec<Node>), EvalError>
             kids.extend(child_nodes(lo, lov, loc));
             kids.extend(child_nodes(hi, hiv, hic));
             Ok((xv.clamp(lov, hiv), kids))
+        }
+        Expr::Pow { base, exp } => {
+            let (bv, bc) = eval_inner(base, scope)?;
+            let (ev, ec) = eval_inner(exp, scope)?;
+            let value = bv.powf(ev);
+            if !value.is_finite() {
+                return Err(EvalError::Domain {
+                    message: format!("pow({bv}, {ev}) is not finite"),
+                });
+            }
+            let mut kids = child_nodes(base, bv, bc);
+            kids.extend(child_nodes(exp, ev, ec));
+            Ok((value, kids))
         }
     }
 }
@@ -240,6 +259,10 @@ fn collect_free_vars(expr: &Expr, out: &mut BTreeSet<String>) {
             collect_free_vars(lo, out);
             collect_free_vars(hi, out);
         }
+        Expr::Pow { base, exp } => {
+            collect_free_vars(base, out);
+            collect_free_vars(exp, out);
+        }
     }
 }
 
@@ -259,6 +282,20 @@ mod tests {
         };
         let n = eval(&e, &scope(&[]), "t", "0/0").unwrap();
         assert!((n.value - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pow_evaluates_and_errors_on_non_finite() {
+        let e = Expr::Pow {
+            base: Box::new(Expr::Var { name: "u".into() }),
+            exp: Box::new(Expr::Num { value: 1.5 }),
+        };
+        // 0.25^1.5 = 0.125
+        let n = eval(&e, &scope(&[("u", 0.25)]), "p", "pow(u, 1.5)").unwrap();
+        assert!((n.value - 0.125).abs() < 1e-9, "got {}", n.value);
+        // negative base with fractional exponent → non-finite → Domain error
+        let err = eval(&e, &scope(&[("u", -1.0)]), "p", "pow(u, 1.5)").unwrap_err();
+        assert!(matches!(err, EvalError::Domain { .. }));
     }
 
     #[test]
