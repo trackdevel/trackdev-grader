@@ -250,41 +250,75 @@
     "task": [
       {
         "expr": {
-          "lhs": {
-            "op": "num",
-            "value": 1
-          },
-          "op": "sub",
-          "rhs": {
-            "factors": [
-              {
-                "lhs": {
-                  "op": "num",
-                  "value": 1
+          "op": "add",
+          "terms": [
+            {
+              "factors": [
+                {
+                  "name": "declared",
+                  "op": "var"
                 },
-                "op": "sub",
-                "rhs": {
-                  "name": "floor_keep",
+                {
+                  "lhs": {
+                    "op": "num",
+                    "value": 1
+                  },
+                  "op": "sub",
+                  "rhs": {
+                    "factors": [
+                      {
+                        "lhs": {
+                          "op": "num",
+                          "value": 1
+                        },
+                        "op": "sub",
+                        "rhs": {
+                          "name": "floor_keep",
+                          "op": "var"
+                        }
+                      },
+                      {
+                        "name": "ai_strength",
+                        "op": "var"
+                      },
+                      {
+                        "name": "model_m",
+                        "op": "var"
+                      },
+                      {
+                        "name": "level_l",
+                        "op": "var"
+                      }
+                    ],
+                    "op": "mul"
+                  }
+                }
+              ],
+              "op": "mul"
+            },
+            {
+              "factors": [
+                {
+                  "lhs": {
+                    "op": "num",
+                    "value": 1
+                  },
+                  "op": "sub",
+                  "rhs": {
+                    "name": "declared",
+                    "op": "var"
+                  }
+                },
+                {
+                  "name": "undeclared_keep",
                   "op": "var"
                 }
-              },
-              {
-                "name": "ai_strength",
-                "op": "var"
-              },
-              {
-                "name": "model_m",
-                "op": "var"
-              },
-              {
-                "name": "level_l",
-                "op": "var"
-              }
-            ],
-            "op": "mul"
-          }
+              ],
+              "op": "mul"
+            }
+          ]
         },
-        "infix": "1 - (1 - floor_keep) * ai_strength * model_m * level_l",
+        "infix": "declared * (1 - (1 - floor_keep) * ai_strength * model_m * level_l) + (1 - declared) * undeclared_keep",
         "name": "keep"
       }
     ]
@@ -398,6 +432,7 @@
     "quality_blend": 0.5,
     "quality_floor": 0.5,
     "student_penalty_cap": 1.0,
+    "undeclared_keep": 0.5,
     "undeclared_level_l": 0.5,
     "undeclared_model_m": 0.0,
     "w_android": 0.6,

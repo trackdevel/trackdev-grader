@@ -1,6 +1,5 @@
 import type { LoadedDb } from "../data/types";
 import type { GradeOutput } from "../data/types";
-import { studentReviewGate } from "../logic/gates";
 import SortableTable, { fmtNum } from "./SortableTable";
 import { projectHref, studentHref } from "../hooks/useHashRoute";
 
@@ -15,7 +14,8 @@ type Row = {
   cq_pen: number;
   ai_keep: number | null;
   contribution: number | null;
-  gate: string | null;
+  project_abs: number;
+  team_size: number;
 };
 
 type Props = {
@@ -27,7 +27,6 @@ export default function StudentList({ db, grades }: Props) {
   const rows: Row[] = [];
   for (const raw of db.projects) {
     const out = grades.get(raw.project_id);
-    const diag = db.diagnostics.get(raw.project_id);
     for (const stu of raw.students) {
       const g = out?.grades.students.find((s) => s.student_id === stu.student_id);
       rows.push({
@@ -41,10 +40,10 @@ export default function StudentList({ db, grades }: Props) {
         cq_pen: g?.codequality_penalty ?? Number.NaN,
         ai_keep: g?.ai_keep ?? null,
         contribution: g?.contribution ?? null,
-        gate:
-          g && diag
-            ? studentReviewGate(raw, diag, stu.student_id, g.effective_points)
-            : null,
+        // Project absolute grade (project_final): same for every team member,
+        // unnormalized by team size. Pairs with team_size to explain student_base.
+        project_abs: out?.grades.project_final ?? Number.NaN,
+        team_size: raw.team_size,
       });
     }
   }
@@ -76,6 +75,15 @@ export default function StudentList({ db, grades }: Props) {
               ),
             },
             {
+              key: "team_size",
+              header: "team_size",
+              title: "Team size (enrolled roster)",
+              numeric: true,
+              sortable: true,
+              sortValue: (r) => r.team_size,
+              render: (r) => r.team_size,
+            },
+            {
               key: "student",
               header: "student",
               sortable: true,
@@ -100,6 +108,15 @@ export default function StudentList({ db, grades }: Props) {
               render: (r) => (Number.isFinite(r.base) ? fmtNum(r.base) : "—"),
             },
             {
+              key: "project_abs",
+              header: "project_abs",
+              title: "Project grade — absolute, unnormalized by team size (project_final)",
+              numeric: true,
+              sortable: true,
+              sortValue: (r) => r.project_abs,
+              render: (r) => (Number.isFinite(r.project_abs) ? fmtNum(r.project_abs) : "—"),
+            },
+            {
               key: "stu_pen",
               header: "stu_pen",
               render: (r) => (Number.isFinite(r.stu_pen) ? fmtNum(r.stu_pen) : "—"),
@@ -122,7 +139,6 @@ export default function StudentList({ db, grades }: Props) {
               header: "contribution",
               render: (r) => (r.contribution != null ? fmtNum(r.contribution, 3) : ""),
             },
-            { key: "gate", header: "gate", render: (r) => r.gate ?? "" },
           ]}
         />
       )}

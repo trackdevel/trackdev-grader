@@ -149,15 +149,20 @@ fn zero_tasks(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> 
 /// applies the assumed-discount separately. Fires for everyone when
 /// `task_ai_usage` is empty (e.g. a DB not yet re-collected post-Wave 2).
 fn missing_ai_declaration(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
+    // A task inherits its parent USER_STORY's "Ús de IA" declaration (mirror of
+    // the grading fallback in grading_projection::raw::resolve_task_ai), so only
+    // flag when NEITHER the task's own nor its parent's declaration is set.
     let mut stmt = conn.prepare(
         "SELECT t.assignee_id, t.task_key
            FROM tasks t
            LEFT JOIN task_ai_usage au ON au.task_id = t.id
+           LEFT JOIN task_ai_usage pau ON pau.task_id = t.parent_task_id
           WHERE t.sprint_id = ?
             AND t.status = 'DONE'
             AND t.type != 'USER_STORY'
             AND t.assignee_id IS NOT NULL
             AND (au.task_id IS NULL OR au.declared = 0)
+            AND (pau.task_id IS NULL OR pau.declared = 0)
           ORDER BY t.assignee_id, t.task_key",
     )?;
     let rows = stmt

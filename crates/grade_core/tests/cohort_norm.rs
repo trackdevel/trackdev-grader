@@ -114,6 +114,7 @@ fn equal_contributors_receive_project_final() {
                 ai_model: Some("Cap".into()),
                 ai_level: Some("A".into()),
                 declared: true,
+                ai_exempt: false,
             },
             RawTask {
                 assignee_id: "b".into(),
@@ -121,6 +122,7 @@ fn equal_contributors_receive_project_final() {
                 ai_model: Some("Cap".into()),
                 ai_level: Some("A".into()),
                 declared: true,
+                ai_exempt: false,
             },
             RawTask {
                 assignee_id: "c".into(),
@@ -128,6 +130,7 @@ fn equal_contributors_receive_project_final() {
                 ai_model: Some("Cap".into()),
                 ai_level: Some("A".into()),
                 declared: true,
+                ai_exempt: false,
             },
         ],
         students: vec![

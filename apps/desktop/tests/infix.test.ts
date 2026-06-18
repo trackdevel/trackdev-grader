@@ -32,6 +32,8 @@ function evalExpr(e: Expr, scope: Map<string, number>): number {
       const hi = evalExpr(e.hi, scope);
       return Math.min(Math.max(x, lo), hi);
     }
+    case "pow":
+      return Math.pow(evalExpr(e.base, scope), evalExpr(e.exp, scope));
   }
 }
 

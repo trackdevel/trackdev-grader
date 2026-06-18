@@ -15,6 +15,7 @@ const OP_LABELS: Record<Expr["op"], string> = {
   min: "min",
   max: "max",
   clamp: "clamp",
+  pow: "^ power",
 };
 
 function childrenOf(expr: Expr): Array<{ role: string | null; node: Expr }> {
@@ -44,6 +45,11 @@ function childrenOf(expr: Expr): Array<{ role: string | null; node: Expr }> {
         { role: "x", node: expr.x },
         { role: "lo", node: expr.lo },
         { role: "hi", node: expr.hi },
+      ];
+    case "pow":
+      return [
+        { role: "base", node: expr.base },
+        { role: "exp", node: expr.exp },
       ];
   }
 }

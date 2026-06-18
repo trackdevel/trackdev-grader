@@ -36,21 +36,24 @@
         "raw_points": 10.0,
         "ai_model": "Cap",
         "ai_level": "A",
-        "declared": true
+        "declared": true,
+        "ai_exempt": false
       },
       {
         "assignee_id": "alice",
         "raw_points": 5.0,
-        "ai_model": "Cursor",
+        "ai_model": null,
         "ai_level": null,
-        "declared": true
+        "declared": false,
+        "ai_exempt": false
       },
       {
         "assignee_id": "bob",
         "raw_points": 10.0,
         "ai_model": "GPT-5.5",
         "ai_level": "E",
-        "declared": true
+        "declared": true,
+        "ai_exempt": false
       }
     ],
     "students": [
@@ -108,7 +111,8 @@
         "raw_points": 10.0,
         "ai_model": "Cap",
         "ai_level": "A",
-        "declared": true
+        "declared": true,
+        "ai_exempt": false
       }
     ],
     "students": [
@@ -153,7 +157,8 @@
         "raw_points": 8.0,
         "ai_model": "Cap",
         "ai_level": "A",
-        "declared": true
+        "declared": true,
+        "ai_exempt": false
       }
     ],
     "students": [
@@ -203,7 +208,8 @@
         "raw_points": 10.0,
         "ai_model": "Cap",
         "ai_level": "A",
-        "declared": true
+        "declared": true,
+        "ai_exempt": false
       }
     ],
     "students": [

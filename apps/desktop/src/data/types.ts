@@ -28,6 +28,11 @@ export type RawTask = {
   ai_model: string | null;
   ai_level: string | null;
   declared: boolean;
+  /**
+   * AI-exempt task — keeps 100% of its points regardless of declaration (set
+   * for AI-forbidden early sprints). Mirror of `grade_core::RawTask::ai_exempt`.
+   */
+  ai_exempt: boolean;
 };
 
 export type RawStudent = {
@@ -166,6 +171,8 @@ export type MetricBounds = {
   p10: number;
   p90: number;
   sample_count: number;
+  /** Absolute fixed-ruler normalization (mirror of grade_core; `absolute_axes`). */
+  absolute?: boolean;
 };
 
 export type CohortBounds = {

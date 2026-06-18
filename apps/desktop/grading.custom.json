@@ -102,7 +102,28 @@
       "floor": 0
     }
   },
-  "constants": [],
+  "constants": [
+    {
+      "name": "curve_pass_raw",
+      "value": 3.01,
+      "description": "Grade curve lower anchor (raw): student_raw mapped to curve_pass_grade. Cohort-specific — currently de Bolós Palomino, Lluís."
+    },
+    {
+      "name": "curve_pass_grade",
+      "value": 4.0,
+      "description": "Grade curve lower anchor (grade): the grade that curve_pass_raw maps to (currently de Bolós Palomino, Lluís)."
+    },
+    {
+      "name": "curve_top_raw",
+      "value": 10.36,
+      "description": "Grade curve upper anchor (raw): student_raw mapped to curve_top_grade. Cohort-specific — current cohort max."
+    },
+    {
+      "name": "curve_top_grade",
+      "value": 11.0,
+      "description": "Grade curve upper anchor (grade): the grade that curve_top_raw maps to; >10 gives the top a clamp cushion (clamped to 10)."
+    }
+  ],
   "formulas": {
     "project": [
       {
@@ -140,19 +161,46 @@
       },
       {
         "expr": {
+          "op": "mul",
           "factors": [
             {
-              "name": "work_base",
-              "op": "var"
+              "op": "add",
+              "terms": [
+                {
+                  "op": "mul",
+                  "factors": [
+                    {
+                      "op": "var",
+                      "name": "work_base"
+                    },
+                    {
+                      "op": "var",
+                      "name": "quality_multiplier"
+                    }
+                  ]
+                },
+                {
+                  "op": "min",
+                  "args": [
+                    {
+                      "op": "var",
+                      "name": "extra_tech"
+                    },
+                    {
+                      "op": "num",
+                      "value": 1.5
+                    }
+                  ]
+                }
+              ]
             },
             {
-              "name": "quality_multiplier",
-              "op": "var"
+              "op": "var",
+              "name": "ai_factor"
             }
-          ],
-          "op": "mul"
+          ]
         },
-        "infix": "work_base * quality_multiplier",
+        "infix": "(work_base * quality_multiplier + min(extra_tech, 1.5)) * ai_factor",
         "name": "project_final"
       }
     ],
@@ -215,76 +263,164 @@
       },
       {
         "expr": {
-          "hi": {
-            "op": "num",
-            "value": 10
+          "op": "sub",
+          "lhs": {
+            "op": "sub",
+            "lhs": {
+              "op": "var",
+              "name": "student_base"
+            },
+            "rhs": {
+              "op": "var",
+              "name": "student_penalty"
+            }
+          },
+          "rhs": {
+            "op": "var",
+            "name": "codequality_penalty"
+          }
+        },
+        "infix": "student_base - student_penalty - codequality_penalty",
+        "name": "student_raw"
+      },
+      {
+        "expr": {
+          "op": "clamp",
+          "x": {
+            "op": "add",
+            "terms": [
+              {
+                "op": "var",
+                "name": "curve_pass_grade"
+              },
+              {
+                "op": "div",
+                "num": {
+                  "op": "mul",
+                  "factors": [
+                    {
+                      "op": "sub",
+                      "lhs": {
+                        "op": "var",
+                        "name": "student_raw"
+                      },
+                      "rhs": {
+                        "op": "var",
+                        "name": "curve_pass_raw"
+                      }
+                    },
+                    {
+                      "op": "sub",
+                      "lhs": {
+                        "op": "var",
+                        "name": "curve_top_grade"
+                      },
+                      "rhs": {
+                        "op": "var",
+                        "name": "curve_pass_grade"
+                      }
+                    }
+                  ]
+                },
+                "den": {
+                  "op": "sub",
+                  "lhs": {
+                    "op": "var",
+                    "name": "curve_top_raw"
+                  },
+                  "rhs": {
+                    "op": "var",
+                    "name": "curve_pass_raw"
+                  }
+                }
+              }
+            ]
           },
           "lo": {
             "op": "num",
             "value": 0
           },
-          "op": "clamp",
-          "x": {
-            "lhs": {
-              "lhs": {
-                "name": "student_base",
-                "op": "var"
-              },
-              "op": "sub",
-              "rhs": {
-                "name": "student_penalty",
-                "op": "var"
-              }
-            },
-            "op": "sub",
-            "rhs": {
-              "name": "codequality_penalty",
-              "op": "var"
-            }
+          "hi": {
+            "op": "num",
+            "value": 10
           }
         },
-        "infix": "clamp(student_base - student_penalty - codequality_penalty, 0, 10)",
+        "infix": "clamp(curve_pass_grade + (student_raw - curve_pass_raw) * (curve_top_grade - curve_pass_grade) / (curve_top_raw - curve_pass_raw), 0, 10)",
         "name": "student_final"
       }
     ],
     "task": [
       {
         "expr": {
-          "lhs": {
-            "op": "num",
-            "value": 1
-          },
-          "op": "sub",
-          "rhs": {
-            "factors": [
-              {
-                "lhs": {
-                  "op": "num",
-                  "value": 1
+          "op": "add",
+          "terms": [
+            {
+              "factors": [
+                {
+                  "name": "declared",
+                  "op": "var"
                 },
-                "op": "sub",
-                "rhs": {
-                  "name": "floor_keep",
+                {
+                  "lhs": {
+                    "op": "num",
+                    "value": 1
+                  },
+                  "op": "sub",
+                  "rhs": {
+                    "factors": [
+                      {
+                        "lhs": {
+                          "op": "num",
+                          "value": 1
+                        },
+                        "op": "sub",
+                        "rhs": {
+                          "name": "floor_keep",
+                          "op": "var"
+                        }
+                      },
+                      {
+                        "name": "ai_strength",
+                        "op": "var"
+                      },
+                      {
+                        "name": "model_m",
+                        "op": "var"
+                      },
+                      {
+                        "name": "level_l",
+                        "op": "var"
+                      }
+                    ],
+                    "op": "mul"
+                  }
+                }
+              ],
+              "op": "mul"
+            },
+            {
+              "factors": [
+                {
+                  "lhs": {
+                    "op": "num",
+                    "value": 1
+                  },
+                  "op": "sub",
+                  "rhs": {
+                    "name": "declared",
+                    "op": "var"
+                  }
+                },
+                {
+                  "name": "undeclared_keep",
                   "op": "var"
                 }
-              },
-              {
-                "name": "ai_strength",
-                "op": "var"
-              },
-              {
-                "name": "model_m",
-                "op": "var"
-              },
-              {
-                "name": "level_l",
-                "op": "var"
-              }
-            ],
-            "op": "mul"
-          }
+              ],
+              "op": "mul"
+            }
+          ]
         },
-        "infix": "1 - (1 - floor_keep) * ai_strength * model_m * level_l",
+        "infix": "declared * (1 - (1 - floor_keep) * ai_strength * model_m * level_l) + (1 - declared) * undeclared_keep",
         "name": "keep"
       }
     ]
@@ -422,8 +558,8 @@
     "mi_floor": 85,
     "prod_loc_ceiling": 22214.1,
     "prod_stmt_ceiling": 12000,
-    "quality_blend": 0.5,
-    "quality_floor": 0.5,
+    "quality_blend": 0.2,
+    "quality_floor": 0.8,
     "student_penalty_cap": 1,
     "undeclared_level_l": 0.5,
     "undeclared_model_m": 0,
@@ -436,13 +572,15 @@
     "w_size": 0.2,
     "w_spring": 0.4,
     "work_scale": 1.2728,
-    "w_extra_dep": 1.0,
-    "w_fcm_spring": 2.0,
-    "w_fcm_android": 3.0,
-    "w_spec": 3.0,
-    "w_email": 2.0,
-    "w_graphics": 2.0,
-    "w_av": 2.0,
-    "extra_tech_cap": 3.0
+    "w_extra_dep": 1,
+    "w_fcm_spring": 2,
+    "w_fcm_android": 3,
+    "w_spec": 3,
+    "w_email": 2,
+    "w_graphics": 2,
+    "w_av": 2,
+    "extra_tech_cap": 3,
+    "absolute_axes": 1,
+    "undeclared_keep": 0.5
   }
 }

@@ -110,7 +110,7 @@ Example `grader.desktop.json` (paths relative to the config file):
 
 The main tab bar has three options:
 
-- **Students** — sortable table of every student across all loaded teams (final grade, base grade, penalties, AI keep, contribution, review gate). Click a student for the full detail page: grade breakdown, formula trees with evaluated values, per-task scores, flags, and AI-detection summaries.
+- **Students** — sortable table of every student across all loaded teams (team size, final grade, base grade, project absolute grade, penalties, AI keep, contribution). Click a student for the full detail page: grade breakdown, formula trees with evaluated values, per-task scores, flags, and AI-detection summaries.
 - **Projects** — project list with final grade. Click a project for everything else: quality axes, formula tree, per-student summary, critical findings, flags.
 - **Formula** — the grading formula itself (see below).
 

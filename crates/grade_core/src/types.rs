@@ -48,6 +48,12 @@ pub struct RawTask {
     pub ai_model: Option<String>,
     pub ai_level: Option<String>,
     pub declared: bool,
+    /// AI-exempt task — keeps 100% of its points regardless of declaration
+    /// (set by the projection for AI-forbidden early sprints). When true the
+    /// task is resolved as a fully-declared no-AI task so the keep formula
+    /// yields 1.0. Defaults to false so older fixtures deserialize unchanged.
+    #[serde(default)]
+    pub ai_exempt: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

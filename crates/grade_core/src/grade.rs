@@ -921,6 +921,7 @@ mod tests {
                     ai_model: Some("Cap".into()),
                     ai_level: Some("A".into()),
                     declared: true,
+                    ai_exempt: false,
                 }],
                 students: vec![RawStudent {
                     student_id: sid.clone(),
