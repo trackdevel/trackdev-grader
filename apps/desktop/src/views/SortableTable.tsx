@@ -5,6 +5,8 @@ type SortDir = "asc" | "desc";
 type Column<T> = {
   key: string;
   header: string;
+  /** Native hover tooltip on the header cell — use for terse headers whose full meaning needs spelling out. */
+  title?: string;
   sortable?: boolean;
   numeric?: boolean;
   render: (row: T) => ReactNode;
@@ -60,6 +62,7 @@ export default function SortableTable<T>({
             <th
               key={col.key}
               className={col.sortable ? "sortable" : undefined}
+              title={col.title}
               onClick={col.sortable ? () => toggleSort(col.key) : undefined}
             >
               {col.header}
