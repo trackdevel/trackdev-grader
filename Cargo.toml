@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli", "crates/collect", "crates/survival", "crates/compile_stage", "crates/analyze", "crates/evaluate", "crates/evaluate_local", "crates/quality", "crates/process_stage", "crates/curriculum", "crates/repo_analysis", "crates/ai_detect", "crates/architecture", "crates/architecture_llm", "crates/report", "crates/orchestration", "crates/blackbox", "crates/static_analysis", "crates/quality_llm", "crates/grade_core", "crates/grade_core_wasm", "crates/project_inventory", "apps/desktop/src-tauri"]
+members = ["crates/core", "crates/cli", "crates/collect", "crates/survival", "crates/compile_stage", "crates/analyze", "crates/evaluate", "crates/evaluate_local", "crates/quality", "crates/process_stage", "crates/curriculum", "crates/repo_analysis", "crates/ai_detect", "crates/architecture", "crates/architecture_llm", "crates/report", "crates/orchestration", "crates/blackbox", "crates/static_analysis", "crates/quality_llm", "crates/grade_core", "crates/grade_core_wasm", "crates/grade_xlsx", "crates/project_inventory", "apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

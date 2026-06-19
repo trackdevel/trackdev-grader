@@ -1,4 +1,7 @@
+import { useState } from "react";
+
 import type { GradeOutput, GradeSpec, LoadedDb } from "../data/types";
+import { exportProjectGrades } from "../data/export";
 import { axisScore, qualityEff } from "../logic/gradeAxes";
 import { projectReviewGate } from "../logic/gates";
 import { fmtNum } from "./SortableTable";
@@ -42,10 +45,21 @@ export default function ProjectDetail({ db, grades, spec, projectId }: Props) {
   const raw = db.projects.find((p) => p.project_id === projectId);
   const out = grades.get(projectId);
   const diag = db.diagnostics.get(projectId);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
 
   if (!raw || !out) {
     return <p className="error">Project not found.</p>;
   }
+
+  const handleExport = async () => {
+    setExportMsg(null);
+    try {
+      const path = await exportProjectGrades(raw, out, spec);
+      setExportMsg(path ? `Notes desades a ${path}` : null);
+    } catch (e) {
+      setExportMsg(`Error en exportar: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   const manualDefs = spec.manual_fields?.defs ?? [];
   const manualValues = spec.manual_fields?.values?.[String(projectId)] ?? {};
@@ -84,6 +98,13 @@ export default function ProjectDetail({ db, grades, spec, projectId }: Props) {
       </a>
       <h2>{raw.name}</h2>
       <p className="subtitle">Team size: {raw.team_size}</p>
+
+      <div className="export-bar">
+        <button type="button" onClick={() => void handleExport()}>
+          Exporta notes (.xlsx)
+        </button>
+        {exportMsg && <span className="hint">{exportMsg}</span>}
+      </div>
 
       <section className="detail-section">
         <h3>Team grade</h3>

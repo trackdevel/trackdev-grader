@@ -1,4 +1,7 @@
-import type { LoadedDb, GradeOutput } from "../data/types";
+import { useState } from "react";
+
+import type { LoadedDb, GradeOutput, GradeSpec } from "../data/types";
+import { exportAllGrades } from "../data/export";
 import { axisScore, qualityEff } from "../logic/gradeAxes";
 import SortableTable, { fmtNum } from "./SortableTable";
 import { projectHref } from "../hooks/useHashRoute";
@@ -31,12 +34,24 @@ function rowFromGrade(raw: { project_id: number; name: string }, out: GradeOutpu
 type Props = {
   db: LoadedDb;
   grades: Map<number, GradeOutput>;
+  spec: GradeSpec;
 };
 
-export default function ProjectList({ db, grades }: Props) {
+export default function ProjectList({ db, grades, spec }: Props) {
   const rows: Row[] = db.projects.map((raw) => rowFromGrade(raw, grades.get(raw.project_id)));
 
   const hasGrades = rows.some((r) => Number.isFinite(r.grade));
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
+
+  const handleExportAll = async () => {
+    setExportMsg(null);
+    try {
+      const n = await exportAllGrades(db.projects, grades, spec);
+      setExportMsg(n === null ? null : `${n} fitxers de notes desats`);
+    } catch (e) {
+      setExportMsg(`Error en exportar: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   return (
     <section className="view">
@@ -45,6 +60,14 @@ export default function ProjectList({ db, grades }: Props) {
         v3 formula: final ≈ work_base × quality_multiplier (quality_eff drives the multiplier).
         Click a project for size/complexity/quality breakdown and formula tree.
       </p>
+      {hasGrades && (
+        <div className="export-bar">
+          <button type="button" onClick={() => void handleExportAll()}>
+            Exporta totes les notes (.xlsx)
+          </button>
+          {exportMsg && <span className="hint">{exportMsg}</span>}
+        </div>
+      )}
       {rows.length === 0 ? (
         <p className="hint">No projects in this database.</p>
       ) : !hasGrades ? (

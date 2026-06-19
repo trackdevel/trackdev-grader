@@ -69,6 +69,34 @@ fn open_external(url: String) -> Result<(), String> {
     result.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Payload for [`export_grade_xlsx`]: the desktop's WASM-computed grades for one
+/// project, plus the destination path chosen via the save/folder dialog.
+#[derive(serde::Deserialize)]
+struct GradeExportPayload {
+    out_path: String,
+    project_name: String,
+    /// `student_id → full_name`; a missing id falls back to the id in the sheet.
+    names: std::collections::BTreeMap<String, String>,
+    grades: grade_core::ProjectGrades,
+    decimals: u32,
+}
+
+/// Write a student-facing final-grade workbook for one project. The grades are
+/// computed in the webview (WASM, live spec) and handed here verbatim, so the
+/// file matches exactly what the professor sees on screen. Shares the writer
+/// with the CLI's `grade-xlsx`, so both surfaces produce identical layouts.
+#[tauri::command]
+fn export_grade_xlsx(payload: GradeExportPayload) -> Result<(), String> {
+    grade_xlsx::write_grade_workbook(
+        Path::new(&payload.out_path),
+        &payload.project_name,
+        &payload.names,
+        &payload.grades,
+        payload.decimals,
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -82,6 +110,7 @@ pub fn run() {
             join_path,
             parent_dir,
             open_external,
+            export_grade_xlsx,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -132,5 +161,44 @@ mod tests {
         let file = dir.join("grader.desktop.json");
         let parent = parent_dir(file.to_string_lossy().into_owned()).expect("parent");
         assert_eq!(parent, dir.to_string_lossy());
+    }
+
+    #[test]
+    fn export_grade_xlsx_writes_workbook_from_payload() {
+        let dir = tmp_dir();
+        let out_path = dir.join("notes_team-01.xlsx");
+        // Mirrors the JSON the webview sends: project name + names + the
+        // ProjectGrades slice of a WASM GradeOutput.
+        let json = serde_json::json!({
+            "out_path": out_path.to_string_lossy(),
+            "project_name": "Team 01",
+            "names": { "alice": "Alice Liddell" },
+            "decimals": 2,
+            "grades": {
+                "project_id": 1,
+                "quality_grade": 7.5,
+                "quality_penalized": 7.5,
+                "project_penalty": 0.0,
+                "ai_factor": 1.0,
+                "project_final": 7.5,
+                "team_size": 1,
+                "axes": [],
+                "students": [{
+                    "student_id": "alice",
+                    "raw_points": 10.0,
+                    "effective_points": 8.0,
+                    "ai_keep": 0.8,
+                    "contribution": 1.0,
+                    "base_grade": 6.0,
+                    "student_penalty": 0.5,
+                    "ai_undeclared_count": 2,
+                    "student_final": 5.5
+                }]
+            }
+        });
+        let payload: GradeExportPayload = serde_json::from_value(json).expect("payload");
+        export_grade_xlsx(payload).expect("export");
+        assert!(out_path.is_file());
+        assert!(fs::metadata(&out_path).unwrap().len() > 0);
     }
 }

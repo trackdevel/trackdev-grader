@@ -129,7 +129,7 @@ export default function App() {
         ) : route.page === "students" ? (
           <StudentList db={loadedDb} grades={grader.grades} />
         ) : route.page === "projects" ? (
-          <ProjectList db={loadedDb} grades={grader.grades} />
+          <ProjectList db={loadedDb} grades={grader.grades} spec={grader.spec} />
         ) : route.page === "student" ? (
           <StudentDetail
             key={`${route.projectId}/${route.studentId}`}

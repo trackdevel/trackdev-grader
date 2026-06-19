@@ -94,6 +94,7 @@ export default function StudentDetail({ db, grades, projectId, studentId }: Prop
             ["Base grade", fmtNum(stuGrades.base_grade)],
             ["Student penalty", fmtNum(stuGrades.student_penalty)],
             ["Code-quality penalty", fmtNum(stuGrades.codequality_penalty)],
+            ["Tasques sense declarar IA", stuGrades.ai_undeclared_count],
             ["AI keep factor", stuGrades.ai_keep != null ? fmtNum(stuGrades.ai_keep, 3) : null],
             ["Contribution share", stuGrades.contribution != null ? fmtNum(stuGrades.contribution, 3) : null],
             ["Review gate", gate],

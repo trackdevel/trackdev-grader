@@ -280,6 +280,18 @@ fn grade_project_with_scopes(
             .map(|(t, _)| t.raw_points)
             .sum();
 
+        // Tasks whose "Ús de IA" attribute is set on neither the task nor its
+        // parent USER_STORY (the parent fallback is already folded into
+        // `declared` by the projection), excluding AI-exempt early sprints.
+        // Counted from raw tasks: an exempt task resolves to `declared == true`
+        // in `TaskScope`, so the raw `!declared && !ai_exempt` predicate is the
+        // unambiguous source.
+        let ai_undeclared_count = raw
+            .tasks
+            .iter()
+            .filter(|t| t.assignee_id == stu.student_id && !t.declared && !t.ai_exempt)
+            .count() as i64;
+
         let cq_components = cohort
             .and_then(|c| {
                 c.codequality_components
@@ -341,6 +353,7 @@ fn grade_project_with_scopes(
             student_penalty,
             codequality_penalty: cq_penalty,
             codequality_components: cq_components,
+            ai_undeclared_count,
             student_final,
         });
         student_trees.push(StudentTree {
@@ -976,6 +989,62 @@ mod tests {
         assert_eq!(c2[0].tier, "warning");
         assert!((c2[0].points - 0.5).abs() < 1e-9);
         assert!(comps("s4").is_empty());
+    }
+
+    #[test]
+    fn ai_undeclared_count_excludes_declared_parent_and_exempt() {
+        use crate::types::RawTask;
+        let spec = load_spec();
+        let mk_task = |declared: bool, ai_exempt: bool| RawTask {
+            assignee_id: "alice".into(),
+            raw_points: 5.0,
+            ai_model: if declared { Some("Cap".into()) } else { None },
+            ai_level: if declared { Some("A".into()) } else { None },
+            declared,
+            ai_exempt,
+        };
+        let raw = RawProject {
+            project_id: 7,
+            name: "t".into(),
+            team_size: 1,
+            axis: AxisInputs {
+                documentation_raw: 0.0,
+                doc_present: false,
+                code_quality_raw: 0.0,
+                cc_pct: 0.0,
+                mutation_score: 0.0,
+                cq_present: false,
+                survival_raw: 0.0,
+                surv_present: false,
+                arch_crit_count: 0.0,
+                arch_warn_count: 0.0,
+                arch_present: false,
+            },
+            inventory: vec![RepoMetrics {
+                repo_full_name: "r".into(),
+                metrics: BTreeMap::from([("production_loc".into(), 500.0)]),
+            }],
+            tasks: vec![
+                mk_task(true, false),  // own/parent declared → not counted
+                mk_task(true, false),  // declared → not counted
+                mk_task(false, false), // genuinely undeclared (sprint 3–4) → counted
+                mk_task(false, true),  // AI-exempt early sprint → not counted
+            ],
+            students: vec![RawStudent {
+                student_id: "alice".into(),
+                full_name: "Alice".into(),
+            }],
+            crit_findings: vec![],
+            student_flags: vec![],
+        };
+        let out = grade(&raw, &spec).unwrap();
+        let alice = out
+            .grades
+            .students
+            .iter()
+            .find(|s| s.student_id == "alice")
+            .expect("alice");
+        assert_eq!(alice.ai_undeclared_count, 1);
     }
 
     #[test]

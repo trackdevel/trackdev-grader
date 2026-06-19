@@ -20,6 +20,8 @@ tauri-plugin-fs = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+grade_core = { path = "../../../crates/grade_core" }
+grade_xlsx = { path = "../../../crates/grade_xlsx" }
 
 [features]
 default = ["custom-protocol"]

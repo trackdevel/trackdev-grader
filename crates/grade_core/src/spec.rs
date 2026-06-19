@@ -248,6 +248,13 @@ pub struct StudentGrades {
     /// Per-signal breakdown of `codequality_penalty` (empty when no penalty).
     #[serde(default)]
     pub codequality_components: Vec<CodeQualityComponent>,
+    /// Number of the student's gradable (DONE, point-bearing) tasks whose "Ús de
+    /// IA" attribute is set on neither the task nor its parent USER_STORY,
+    /// excluding AI-exempt early sprints (1–2). Equals the count of `RawTask`
+    /// with `!declared && !ai_exempt`; the same set the `MISSING_AI_DECLARATION`
+    /// flag reports. Informational — never a grade input.
+    #[serde(default)]
+    pub ai_undeclared_count: i64,
     pub student_final: f64,
 }
 

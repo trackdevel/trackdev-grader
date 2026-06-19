@@ -245,6 +245,12 @@ export type StudentGrades = {
   codequality_penalty: number;
   /** Per-signal breakdown of codequality_penalty; empty when no penalty. */
   codequality_components: CodeQualityComponent[];
+  /**
+   * Number of the student's gradable tasks with "Ús de IA" set on neither the
+   * task nor its parent USER_STORY, excluding AI-exempt early sprints (1–2).
+   * Mirror of grade_core StudentGrades.ai_undeclared_count. Informational only.
+   */
+  ai_undeclared_count: number;
   student_final: number;
 };
 

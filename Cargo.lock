@@ -1656,6 +1656,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "grade_xlsx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "grade_core",
+ "rust_xlsxwriter",
+ "tempfile",
+]
+
+[[package]]
 name = "gtk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4450,6 +4460,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "grade_core",
+ "grade_xlsx",
  "libc",
  "rayon",
  "rusqlite",
@@ -5716,6 +5727,8 @@ dependencies = [
 name = "trackdev-grader-desktop"
 version = "0.1.0"
 dependencies = [
+ "grade_core",
+ "grade_xlsx",
  "serde",
  "serde_json",
  "tauri",

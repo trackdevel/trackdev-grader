@@ -612,6 +612,20 @@ enum Command {
         #[arg(long, default_value = "config/grading.standard.json")]
         spec: PathBuf,
     },
+    /// Write a student-facing final-grade workbook (`notes_<project>.xlsx`) per
+    /// project. Catalan labels, no formulas. Reuses the same cohort grading as
+    /// `grade-explain`; ungradable projects are skipped with a warning.
+    GradeXlsx {
+        #[command(flatten)]
+        projects: ProjectsArg,
+        /// Grade spec JSON (default: config/grading.standard.json)
+        #[arg(long, default_value = "config/grading.standard.json")]
+        spec: PathBuf,
+        /// Output directory (default: the entregues data root). One
+        /// notes_<project>.xlsx is written per gradable project.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Suggest hybrid-normalization anchors from the live cohort (Grading v2 Wave 4).
     CalibrateAnchors {
         #[command(flatten)]
@@ -1660,6 +1674,32 @@ fn main() -> Result<()> {
             )
             .context("grade-explain failed")?;
             print!("{report}");
+        }
+        Command::GradeXlsx {
+            projects,
+            spec,
+            out,
+        } => {
+            let filter = parse_project_filter(projects.projects);
+            let spec_path = if spec.is_absolute() {
+                spec
+            } else {
+                project_root.join(spec)
+            };
+            let spec_text = std::fs::read_to_string(&spec_path)
+                .with_context(|| format!("read {}", spec_path.display()))?;
+            let grade_spec: grade_core::GradeSpec = serde_json::from_str(&spec_text)
+                .with_context(|| format!("parse {}", spec_path.display()))?;
+            let out_dir = out.unwrap_or_else(|| entregues_dir.clone());
+            let written = sprint_grader_orchestration::export_grade_workbooks(
+                &db,
+                &today,
+                &grade_spec,
+                filter.as_deref(),
+                &out_dir,
+            )
+            .context("grade-xlsx failed")?;
+            info!(count = written.len(), dir = %out_dir.display(), "grade workbooks written");
         }
         Command::CalibrateAnchors {
             projects,
