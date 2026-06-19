@@ -6,8 +6,10 @@
 //!   - **Qualitat del codi**: one row per (student, code-quality dimension) that
 //!     contributed a penalty, tinted by band.
 //!
-//! No formulas are shown. Labels are Catalan (the only student-facing locale);
-//! they are hard-coded `const`s here rather than routed through an i18n table.
+//! No formulas are shown. Each sheet has a gloss row under the column headers
+//! with short Catalan explanations (not the exact grading formulas). Labels are
+//! Catalan (the only student-facing locale); they are hard-coded `const`s here
+//! rather than routed through an i18n table.
 //!
 //! The writer is fed a `grade_core::ProjectGrades` so it is shared verbatim
 //! between the CLI (`grade-xlsx`) and the desktop app's `export_grade_xlsx`
@@ -34,6 +36,7 @@ const ESTUDIANT: &str = "Estudiant";
 const NOTA_FINAL: &str = "Nota final";
 const NOTA_BASE: &str = "Nota base";
 const CONTRIBUCIO: &str = "Contribució";
+const PUNTS_ORIGINALS: &str = "Punts originals";
 const PUNTS_EFECTIUS: &str = "Punts efectius";
 const FACTOR_IA: &str = "Factor IA";
 const PENAL_COMPORTAMENT: &str = "Penalització de comportament";
@@ -43,6 +46,49 @@ const TASQUES_SENSE_IA: &str = "Tasques sense declarar IA";
 const DIMENSIO: &str = "Dimensió";
 const BANDA: &str = "Banda";
 const PUNTS: &str = "Punts";
+
+/// Short Catalan gloss for the team header block (column C).
+const EXPL_QUALITAT_EQUIP: &str =
+    "Nota agregada del projecte segons la qualitat del codi, l'arquitectura i altres indicadors de l'equip.";
+const EXPL_MIDA_EQUIP: &str =
+    "Nombre d'estudiants matriculats al projecte; s'utilitza per repartir la nota del projecte.";
+
+/// One gloss per [`NOTES_HEADERS`] column, same order.
+const NOTES_EXPLANATIONS: &[&str] = &[
+    "Nom complet de l'estudiant.",
+    "Nota individual final, entre 0 i 10, després d'aplicar les penalitzacions.",
+    "Porció de la nota del projecte que correspon a aquest estudiant segons la seva participació a l'equip.",
+    "Quina part de la feina efectiva de l'equip se li atribueix (0 = cap, 1 = tota).",
+    "Punts de història de les tasques acabades, abans d'ajustar per l'ús d'IA.",
+    "Punts de història després d'ajustar per l'ús d'IA declarat a les tasques.",
+    "Fracció de la feina que es considera pròpia de l'estudiant segons les declaracions d'IA (buit si no té punts).",
+    "Descompte per banderes crítiques de procés i treball en equip (p. ex. cap tasca acabada, contribució invisible, aprovar un PR que no compila). Cada bandera resta punts fins a un màxim; valor negatiu. Les incidències de codi van a la columna següent.",
+    "Descompte total per problemes de qualitat del codi (detall a la fulla «Qualitat del codi»).",
+    "Tasques acabades sense declarar l'ús d'IA. Només informatiu; no modifica la nota.",
+];
+
+const NOTES_HEADERS: &[&str] = &[
+    ESTUDIANT,
+    NOTA_FINAL,
+    NOTA_BASE,
+    CONTRIBUCIO,
+    PUNTS_ORIGINALS,
+    PUNTS_EFECTIUS,
+    FACTOR_IA,
+    PENAL_COMPORTAMENT,
+    PENAL_QUALITAT,
+    TASQUES_SENSE_IA,
+];
+
+/// One gloss per [`CQ_HEADERS`] column, same order.
+const CQ_EXPLANATIONS: &[&str] = &[
+    "Nom complet de l'estudiant.",
+    "Àrea avaluada: arquitectura, complexitat del codi o anàlisi estàtica.",
+    "Gravetat relativa respecte a la resta de la cohort (crític o avís).",
+    "Punts descomptats per aquesta dimensió (valors negatius).",
+];
+
+const CQ_HEADERS: &[&str] = &[ESTUDIANT, DIMENSIO, BANDA, PUNTS];
 
 /// Catalan label for a code-quality dimension key.
 fn dimension_label(dimension: &str) -> &str {
@@ -143,6 +189,28 @@ fn warning_fill() -> Format {
     Format::new().set_background_color(Color::RGB(0xFFEB9C))
 }
 
+fn explanation_format() -> Format {
+    Format::new()
+        .set_italic()
+        .set_text_wrap()
+        .set_background_color(Color::RGB(0xF2F2F2))
+        .set_align(FormatAlign::Left)
+        .set_border(FormatBorder::Thin)
+}
+
+fn write_explanation_row(
+    sheet: &mut rust_xlsxwriter::Worksheet,
+    row: u32,
+    explanations: &[&str],
+    fmt: &Format,
+) -> Result<()> {
+    for (col, text) in explanations.iter().enumerate() {
+        sheet.write_string_with_format(row, col as u16, *text, fmt)?;
+    }
+    sheet.set_row_height(row, 48.0)?;
+    Ok(())
+}
+
 // --- Writer ---------------------------------------------------------------
 
 /// Write the two-sheet grade workbook for one project to `out_path`.
@@ -187,34 +255,29 @@ fn write_notes_sheet(
     let ratio = ratio_format();
     let ints = int_format();
     let header = header_format();
+    let expl = explanation_format();
 
     // Team header block (shared values).
     sheet.write_string_with_format(0, 0, PROJECTE, &label)?;
     sheet.write_string(0, 1, project_name)?;
     sheet.write_string_with_format(1, 0, QUALITAT_EQUIP, &label)?;
     sheet.write_number_with_format(1, 1, grades.quality_grade, &dec)?;
+    sheet.write_string_with_format(1, 2, EXPL_QUALITAT_EQUIP, &expl)?;
     sheet.write_string_with_format(2, 0, MIDA_EQUIP, &label)?;
     sheet.write_number_with_format(2, 1, grades.team_size as f64, &ints)?;
+    sheet.write_string_with_format(2, 2, EXPL_MIDA_EQUIP, &expl)?;
 
-    // Table header (row 4) + students (row 5+).
+    // Table header (row 4), gloss row (5), students (6+).
     const HEADER_ROW: u32 = 4;
-    let headers = [
-        ESTUDIANT,
-        NOTA_FINAL,
-        NOTA_BASE,
-        CONTRIBUCIO,
-        PUNTS_EFECTIUS,
-        FACTOR_IA,
-        PENAL_COMPORTAMENT,
-        PENAL_QUALITAT,
-        TASQUES_SENSE_IA,
-    ];
-    for (col, title) in headers.iter().enumerate() {
+    const EXPL_ROW: u32 = HEADER_ROW + 1;
+    const DATA_ROW: u32 = EXPL_ROW + 1;
+    for (col, title) in NOTES_HEADERS.iter().enumerate() {
         sheet.write_string_with_format(HEADER_ROW, col as u16, *title, &header)?;
     }
+    write_explanation_row(sheet, EXPL_ROW, NOTES_EXPLANATIONS, &expl)?;
 
     for (i, stu) in grades.students.iter().enumerate() {
-        let row = HEADER_ROW + 1 + i as u32;
+        let row = DATA_ROW + i as u32;
         sheet.write_string(row, 0, name_for(names, &stu.student_id))?;
         sheet.write_number_with_format(row, 1, stu.student_final, &dec)?;
         sheet.write_number_with_format(row, 2, stu.base_grade, &dec)?;
@@ -222,20 +285,24 @@ fn write_notes_sheet(
             Some(c) => sheet.write_number_with_format(row, 3, c, &ratio)?,
             None => sheet.write_string(row, 3, "")?,
         };
-        sheet.write_number_with_format(row, 4, stu.effective_points, &dec)?;
+        sheet.write_number_with_format(row, 4, stu.raw_points, &dec)?;
+        sheet.write_number_with_format(row, 5, stu.effective_points, &dec)?;
         match stu.ai_keep {
-            Some(k) => sheet.write_number_with_format(row, 5, k, &ratio)?,
-            None => sheet.write_string(row, 5, "")?,
+            Some(k) => sheet.write_number_with_format(row, 6, k, &ratio)?,
+            None => sheet.write_string(row, 6, "")?,
         };
-        sheet.write_number_with_format(row, 6, fmt_penalty(stu.student_penalty), &dec)?;
-        sheet.write_number_with_format(row, 7, fmt_penalty(stu.codequality_penalty), &dec)?;
-        sheet.write_number_with_format(row, 8, stu.ai_undeclared_count as f64, &ints)?;
+        sheet.write_number_with_format(row, 7, fmt_penalty(stu.student_penalty), &dec)?;
+        sheet.write_number_with_format(row, 8, fmt_penalty(stu.codequality_penalty), &dec)?;
+        sheet.write_number_with_format(row, 9, stu.ai_undeclared_count as f64, &ints)?;
     }
 
     sheet.set_column_width(0, 28.0)?;
-    for col in 1..=8u16 {
+    for col in 1..=9u16 {
         sheet.set_column_width(col, 14.0)?;
     }
+    sheet.set_column_width(2, 42.0)?;
+    sheet.set_column_width(7, 22.0)?;
+    sheet.set_row_height(EXPL_ROW, 64.0)?;
     Ok(())
 }
 
@@ -249,16 +316,20 @@ fn write_cq_sheet(
     sheet.set_name(SHEET_CQ)?;
 
     let header = header_format();
+    let expl = explanation_format();
     let dec = dec_format(decimals);
     let crit = critical_fill();
     let warn = warning_fill();
 
-    let headers = [ESTUDIANT, DIMENSIO, BANDA, PUNTS];
-    for (col, title) in headers.iter().enumerate() {
-        sheet.write_string_with_format(0, col as u16, *title, &header)?;
+    const HEADER_ROW: u32 = 0;
+    const EXPL_ROW: u32 = 1;
+    const DATA_ROW: u32 = 2;
+    for (col, title) in CQ_HEADERS.iter().enumerate() {
+        sheet.write_string_with_format(HEADER_ROW, col as u16, *title, &header)?;
     }
+    write_explanation_row(sheet, EXPL_ROW, CQ_EXPLANATIONS, &expl)?;
 
-    let mut row = 1u32;
+    let mut row = DATA_ROW;
     for stu in &grades.students {
         for comp in &stu.codequality_components {
             let fill = match comp.tier.as_str() {
@@ -346,6 +417,39 @@ mod tests {
         assert_eq!(fmt_penalty(0.0), 0.0);
         assert!(fmt_penalty(0.0).is_sign_positive());
         assert_eq!(fmt_penalty(0.5), -0.5);
+    }
+
+    #[test]
+    fn behavior_penalty_explanation_is_substantive() {
+        let idx = NOTES_HEADERS
+            .iter()
+            .position(|h| *h == PENAL_COMPORTAMENT)
+            .expect("behavior column");
+        let text = NOTES_EXPLANATIONS[idx];
+        assert!(
+            text.contains("banderes crítiques"),
+            "should mention critical flags: {text}"
+        );
+        assert!(
+            text.contains("codi"),
+            "should distinguish from code-quality penalty: {text}"
+        );
+    }
+
+    #[test]
+    fn column_explanations_align_with_headers() {
+        assert_eq!(NOTES_HEADERS.len(), NOTES_EXPLANATIONS.len());
+        assert_eq!(CQ_HEADERS.len(), CQ_EXPLANATIONS.len());
+        for text in NOTES_EXPLANATIONS
+            .iter()
+            .chain(CQ_EXPLANATIONS.iter())
+            .copied()
+        {
+            assert!(
+                text.len() > 10,
+                "explanation should be a short sentence: {text:?}"
+            );
+        }
     }
 
     #[test]
