@@ -33,6 +33,7 @@ sprint-grader-architecture-llm = { path = "../architecture_llm" }
 sprint-grader-static-analysis = { path = "../static_analysis" }
 sprint-grader-project-inventory = { path = "../project_inventory" }
 grade_core = { path = "../grade_core" }
+grade_xlsx = { path = "../grade_xlsx" }
 serde_json.workspace = true
 
 [target.'cfg(unix)'.dependencies]

@@ -1,12 +1,72 @@
 //! Human-readable project grade breakdown from a live grading.db.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use grade_core::{compute_project_axes, grade_cohort, structural_scopes, GradeSpec};
 use sprint_grader_core::Database;
+use tracing::{info, warn};
 
 use crate::grading_projection::load_cohort_raw_projects;
+
+/// Write one student-facing grade workbook (`notes_<project>.xlsx`) per gradable
+/// project into `out_dir`, returning the paths written.
+///
+/// Ungradable / empty-shell projects are filtered out by `grade_cohort` and
+/// produce no file; any name in `project_filter` that yields no workbook is
+/// logged as a warning. Grades come from the same `load_cohort_raw_projects` +
+/// `grade_cohort` path as [`explain_grades`], so the cohort normalization
+/// matches a full run.
+pub fn export_grade_workbooks(
+    db: &Database,
+    today: &str,
+    spec: &GradeSpec,
+    project_filter: Option<&[String]>,
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>> {
+    let projects = load_cohort_raw_projects(db, today, project_filter)?;
+    let cohort = grade_cohort(projects.as_slice(), spec)?;
+    std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+
+    let mut written = Vec::with_capacity(cohort.projects.len());
+    let mut graded_names = Vec::with_capacity(cohort.projects.len());
+    for pg in &cohort.projects {
+        let raw = projects
+            .iter()
+            .find(|r| r.project_id == pg.project_id)
+            .expect("raw project for graded cohort entry");
+        let names: BTreeMap<String, String> = raw
+            .students
+            .iter()
+            .map(|s| (s.student_id.clone(), s.full_name.clone()))
+            .collect();
+        let path = out_dir.join(grade_xlsx::grade_workbook_filename(&raw.name));
+        grade_xlsx::write_grade_workbook(
+            &path,
+            &raw.name,
+            &names,
+            &pg.output.grades,
+            spec.meta.decimals,
+        )?;
+        info!(project = %raw.name, path = %path.display(), "wrote grade workbook");
+        graded_names.push(raw.name.clone());
+        written.push(path);
+    }
+
+    if let Some(filter) = project_filter {
+        for requested in filter {
+            if !graded_names.iter().any(|n| n == requested) {
+                warn!(
+                    project = %requested,
+                    "no grade workbook written — project is ungradable or not found"
+                );
+            }
+        }
+    }
+    Ok(written)
+}
 
 /// Build a text report for one or more projects (all when `project_filter` is None).
 pub fn explain_grades(
