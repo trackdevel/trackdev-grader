@@ -153,6 +153,13 @@ body {
   font-size: 0.9rem;
 }
 
+.export-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.5rem 0 1rem;
+}
+
 .table-scroll {
   overflow-x: auto;
   max-width: 100%;
