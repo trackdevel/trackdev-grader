@@ -1,5 +1,5 @@
 //! W2.T5 verification harness — render one project's report against
-//! `data/entregues/grading.db` so the pre/post-refactor outputs can be
+//! `data/grading.db` so the pre/post-refactor outputs can be
 //! diffed.
 //!
 //! Usage:
@@ -7,7 +7,7 @@
 //! ```sh
 //! DB=/tmp/pre-W2T5.db PROJECT=pds26-4c OUT=/tmp/pre.md \
 //!     cargo run -p sprint-grader-report --example render_pds26
-//! DB=data/entregues/grading.db PROJECT=pds26-4c OUT=/tmp/post.md \
+//! DB=data/grading.db PROJECT=pds26-4c OUT=/tmp/post.md \
 //!     cargo run -p sprint-grader-report --example render_pds26
 //! diff -u /tmp/pre.md /tmp/post.md
 //! ```
@@ -17,7 +17,7 @@ use sprint_grader_report::{generate_markdown_report_multi_to_path_with_opts, Mul
 use std::path::Path;
 
 fn main() -> rusqlite::Result<()> {
-    let db = std::env::var("DB").unwrap_or_else(|_| "data/entregues/grading.db".to_string());
+    let db = std::env::var("DB").unwrap_or_else(|_| "data/grading.db".to_string());
     let project_slug = std::env::var("PROJECT").unwrap_or_else(|_| "pds26-4c".to_string());
     let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp/report.md".to_string());
 

@@ -90,7 +90,9 @@ impl Fixture {
         std::fs::create_dir_all(project_dir.join("android-team-01"))?;
         std::fs::create_dir_all(project_dir.join("spring-team-01"))?;
 
-        let db_path = entregues.join("grading.db");
+        // The DB lives at the top of `data/` (matches the CLI); `entregues/`
+        // holds only cloned repos and reports.
+        let db_path = root.join("data").join("grading.db");
         let conn = Connection::open(&db_path)?;
         apply_schema(&conn)?;
         self.seed(&conn)?;

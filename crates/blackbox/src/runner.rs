@@ -131,7 +131,9 @@ impl Runner {
     }
 
     pub fn db_path(&self) -> PathBuf {
-        self.entregues_dir().join("grading.db")
+        // Mirrors the CLI: the DB lives at the top of `data/`, not under
+        // `entregues/` (which holds cloned repos and reports).
+        self.data_dir.join("grading.db")
     }
 
     /// Invoke the `sprint-grader` binary with the given subcommand

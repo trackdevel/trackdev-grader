@@ -32,7 +32,7 @@ are configurable in [`config/course.toml`](config/course.toml).
 
 **3. Reproducible, deterministic, idempotent.**
 All intermediate state lives in a single SQLite file
-(`data/entregues/grading.db`). Every stage is a pure function of the DB plus
+(`data/grading.db`). Every stage is a pure function of the DB plus
 the cloned repos: re-running it produces the same rows. Stages cache, and
 `purge-cache` lets you selectively invalidate. A built-in `diff-db` command
 checksums tables across two runs to verify changes don't drift.
@@ -63,7 +63,7 @@ runnable and testable.
    orchestration  (pipeline glue: run-all / go / go-quick)
                                 │
                                 ▼
-                       data/entregues/grading.db
+                       data/grading.db
                        data/entregues/<project>/REPORT.md
                        data/entregues/sprint_K/<team>.xlsx
 ```
@@ -162,7 +162,7 @@ sprint-grader run-all --today <YYYY-MM-DD>
 
 # 3. Train the regressor on those labels (writes data/regressor/pr_*.json).
 python tools/train_regressor/train.py \
-    --db data/entregues/grading.db \
+    --db data/grading.db \
     --ollama http://127.0.0.1:11434 \
     --embed-model bge-m3 \
     --out data/regressor
@@ -299,8 +299,8 @@ detector-threshold jitter (anti-gaming), not the 0–10 grade arithmetic.
 
 ```
 data/
+├── grading.db                           # SQLite — every metric the pipeline produces (Dropbox-backed)
 └── entregues/
-    ├── grading.db                        # SQLite — every metric the pipeline produces
     ├── grading_sheet.xlsx                # self-recalculating grade workbook (grading-sheet)
     ├── sprint_1/
     │   ├── team-01.xlsx                  # per-team workbook
@@ -716,9 +716,9 @@ The workspace pins `rust-toolchain.toml` to stable. SQLite is bundled via
 For dual-run verification when refactoring an analysis stage:
 
 ```bash
-cp data/entregues/grading.db /tmp/before.db
+cp data/grading.db /tmp/before.db
 sprint-grader run-all
-sprint-grader diff-db /tmp/before.db data/entregues/grading.db --derived-only
+sprint-grader diff-db /tmp/before.db data/grading.db --derived-only
 ```
 
 ## License

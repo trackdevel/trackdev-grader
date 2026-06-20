@@ -42,7 +42,7 @@ the BGE-M3 embedding model pulled.
 
 ```bash
 python tools/train_regressor/train.py \
-  --db data/entregues/grading.db \
+  --db data/grading.db \
   --ollama http://127.0.0.1:11434 \
   --embed-model bge-m3 \
   --out data/regressor
