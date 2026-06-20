@@ -418,8 +418,9 @@ team's size.
 | `work_base`, `quality_multiplier`, axis scores | `crates/grade_core/src/axes.rs` |
 | formula evaluation (task → project → student) | `crates/grade_core/src/grade.rs` |
 | the formulas & weights themselves | `config/grading.standard.json` |
-| student-facing workbook | `crates/grade_xlsx/src/lib.rs` |
+| student-facing workbook (desktop export) | `crates/grade_xlsx/src/lib.rs` |
+| student-facing `GRADES.md` (CLI) | `crates/grade_md/src/lib.rs` |
 
 To recompute grades after changing the spec, reload the desktop app or run
-`sprint-grader grade-explain` / `grade-xlsx` (grading is a pure function of
+`sprint-grader grade-explain` / `grade-md` (grading is a pure function of
 `grading.db` + the spec; no re-collection needed).

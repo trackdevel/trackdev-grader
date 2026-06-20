@@ -11,10 +11,10 @@
 //! Catalan (the only student-facing locale); they are hard-coded `const`s here
 //! rather than routed through an i18n table.
 //!
-//! The writer is fed a `grade_core::ProjectGrades` so it is shared verbatim
-//! between the CLI (`grade-xlsx`) and the desktop app's `export_grade_xlsx`
-//! Tauri command — the desktop hands over its WASM-computed grades, the CLI its
-//! `grade_cohort` output.
+//! The writer is fed a `grade_core::ProjectGrades`. It backs the desktop app's
+//! `export_grade_xlsx` Tauri command (the desktop hands over its WASM-computed
+//! grades). The CLI's student-facing report is Markdown (`grade-md`, the
+//! `grade_md` crate); this workbook is the desktop-only download surface.
 
 use std::collections::BTreeMap;
 use std::path::Path;

@@ -20,7 +20,7 @@ pub use db_diff::{
     TableStatus,
 };
 pub use debug_pr::debug_pr_lines;
-pub use grade_explain::{explain_grades, export_grade_workbooks};
+pub use grade_explain::{explain_grades, export_grade_markdown};
 pub use pipeline::{run_pipeline, PipelineVariant};
 pub use purge::{
     ensure_clean_tree, purge_cache, purge_projects, CacheTargets, PurgeCacheResult, PurgeReport,

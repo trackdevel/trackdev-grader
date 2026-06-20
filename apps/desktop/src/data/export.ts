@@ -25,8 +25,9 @@ function namesOf(raw: RawProject): Record<string, string> {
 }
 
 /**
- * Write one project's grade workbook to `outPath` via the Rust writer, so the
- * file is byte-for-byte identical to the CLI's `grade-xlsx` for the same grades.
+ * Write one project's grade workbook to `outPath` via the Rust writer
+ * (`grade_xlsx`). This `.xlsx` is the desktop download surface; the CLI emits a
+ * Markdown report instead (`grade-md`).
  */
 async function writeWorkbook(
   raw: RawProject,
