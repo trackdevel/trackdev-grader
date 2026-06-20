@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { loadBundledDefault } from "../config/load";
 import { dryRunSpec, isEditedSpec, validateSpec } from "../config/validate";
 import type { GradeOutput, GradeSpec, RawProject } from "../data/types";
-import { initEngine, recompute, recomputeAll } from "../engine";
+import { clearLastGoodGrades, initEngine, recompute, recomputeAll } from "../engine";
 
 const DEBOUNCE_MS = 350;
 
@@ -64,6 +64,11 @@ export function useGrader(rawProjects: RawProject[]): GraderState {
   // their results, so rapid spec edits can't commit grades out of order.
   useEffect(() => {
     let cancelled = false;
+    // Drop cached grades whenever inputs change so a failed engine run cannot
+    // keep showing scores from a prior spec/db (looks like "grades didn't update").
+    clearLastGoodGrades();
+    setRecomputeError(null);
+    setGrades(new Map());
 
     const run = async () => {
       const validation = validateSpec(spec);
@@ -91,10 +96,15 @@ export function useGrader(rawProjects: RawProject[]): GraderState {
       const result = await recomputeAll(rawProjects, spec);
       if (cancelled) return;
       setLoading(false);
-      setRecomputeError(result.error);
-      if (result.grades.size > 0) {
-        setGrades(new Map(result.grades));
+      if (result.error) {
+        const hint = result.error.includes("unknown variable")
+          ? " — restart the app to reload the grading engine (stale WASM)"
+          : "";
+        setRecomputeError(result.error + hint);
+        return;
       }
+      setRecomputeError(null);
+      setGrades(new Map(result.grades));
     };
 
     const timer = setTimeout(() => void run(), DEBOUNCE_MS);

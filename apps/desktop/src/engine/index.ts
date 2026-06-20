@@ -17,18 +17,41 @@ type WasmModule = {
 };
 
 let wasm: WasmModule | null = null;
+let loadedStamp: string | null = null;
+
+async function readBuildStamp(): Promise<string> {
+  try {
+    const url = new URL("../../pkg/.build-stamp", import.meta.url);
+    const res = await fetch(url);
+    if (res.ok) return (await res.text()).trim();
+  } catch {
+    // Vitest / missing stamp — fall back to a stable import.
+  }
+  return "0";
+}
 
 /** Load the grade_core WASM bundle once (browser / Vite dev server). */
 export async function initEngine(): Promise<void> {
-  if (wasm) return;
-  const mod = (await import("../../pkg/grade_core_wasm.js")) as WasmModule;
+  const stamp = await readBuildStamp();
+  if (wasm && loadedStamp === stamp) return;
+  wasm = null;
+  loadedStamp = stamp;
+  const mod = (await import(
+    /* @vite-ignore */ `../../pkg/grade_core_wasm.js?build=${stamp}`
+  )) as WasmModule;
   await mod.default();
   wasm = mod;
 }
 
 /** Vitest/Node: pass pre-read WASM bytes when `fetch(file://…)` is unavailable. */
+/** Test-only: drop the cached module so the next init reloads WASM. */
+export function resetEngine(): void {
+  wasm = null;
+  loadedStamp = null;
+}
+
 export async function initEngineWithBytes(bytes: Buffer): Promise<void> {
-  if (wasm) return;
+  resetEngine();
   const mod = (await import("../../pkg/grade_core_wasm.js")) as WasmModule;
   if (!mod.initSync) {
     throw new Error("grade_core_wasm.js missing initSync — rebuild the pkg bundle");
