@@ -71,7 +71,7 @@ The desktop app does not collect data from TrackDev or GitHub. Use the main CLI 
 cargo run --release -- run-all
 ```
 
-The default database path is `data/entregues/grading.db`. In the app, click **Open grading.db** and select that file (or any compatible SQLite database from a grading run).
+The default database path is `data/grading.db`. In the app, click **Open grading.db** and select that file (or any compatible SQLite database from a grading run).
 
 ## Using the app
 
@@ -101,7 +101,7 @@ Example `grader.desktop.json` (paths relative to the config file):
 ```json
 {
   "version": 1,
-  "grading_db": "data/entregues/grading.db",
+  "grading_db": "data/grading.db",
   "grading_spec": "config/grading.custom.json"
 }
 ```
@@ -121,6 +121,14 @@ URLs use hash routing, for example:
 - `#/formula`
 
 (legacy `#/student/…` / `#/project/…` links still resolve.)
+
+The **←** button at the left of the tab bar (and the **← Back** link on detail
+pages) is a true back button: it returns to the exact page you came from, not a
+fixed list. It is disabled when there is no earlier page in this session.
+
+Column orderings are remembered. Sorting the Students or Projects table is
+stored per-table and restored when you navigate away and back — and across app
+restarts.
 
 ### 3. Formula tab
 

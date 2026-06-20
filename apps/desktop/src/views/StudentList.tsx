@@ -61,6 +61,7 @@ export default function StudentList({ db, grades }: Props) {
       ) : null}
       {rows.length > 0 && (
         <SortableTable
+          id="students"
           rows={rows}
           rowKey={(r) => `${r.project_id}-${r.student_id}`}
           defaultSort={{ key: "student", dir: "asc" }}

@@ -7,7 +7,7 @@ import { axisScore, qualityEff } from "../logic/gradeAxes";
 import { projectReviewGate } from "../logic/gates";
 import { fmtNum } from "./SortableTable";
 import { FormulaTreeList } from "./Tree";
-import { studentHref } from "../hooks/useHashRoute";
+import { studentHref, useNavHistory } from "../hooks/useHashRoute";
 
 type Props = {
   db: LoadedDb;
@@ -91,6 +91,7 @@ function structuralValue(repo: RepoInventory, key: string): number {
 }
 
 export default function ProjectDetail({ db, grades, spec, projectId }: Props) {
+  const { goBack } = useNavHistory();
   const raw = db.projects.find((p) => p.project_id === projectId);
   const out = grades.get(projectId);
   const diag = db.diagnostics.get(projectId);
@@ -152,9 +153,9 @@ export default function ProjectDetail({ db, grades, spec, projectId }: Props) {
 
   return (
     <div className="detail-page">
-      <a className="back-link" href="#/projects">
-        ← All projects
-      </a>
+      <button type="button" className="back-link" onClick={() => goBack("#/projects")}>
+        ← Back
+      </button>
       <h2>{raw.name}</h2>
       <p className="subtitle">Team size: {raw.team_size}</p>
 

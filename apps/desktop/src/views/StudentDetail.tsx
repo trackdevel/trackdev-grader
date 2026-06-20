@@ -5,7 +5,7 @@ import { studentReviewGate } from "../logic/gates";
 import { formatFlagDetails, flagSeverityClass } from "../logic/flagDetails";
 import Tree, { FormulaTreeList } from "./Tree";
 import { fmtNum } from "./SortableTable";
-import { projectHref } from "../hooks/useHashRoute";
+import { projectHref, useNavHistory } from "../hooks/useHashRoute";
 
 /** TrackDev task page; mirrors report::markdown::trackdev_task_url. */
 function trackdevTaskUrl(taskId: number): string {
@@ -54,6 +54,7 @@ function KvTable({ pairs }: { pairs: Array<[string, string | number | null]> }) 
 }
 
 export default function StudentDetail({ db, grades, projectId, studentId }: Props) {
+  const { goBack } = useNavHistory();
   const raw = db.projects.find((p) => p.project_id === projectId);
   const out = grades.get(projectId);
   const diag = db.diagnostics.get(projectId);
@@ -75,9 +76,9 @@ export default function StudentDetail({ db, grades, projectId, studentId }: Prop
 
   return (
     <div className="detail-page">
-      <a className="back-link" href="#/students">
-        ← All students
-      </a>
+      <button type="button" className="back-link" onClick={() => goBack("#/students")}>
+        ← Back
+      </button>
       <h2>{stuMeta.full_name}</h2>
       <p className="subtitle">
         Team:{" "}

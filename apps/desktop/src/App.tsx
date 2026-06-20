@@ -9,7 +9,7 @@ import {
   restoreFromLastSession,
 } from "./config/lastSession";
 import { useGrader } from "./hooks/useGrader";
-import { topTabOf, useHashRoute, type TopTab } from "./hooks/useHashRoute";
+import { topTabOf, useHashRoute, useNavHistory, type TopTab } from "./hooks/useHashRoute";
 import { checkParity } from "./logic/parity";
 import ConfigToolbar from "./views/ConfigToolbar";
 import DbPicker from "./views/DbPicker";
@@ -38,6 +38,7 @@ export default function App() {
   const grader = useGrader(loadedDb?.projects ?? NO_PROJECTS);
   const { loadSpec } = grader;
   const { route } = useHashRoute();
+  const { canGoBack, goBack } = useNavHistory();
   const activeTab = topTabOf(route);
 
   const sessionSnapshotRef = useRef({
@@ -159,6 +160,16 @@ export default function App() {
       <ParityBanner parity={parity} />
 
       <nav id="main-nav" className="main-nav">
+        <button
+          type="button"
+          className="nav-back"
+          onClick={() => goBack()}
+          disabled={!canGoBack}
+          title="Back to the previous page"
+          aria-label="Back"
+        >
+          ←
+        </button>
         {TABS.map(({ tab, href, label }) => (
           <a key={tab} className={activeTab === tab ? "active" : undefined} href={href}>
             {label}
