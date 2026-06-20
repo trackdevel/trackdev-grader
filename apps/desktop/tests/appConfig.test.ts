@@ -12,13 +12,13 @@ describe("parseAppConfig", () => {
     const config = parseAppConfig(
       JSON.stringify({
         version: 1,
-        grading_db: "data/entregues/grading.db",
+        grading_db: "data/grading.db",
         grading_spec: "my-spec.json",
       }),
     );
     expect(config).toEqual({
       version: 1,
-      grading_db: "data/entregues/grading.db",
+      grading_db: "data/grading.db",
       grading_spec: "my-spec.json",
     });
   });

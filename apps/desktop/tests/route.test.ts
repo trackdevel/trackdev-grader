@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { parseHash, projectHref, studentHref, topTabOf } from "../src/hooks/useHashRoute";
+import {
+  nextNavStep,
+  parseHash,
+  projectHref,
+  studentHref,
+  topTabOf,
+} from "../src/hooks/useHashRoute";
 
 describe("parseHash", () => {
   it("maps empty and unknown hashes to the students tab", () => {
@@ -46,6 +52,21 @@ describe("parseHash", () => {
       projectId: 3,
       studentId: "a/b",
     });
+  });
+});
+
+describe("nextNavStep", () => {
+  it("advances depth on a fresh forward navigation (unstamped entry)", () => {
+    expect(nextNavStep(0, null)).toEqual({ depth: 1, canGoBack: true });
+    expect(nextNavStep(3, null)).toEqual({ depth: 4, canGoBack: true });
+  });
+
+  it("adopts the stamped depth on a back/forward navigation", () => {
+    expect(nextNavStep(4, 1)).toEqual({ depth: 1, canGoBack: true });
+  });
+
+  it("reports no back available once we return to the origin entry", () => {
+    expect(nextNavStep(1, 0)).toEqual({ depth: 0, canGoBack: false });
   });
 });
 

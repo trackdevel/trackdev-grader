@@ -18,7 +18,7 @@ fn load_spec() -> GradeSpec {
 }
 
 fn db_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/entregues/grading.db")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/grading.db")
 }
 
 #[test]

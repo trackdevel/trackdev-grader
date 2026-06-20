@@ -717,7 +717,10 @@ fn main() -> Result<()> {
             .join("data")
     });
     let entregues_dir = data_dir.join("entregues");
-    let db_path = entregues_dir.join("grading.db");
+    // The grading DB lives at the top of `data/` (which the user backs up via
+    // Dropbox), NOT under `data/entregues/` (runtime repos/reports, not backed
+    // up). Repos and per-project reports still go under `entregues_dir`.
+    let db_path = data_dir.join("grading.db");
     std::fs::create_dir_all(&entregues_dir)
         .with_context(|| format!("failed to create data dir {}", entregues_dir.display()))?;
     info!(

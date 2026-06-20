@@ -126,10 +126,38 @@ body {
   color: #9aa7b8;
   text-decoration: none;
   font-size: 0.9rem;
+  /* Rendered as a <button> for true back navigation; strip the chrome. */
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
 }
 
 .back-link:hover {
   color: #e7ecf3;
+}
+
+.nav-back {
+  color: #9aa7b8;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-right: 0.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nav-back:hover:not(:disabled) {
+  color: #e7ecf3;
+  background: #1a2332;
+}
+
+.nav-back:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .detail-section {

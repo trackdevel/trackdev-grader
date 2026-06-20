@@ -4,7 +4,7 @@ import sqlite3
 import statistics
 from pathlib import Path
 
-DB = Path(__file__).resolve().parents[1] / "data/entregues/grading.db"
+DB = Path(__file__).resolve().parents[1] / "data/grading.db"
 
 
 def id_snippet(s: str, n: int = 16) -> str:

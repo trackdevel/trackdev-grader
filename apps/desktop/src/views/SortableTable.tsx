@@ -1,6 +1,12 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
-type SortDir = "asc" | "desc";
+import {
+  defaultSortStorage,
+  readStoredSort,
+  resolveInitialSort,
+  writeStoredSort,
+  type SortDir,
+} from "./tableSort";
 
 type Column<T> = {
   key: string;
@@ -19,6 +25,9 @@ type Props<T> = {
   rowKey: (row: T) => string;
   defaultSort?: { key: string; dir: SortDir };
   caption?: string;
+  /** Stable identifier; when set, the chosen ordering is remembered across
+   * navigation and app restarts (localStorage, keyed by this id). */
+  id?: string;
 };
 
 export default function SortableTable<T>({
@@ -27,8 +36,20 @@ export default function SortableTable<T>({
   rowKey,
   defaultSort,
   caption,
+  id,
 }: Props<T>) {
-  const [sort, setSort] = useState(defaultSort ?? { key: columns[0]?.key ?? "", dir: "asc" as SortDir });
+  const storage = useMemo(() => defaultSortStorage(), []);
+  const [sort, setSort] = useState(() =>
+    resolveInitialSort(
+      id ? readStoredSort(storage, id) : null,
+      defaultSort,
+      columns.map((c) => c.key),
+    ),
+  );
+
+  useEffect(() => {
+    if (id) writeStoredSort(storage, id, sort);
+  }, [id, storage, sort]);
 
   const sorted = useMemo(() => {
     const col = columns.find((c) => c.key === sort.key);

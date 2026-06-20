@@ -76,6 +76,7 @@ export default function ProjectList({ db, grades, spec }: Props) {
       {rows.length > 0 && (
         <div className="table-scroll">
           <SortableTable
+            id="projects"
             rows={rows}
             rowKey={(r) => String(r.project_id)}
             defaultSort={{ key: "grade", dir: "desc" }}

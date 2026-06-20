@@ -1,5 +1,5 @@
 //! Smoke test for `core::rule_attribution::load_attributed_findings_for_repo`
-//! against the live grading database in `data/entregues/grading.db`.
+//! against the live grading database in `data/grading.db`.
 //!
 //! Run with:
 //!
@@ -17,7 +17,7 @@ use sprint_grader_core::rule_attribution::load_attributed_findings_for_repo;
 
 fn main() -> rusqlite::Result<()> {
     let path =
-        std::env::var("GRADING_DB").unwrap_or_else(|_| "data/entregues/grading.db".to_string());
+        std::env::var("GRADING_DB").unwrap_or_else(|_| "data/grading.db".to_string());
     let repo = std::env::var("REPO").unwrap_or_else(|_| "spring-pds26_1b".to_string());
 
     let conn = Connection::open(&path)?;

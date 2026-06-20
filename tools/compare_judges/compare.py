@@ -413,7 +413,7 @@ def render_markdown(results, args) -> str:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--db", type=Path, default=REPO_ROOT / "data" / "entregues" / "grading.db")
+    p.add_argument("--db", type=Path, default=REPO_ROOT / "data" / "grading.db")
     p.add_argument("--rubric", type=Path, default=DEFAULT_RUBRIC)
     p.add_argument("--n", type=int, default=15, help="number of PRs to compare (default 15)")
     p.add_argument("--seed", type=int, default=42)
