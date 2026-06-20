@@ -41,6 +41,31 @@ pub fn arch_rule_hotspot_weight(rule_id: &str) -> f64 {
     arch_rule_reduced_weight(rule_id).unwrap_or(1.0)
 }
 
+/// Behavioural CRITICAL flag types excluded from the grade by policy: they are
+/// still detected and reported, but do not contribute to `student_critical_count`
+/// (and therefore not to `student_penalty`). 2026-06: ZERO_TASKS and
+/// LOW_COMPOSITE_SCORE removed from grading — both re-charge contribution that is
+/// already captured by effective points (code/tasks → `student_contribution`).
+pub const BEHAVIOURAL_FLAGS_UNGRADED: &[&str] = &["ZERO_TASKS", "LOW_COMPOSITE_SCORE"];
+
+/// True when a behavioural CRITICAL flag should count toward the student penalty.
+pub fn behavioural_flag_graded(flag_type: &str) -> bool {
+    !BEHAVIOURAL_FLAGS_UNGRADED.contains(&flag_type)
+}
+
+/// Severity multiplier for code-quality hotspot blame (CRITICAL ≫ WARNING), so a
+/// forbidden import weighs more than a style warning. Used by the per-(rule,file)
+/// dampened blame aggregation in `analyze::flags`. See
+/// `plans/quality_penalty_8020/PLAN.md` (Phase 2).
+pub fn quality_severity_weight(severity: &str) -> f64 {
+    match severity.to_ascii_uppercase().as_str() {
+        "CRITICAL" | "ERROR" => 1.0,
+        "WARNING" => 0.25,
+        "INFO" => 0.1,
+        _ => 0.25,
+    }
+}
+
 /// Effective weight of one CRITICAL method-complexity finding in violation density.
 pub const COMPLEXITY_CRIT_WEIGHT: f64 = 1.0 / 3.0;
 

@@ -1,6 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { loadAppConfigFromCwd } from "./config/appConfig";
+import {
+  buildLastSession,
+  persistLastSession,
+  restoreFromLastSession,
+} from "./config/lastSession";
 import { useGrader } from "./hooks/useGrader";
 import { topTabOf, useHashRoute, type TopTab } from "./hooks/useHashRoute";
 import { checkParity } from "./logic/parity";
@@ -33,16 +40,47 @@ export default function App() {
   const { route } = useHashRoute();
   const activeTab = topTabOf(route);
 
+  const sessionSnapshotRef = useRef({
+    appConfigPath,
+    dbPath: loadedDb?.path ?? null,
+    specPath: grader.specPath,
+  });
+  sessionSnapshotRef.current = {
+    appConfigPath,
+    dbPath: loadedDb?.path ?? null,
+    specPath: grader.specPath,
+  };
+
+  const applyBootSession = (result: {
+    configPath: string | null;
+    db: LoadedDb | null;
+    spec: GradeSpec | null;
+    specPath: string | null;
+  }) => {
+    if (result.configPath) setAppConfigPath(result.configPath);
+    if (result.db) setLoadedDb(result.db);
+    if (result.spec) loadSpec(result.spec, result.specPath);
+  };
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const applied = await loadAppConfigFromCwd();
-        if (cancelled || !applied) return;
-        setAppConfigPath(applied.configPath);
-        if (applied.db) setLoadedDb(applied.db);
-        if (applied.spec) {
-          loadSpec(applied.spec, applied.specPath);
+        const cwdApplied = await loadAppConfigFromCwd();
+        if (!cancelled && cwdApplied) {
+          applyBootSession({
+            configPath: cwdApplied.configPath,
+            db: cwdApplied.db,
+            spec: cwdApplied.spec,
+            specPath: cwdApplied.specPath,
+          });
+          return;
+        }
+        if (isTauri()) {
+          const restored = await restoreFromLastSession();
+          if (!cancelled && restored) {
+            applyBootSession(restored);
+          }
         }
       } catch (e) {
         if (!cancelled) {
@@ -55,6 +93,34 @@ export default function App() {
     };
   }, [loadSpec]);
 
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    let unlisten: (() => void) | undefined;
+    const closingRef = { current: false };
+
+    void (async () => {
+      const win = getCurrentWindow();
+      unlisten = await win.onCloseRequested((event) => {
+        // A second click (or a re-fired event) must let the close through —
+        // never prevent it twice, or the window becomes unclosable.
+        if (closingRef.current) return;
+        closingRef.current = true;
+        event.preventDefault();
+        const { appConfigPath: cfg, dbPath, specPath } = sessionSnapshotRef.current;
+        // Fire-and-forget: never block the UI thread or the close path on I/O.
+        void persistLastSession(buildLastSession(cfg, dbPath, specPath)).catch((e) => {
+          console.error("Failed to persist last session on close:", e);
+        });
+        void win.close();
+      });
+    })();
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   const parity = useMemo(
     () => checkParity(grader.spec, grader.grades, grader.bundledDefault),
     [grader.spec, grader.grades, grader.bundledDefault],
@@ -66,11 +132,7 @@ export default function App() {
     spec: GradeSpec | null;
     specPath: string | null;
   }) => {
-    if (result.db) setLoadedDb(result.db);
-    if (result.spec) {
-      loadSpec(result.spec, result.specPath);
-    }
-    setAppConfigPath(result.configPath);
+    applyBootSession(result);
   };
 
   return (

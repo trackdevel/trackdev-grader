@@ -140,19 +140,70 @@
       },
       {
         "expr": {
-          "factors": [
+          "op": "max",
+          "args": [
             {
-              "name": "work_base",
-              "op": "var"
+              "op": "sub",
+              "lhs": {
+                "factors": [
+                  {
+                    "name": "work_base",
+                    "op": "var"
+                  },
+                  {
+                    "name": "quality_multiplier",
+                    "op": "var"
+                  },
+                  {
+                    "name": "ai_factor",
+                    "op": "var"
+                  }
+                ],
+                "op": "mul"
+              },
+              "rhs": {
+                "name": "team_quality_penalty",
+                "op": "var"
+              }
             },
             {
-              "name": "quality_multiplier",
-              "op": "var"
+              "op": "num",
+              "value": 0
             }
-          ],
-          "op": "mul"
+          ]
         },
-        "infix": "work_base * quality_multiplier",
+        "infix": "max(work_base * quality_multiplier * ai_factor - team_quality_penalty, 0)",
+        "name": "project_raw"
+      },
+      {
+        "expr": {
+          "op": "mul",
+          "factors": [
+            {
+              "op": "num",
+              "value": 10
+            },
+            {
+              "op": "pow",
+              "base": {
+                "op": "div",
+                "num": {
+                  "name": "project_raw",
+                  "op": "var"
+                },
+                "den": {
+                  "op": "num",
+                  "value": 10
+                }
+              },
+              "exp": {
+                "name": "project_grade_gamma",
+                "op": "var"
+              }
+            }
+          ]
+        },
+        "infix": "10 * pow(project_raw / 10, project_grade_gamma)",
         "name": "project_final"
       }
     ],
@@ -215,6 +266,28 @@
       },
       {
         "expr": {
+          "lhs": {
+            "lhs": {
+              "name": "student_base",
+              "op": "var"
+            },
+            "op": "sub",
+            "rhs": {
+              "name": "student_penalty",
+              "op": "var"
+            }
+          },
+          "op": "sub",
+          "rhs": {
+            "name": "codequality_penalty",
+            "op": "var"
+          }
+        },
+        "infix": "student_base - student_penalty - codequality_penalty",
+        "name": "student_net"
+      },
+      {
+        "expr": {
           "hi": {
             "op": "num",
             "value": 10
@@ -225,25 +298,56 @@
           },
           "op": "clamp",
           "x": {
-            "lhs": {
-              "lhs": {
-                "name": "student_base",
+            "op": "add",
+            "terms": [
+              {
+                "name": "student_net",
                 "op": "var"
               },
-              "op": "sub",
-              "rhs": {
-                "name": "student_penalty",
-                "op": "var"
+              {
+                "op": "div",
+                "num": {
+                  "op": "mul",
+                  "factors": [
+                    {
+                      "name": "student_lift_k",
+                      "op": "var"
+                    },
+                    {
+                      "name": "student_net",
+                      "op": "var"
+                    },
+                    {
+                      "op": "max",
+                      "args": [
+                        {
+                          "op": "num",
+                          "value": 0
+                        },
+                        {
+                          "op": "sub",
+                          "lhs": {
+                            "name": "student_lift_pivot",
+                            "op": "var"
+                          },
+                          "rhs": {
+                            "name": "student_net",
+                            "op": "var"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "den": {
+                  "name": "student_lift_pivot",
+                  "op": "var"
+                }
               }
-            },
-            "op": "sub",
-            "rhs": {
-              "name": "codequality_penalty",
-              "op": "var"
-            }
+            ]
           }
         },
-        "infix": "clamp(student_base - student_penalty - codequality_penalty, 0, 10)",
+        "infix": "clamp(student_net + student_lift_k * student_net * max(0, student_lift_pivot - student_net) / student_lift_pivot, 0, 10)",
         "name": "student_final"
       }
     ],
@@ -395,10 +499,10 @@
     "Sonnet-4.6": 0.9
   },
   "notes": [
-    "Grading v4: project_final = work_base × quality_multiplier (uncapped — may exceed 10). work_base = present-renorm blend of size (w_size) and complexity (w_complexity), scaled by work_scale so the cohort-top reads 10. quality_multiplier = quality_floor + quality_blend × quality_eff/10.",
+    "Grading v4: project_final = work_base × quality_multiplier × ai_factor (uncapped — may exceed 10). work_base = present-renorm blend of size (w_size) and complexity (w_complexity), scaled by work_scale so the cohort-top reads 10. quality_multiplier = quality_floor + quality_blend × quality_eff/10. ai_factor = sum_eff/sum_raw scales the whole project grade down by team AI usage.",
     "quality_eff = absolute-mapped maintainability (code_quality_raw on mi_floor→0 .. mi_ceiling→10, NO cohort-percentile stretch) plus mutation when present, MINUS a subtractive layer-architecture penalty min(arch_cap, arch_k × (arch_crit×2 + arch_warn×0.5)). arch_* counts are layer_dependency only; specific per-file violations are charged to students, not the project.",
     "Size / complexity / quality axis scores are computed in grade_core::grade_cohort; work_base, quality_eff, and quality_multiplier are injected before project formulas run.",
-    "Story points and ai_factor never enter project_final. AI keep affects only student_eff → student_contribution.",
+    "ai_factor (= team sum_eff/sum_raw) multiplies project_final, so team AI usage lowers the whole project grade; combined with student_contribution=student_eff/sum_eff, each student's base resolves to quality × team_size × student_eff/sum_raw.",
     "student_base = project_final × student_contribution × team_size (enrolled roster). student_final subtracts behavioural CRITICAL flags (student_penalty) AND codequality_penalty, clamped to [0,10].",
     "codequality_penalty: cohort-wide percentile bands per signal (architecture / cyclomatic-complexity / static-analysis), ranked by weighted blame ÷ max(student_eff, cq_min_points). Top cq_crit_pct → cq_crit_pts, next band up to cq_warn_pct → cq_warn_pts, gated by cq_abs_floor, summed across signals and capped at cq_cap. Computed in grade_core::grade_cohort and injected as a per-student variable.",
     "Formulas are grade_core::Expr AST; infix is human review only.",
@@ -419,6 +523,17 @@
     "cq_min_points": 1.0,
     "cq_warn_pct": 0.3,
     "cq_warn_pts": 0.25,
+    "qpen_arch_scale": 0.1,
+    "qpen_author_cap": 2.0,
+    "qpen_author_share": 0.8,
+    "qpen_cx_scale": 0.02,
+    "qpen_sa_scale": 0.1,
+    "qpen_sig_cap": 1.0,
+    "project_grade_gamma": 1.0,
+    "student_lift_k": 0.64,
+    "student_lift_pivot": 7.0,
+    "qpen_team_cap": 1.5,
+    "qpen_team_share": 0.2,
     "crit_flag_points": 0.75,
     "density_ceiling": 1.0,
     "floor_keep": 0.2,

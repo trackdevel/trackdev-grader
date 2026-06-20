@@ -905,6 +905,23 @@ fn main() -> Result<()> {
                 .with_context(|| format!("flags failed for sprint_id {sid}"))?;
                 info!(sprint_id = sid, flags = n, "flags recomputed");
             }
+            // Artifact (per-project) hotspot flags read the architecture /
+            // complexity / static-analysis attribution rows already in the DB,
+            // so they recompute without re-scanning. One pass per project.
+            let mut seen = std::collections::BTreeSet::new();
+            for g in &groups {
+                if seen.insert(g.project_id) {
+                    sprint_grader_analyze::detect_artifact_flags_for_project_id(
+                        &db.conn,
+                        g.project_id,
+                        &config,
+                    )
+                    .with_context(|| {
+                        format!("artifact flags failed for project_id {}", g.project_id)
+                    })?;
+                    info!(project_id = g.project_id, "artifact flags recomputed");
+                }
+            }
         }
         Command::Inequality { projects } => {
             let filter = parse_project_filter(projects.projects);

@@ -82,7 +82,7 @@ fn warn_threshold_zero_emits_magnitude_for_small_warning_blame() {
     common::seed_default_project(&conn);
     common::seed_student(&conn, "alice");
     let f = insert_finding(&conn, "A.java", "f", "broad-catch", "WARNING", None, None);
-    // weight 0.5 * rank 2 = 1.0 score; below the old warn band of 4.0.
+    // One WARNING (file, method) group: min(1, 0.5) × severity 0.25 = 0.125.
     insert_attribution(&conn, f, "alice", 0.5);
 
     detect_artifact_flags_for_project_id(
@@ -94,7 +94,7 @@ fn warn_threshold_zero_emits_magnitude_for_small_warning_blame() {
     let details =
         common::artifact_flag_details_for(&conn, common::PROJECT_ID, "COMPLEXITY_HOTSPOT", "alice")
             .unwrap();
-    assert_eq!(details["score"].as_f64(), Some(1.0));
+    assert_eq!(details["score"].as_f64(), Some(0.125));
     let sev = common::artifact_flag_severity_for(
         &conn,
         common::PROJECT_ID,
@@ -110,7 +110,7 @@ fn warning_at_warn_band() {
     let conn = common::make_db();
     common::seed_default_project(&conn);
     common::seed_student(&conn, "alice");
-    // Two WARNING-severity findings owned in full → score 2 + 2 = 4 → warn.
+    // Two WARNING (file, method) groups owned in full → 0.25 + 0.25 = 0.5 → warn.
     let f1 = insert_finding(
         &conn,
         "A.java",
@@ -127,7 +127,7 @@ fn warning_at_warn_band() {
     detect_artifact_flags_for_project_id(
         &conn,
         common::PROJECT_ID,
-        &config_with_thresholds(4.0, 8.0),
+        &config_with_thresholds(0.5, 8.0),
     )
     .unwrap();
     assert_eq!(
@@ -145,7 +145,7 @@ fn warning_at_warn_band() {
     let details =
         common::artifact_flag_details_for(&conn, common::PROJECT_ID, "COMPLEXITY_HOTSPOT", "alice")
             .unwrap();
-    assert!((details["score"].as_f64().unwrap() - 4.0).abs() < 1e-9);
+    assert!((details["score"].as_f64().unwrap() - 0.5).abs() < 1e-9);
     let offenders = details["offenders"].as_array().unwrap();
     assert_eq!(offenders.len(), 2);
     let rule_keys: Vec<&str> = offenders
@@ -161,7 +161,7 @@ fn critical_at_crit_band() {
     let conn = common::make_db();
     common::seed_default_project(&conn);
     common::seed_student(&conn, "alice");
-    // Four full-weight WARNING findings: 4 * 2 = 8 = crit threshold.
+    // Four full-weight WARNING groups: 4 × 0.25 = 1.0 = crit threshold.
     for i in 0..4 {
         let f = insert_finding(
             &conn,
@@ -177,7 +177,7 @@ fn critical_at_crit_band() {
     detect_artifact_flags_for_project_id(
         &conn,
         common::PROJECT_ID,
-        &config_with_thresholds(4.0, 8.0),
+        &config_with_thresholds(0.5, 1.0),
     )
     .unwrap();
     let sev = common::artifact_flag_severity_for(
@@ -195,9 +195,9 @@ fn critical_severity_propagates_even_when_score_low() {
     let conn = common::make_db();
     common::seed_default_project(&conn);
     common::seed_student(&conn, "alice");
-    // One CRITICAL contributing 3.0 + one WARNING contributing 2.0 = 5.0 in
-    // the warn band; the worst-severity rule was CRITICAL, so the flag
-    // escalates to CRITICAL even though the score is below the crit band.
+    // One CRITICAL group (1.0) + one WARNING group (0.25) = 1.25 in the warn
+    // band; the worst-severity rule was CRITICAL, so the flag escalates to
+    // CRITICAL even though the score is below the crit band.
     let f1 = insert_finding(
         &conn,
         "A.java",
@@ -213,7 +213,7 @@ fn critical_severity_propagates_even_when_score_low() {
     detect_artifact_flags_for_project_id(
         &conn,
         common::PROJECT_ID,
-        &config_with_thresholds(4.0, 8.0),
+        &config_with_thresholds(0.5, 8.0),
     )
     .unwrap();
     let sev = common::artifact_flag_severity_for(
@@ -232,8 +232,8 @@ fn each_student_evaluated_independently() {
     common::seed_default_project(&conn);
     common::seed_student(&conn, "alice");
     common::seed_student(&conn, "bob");
-    // alice owns 100% of three WARNING findings → score 6 → fires.
-    // bob owns 50% of one WARNING finding → score 1 → silent.
+    // alice owns 100% of three WARNING groups → 3 × 0.25 = 0.75 → fires.
+    // bob owns 50% of one WARNING group → 0.5 × 0.25 = 0.125 → silent.
     let f1 = insert_finding(
         &conn,
         "A.java",
@@ -261,7 +261,7 @@ fn each_student_evaluated_independently() {
     detect_artifact_flags_for_project_id(
         &conn,
         common::PROJECT_ID,
-        &config_with_thresholds(4.0, 8.0),
+        &config_with_thresholds(0.5, 8.0),
     )
     .unwrap();
     assert_eq!(
@@ -280,7 +280,7 @@ fn offenders_list_capped_at_top_three_by_contribution() {
     common::seed_default_project(&conn);
     common::seed_student(&conn, "alice");
     // Five contributing findings; the top-3 by contribution must be the
-    // CRITICAL rows (3.0 each), then the WARNING (2.0).
+    // CRITICAL groups (1.0 each), then the WARNING (0.25); the INFOs (0.1) drop.
     let crit1 = insert_finding(
         &conn,
         "C1.java",
@@ -324,7 +324,7 @@ fn offenders_list_capped_at_top_three_by_contribution() {
     detect_artifact_flags_for_project_id(
         &conn,
         common::PROJECT_ID,
-        &config_with_thresholds(4.0, 8.0),
+        &config_with_thresholds(0.5, 8.0),
     )
     .unwrap();
     let details =

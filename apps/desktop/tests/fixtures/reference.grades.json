@@ -6,7 +6,7 @@
       "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 0.58,
-      "final_grade": 9.42,
+      "final_grade": 5.46,
       "review_gate": null,
       "team_size": 2,
       "axes": [
@@ -49,10 +49,10 @@
         "effective_points": 12.5,
         "ai_keep": 0.8333333333333334,
         "contribution": 0.8620689655172413,
-        "base_grade": 16.24,
+        "base_grade": 9.42,
         "student_penalty": 0.0,
         "codequality_penalty": 0.0,
-        "final_grade": 10.0,
+        "final_grade": 9.42,
         "review_gate": null
       },
       {
@@ -61,10 +61,10 @@
         "effective_points": 1.9999999999999996,
         "ai_keep": 0.19999999999999996,
         "contribution": 0.1379310344827586,
-        "base_grade": 2.6,
+        "base_grade": 1.51,
         "student_penalty": 0.75,
         "codequality_penalty": 0.0,
-        "final_grade": 1.85,
+        "final_grade": 1.19,
         "review_gate": null
       }
     ]
@@ -122,7 +122,7 @@
         "base_grade": 4.85,
         "student_penalty": 0.0,
         "codequality_penalty": 0.0,
-        "final_grade": 4.85,
+        "final_grade": 5.81,
         "review_gate": null
       }
     ]
@@ -180,7 +180,7 @@
         "base_grade": 5.09,
         "student_penalty": 0.0,
         "codequality_penalty": 0.0,
-        "final_grade": 5.09,
+        "final_grade": 5.98,
         "review_gate": null
       },
       {
@@ -204,7 +204,7 @@
       "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 1.0,
-      "final_grade": 6.73,
+      "final_grade": 6.53,
       "review_gate": null,
       "team_size": 1,
       "axes": [
@@ -247,10 +247,10 @@
         "effective_points": 10.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "base_grade": 6.73,
+        "base_grade": 6.53,
         "student_penalty": 0.0,
-        "codequality_penalty": 0.5,
-        "final_grade": 6.23,
+        "codequality_penalty": 0.8,
+        "final_grade": 6.4,
         "review_gate": null
       }
     ]

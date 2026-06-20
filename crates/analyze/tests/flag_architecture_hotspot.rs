@@ -39,11 +39,12 @@ fn fires_when_weighted_sum_at_or_above_threshold() {
     let conn = common::make_db();
     common::seed_default_project(&conn);
     common::seed_student(&conn, "alice");
-    let v1 = insert_violation(&conn, "A.java", "r1", "WARNING");
-    let v2 = insert_violation(&conn, "B.java", "r2", "WARNING");
+    // Two distinct (rule, file) groups, each CRITICAL (severity weight 1.0) with
+    // in-file blame capped at 1.0 → 1.0 + 1.0 = 2.0; default threshold 2.0, so >=.
+    let v1 = insert_violation(&conn, "A.java", "r1", "CRITICAL");
+    let v2 = insert_violation(&conn, "B.java", "r2", "CRITICAL");
     insert_attribution(&conn, v1, "alice", 1.0);
     insert_attribution(&conn, v2, "alice", 1.0);
-    // sum = 2.0; default threshold = 2.0, so >=
     detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &Config::test_default())
         .unwrap();
 
@@ -89,7 +90,8 @@ fn threshold_zero_emits_magnitude_for_small_warning_blame() {
         "alice",
     )
     .unwrap();
-    assert_eq!(details["weighted"].as_f64(), Some(0.5));
+    // One WARNING group: min(1, 0.5) × rule_weight 1.0 × severity 0.25 = 0.125.
+    assert_eq!(details["weighted"].as_f64(), Some(0.125));
 }
 
 #[test]
@@ -115,14 +117,15 @@ fn each_student_evaluated_independently() {
     common::seed_default_project(&conn);
     common::seed_student(&conn, "alice");
     common::seed_student(&conn, "bob");
-    let v1 = insert_violation(&conn, "A.java", "r1", "WARNING");
-    let v2 = insert_violation(&conn, "B.java", "r2", "WARNING");
-    let v3 = insert_violation(&conn, "C.java", "r3", "WARNING");
-    // Alice owns 2.5 across three violations → fires.
+    // CRITICAL (severity weight 1.0) so blame maps 1:1 to points.
+    let v1 = insert_violation(&conn, "A.java", "r1", "CRITICAL");
+    let v2 = insert_violation(&conn, "B.java", "r2", "CRITICAL");
+    let v3 = insert_violation(&conn, "C.java", "r3", "CRITICAL");
+    // Alice: 1.0 + 1.0 + 0.5 = 2.5 ≥ 2.0 → fires.
     insert_attribution(&conn, v1, "alice", 1.0);
     insert_attribution(&conn, v2, "alice", 1.0);
     insert_attribution(&conn, v3, "alice", 0.5);
-    // Bob owns 1.0 total → silent.
+    // Bob: 0.5 + 0.5 = 1.0 < 2.0 → silent.
     insert_attribution(&conn, v3, "bob", 0.5);
     insert_attribution(&conn, v2, "bob", 0.5);
 
@@ -153,8 +156,9 @@ fn worst_severity_propagates_to_flag() {
     insert_attribution(&conn, v1, "alice", 1.5);
     insert_attribution(&conn, v2, "alice", 0.6);
 
-    detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &Config::test_default())
-        .unwrap();
+    let mut cfg = Config::test_default();
+    cfg.detector_thresholds.architecture_hotspot_min_weighted = 0.0;
+    detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &cfg).unwrap();
     let sev = common::artifact_flag_severity_for(
         &conn,
         common::PROJECT_ID,
@@ -187,9 +191,10 @@ fn dispatcher_idempotently_replaces_prior_flag_rows() {
     let v1 = insert_violation(&conn, "A.java", "r1", "WARNING");
     insert_attribution(&conn, v1, "alice", 2.5);
 
+    let mut cfg = Config::test_default();
+    cfg.detector_thresholds.architecture_hotspot_min_weighted = 0.0;
     for _ in 0..3 {
-        detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &Config::test_default())
-            .unwrap();
+        detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &cfg).unwrap();
     }
     assert_eq!(
         common::count_artifact_flags_for(

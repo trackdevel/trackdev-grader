@@ -554,6 +554,14 @@ pub struct DetectorThresholdsConfig {
     pub gini_crit: f64,
     pub composite_warn: f64,
     pub composite_crit: f64,
+    /// `LOW_REVIEWS`: a student's team-normalized PR-review participation
+    /// (`student_sprint_contribution.review_signal`). Below `_warn` fires
+    /// WARNING, below `_crit` fires CRITICAL. CRITICAL counts toward the
+    /// behavioural `student_penalty` — review effort is collaboration that is
+    /// NOT captured by effective points, so (unlike LOW_COMPOSITE_SCORE) it is
+    /// graded.
+    pub review_warn: f64,
+    pub review_crit: f64,
     pub late_regularity: f64,
     pub team_inequality_outlier_deviation: f64,
     pub trajectory_cv_low: f64,
@@ -609,6 +617,8 @@ impl Default for DetectorThresholdsConfig {
             gini_crit: 0.50,
             composite_warn: 0.20,
             composite_crit: 0.10,
+            review_warn: 0.20,
+            review_crit: 0.10,
             late_regularity: 0.20,
             team_inequality_outlier_deviation: 0.35,
             trajectory_cv_low: 0.20,
@@ -972,6 +982,8 @@ struct RawDetectorThresholds {
     gini_crit: Option<f64>,
     composite_warn: Option<f64>,
     composite_crit: Option<f64>,
+    review_warn: Option<f64>,
+    review_crit: Option<f64>,
     late_regularity: Option<f64>,
     team_inequality_outlier_deviation: Option<f64>,
     trajectory_cv_low: Option<f64>,
@@ -1285,6 +1297,14 @@ impl Config {
                 .detector_thresholds
                 .composite_crit
                 .unwrap_or(detector_defaults.composite_crit),
+            review_warn: raw
+                .detector_thresholds
+                .review_warn
+                .unwrap_or(detector_defaults.review_warn),
+            review_crit: raw
+                .detector_thresholds
+                .review_crit
+                .unwrap_or(detector_defaults.review_crit),
             late_regularity: raw
                 .detector_thresholds
                 .late_regularity

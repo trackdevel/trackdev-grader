@@ -1,5 +1,14 @@
 use std::path::{Path, PathBuf};
 
+use tauri::Manager;
+
+const LAST_SESSION_FILENAME: &str = "last-session.json";
+
+fn last_session_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join(LAST_SESSION_FILENAME))
+}
+
 #[tauri::command]
 fn get_cwd() -> Result<String, String> {
     std::env::current_dir()
@@ -81,6 +90,37 @@ struct GradeExportPayload {
     decimals: u32,
 }
 
+/// Persist (or clear) the desktop's last-loaded session snapshot in app data.
+#[tauri::command]
+fn write_last_session(app: tauri::AppHandle, payload: Option<String>) -> Result<(), String> {
+    let path = last_session_path(&app)?;
+    match payload {
+        None => {
+            if path.is_file() {
+                std::fs::remove_file(path).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        Some(text) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(path, text).map_err(|e| e.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+fn read_last_session(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let path = last_session_path(&app)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    std::fs::read_to_string(path)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
 /// Write a student-facing final-grade workbook for one project. The grades are
 /// computed in the webview (WASM, live spec) and handed here verbatim, so the
 /// file matches exactly what the professor sees on screen. Shares the writer
@@ -110,6 +150,8 @@ pub fn run() {
             join_path,
             parent_dir,
             open_external,
+            write_last_session,
+            read_last_session,
             export_grade_xlsx,
         ])
         .run(tauri::generate_context!())

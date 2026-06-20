@@ -105,8 +105,16 @@ pub fn explain_grades(
         let sc = structural_scopes(raw, spec);
         let _ = writeln!(
             out,
-            "  team_size={}  sum_raw={:.1}  sum_eff={:.2}  mean_raw={:.2}  (project_final = (work_base×mult + extra_tech) × ai_factor)",
-            pg.output.grades.team_size, sc.sum_raw, sc.sum_eff, sc.mean_raw,
+            "  team_size={}  sum_raw={:.1}  sum_eff={:.2}  mean_raw={:.2}  team_quality_penalty={:.2}  (project_final = work_base×mult×ai_factor − team_quality_penalty)",
+            pg.output.grades.team_size,
+            sc.sum_raw,
+            sc.sum_eff,
+            sc.mean_raw,
+            pg.output.grades.team_quality_penalty,
+        );
+        let _ = writeln!(
+            out,
+            "  (project_final = 10·(project_raw/10)^gamma, project_raw = work_base×mult×ai − team_quality_penalty)",
         );
         let _ = writeln!(
             out,

@@ -157,23 +157,33 @@ async function architectureScanPresent(
   return false;
 }
 
+// `layer_dependency` rule names detected/reported but EXCLUDED from the project
+// quality penalty by policy (2026-06): Android use-cases / services importing
+// API DTOs is an accepted pattern in this course, so it must not lower the
+// grade. `presentation->!infrastructure` (controllers reaching repositories)
+// stays graded. Mirror of db_axis::LAYER_RULES_UNGRADED.
+const LAYER_RULES_UNGRADED = ["domain->!presentation", "application->!presentation"];
+
 // Grading v4 (T2.1): the project quality axis sees only HIGH-LEVEL architecture
 // — `layer_dependency` breaches (wrong package layering, a team-level design
-// decision). Every per-file AST rule (FINDVIEWBYID_USAGE, FRAGMENT_BYPASSES_…)
-// is charged to the offending student via the *_HOTSPOT artifact flags, not to
-// the team. Mirror of orchestration::grading_projection::db_axis::architecture_counts.
+// decision), minus the LAYER_RULES_UNGRADED policy exclusions. Every per-file
+// AST rule (FINDVIEWBYID_USAGE, FRAGMENT_BYPASSES_…) is charged to the offending
+// student via the *_HOTSPOT artifact flags, not to the team. Mirror of
+// orchestration::grading_projection::db_axis::architecture_counts.
 async function architectureCounts(
   db: SqlExecutor,
   repos: string[],
 ): Promise<{ crit: number; warn: number }> {
   let crit = 0;
   let warn = 0;
+  const placeholders = LAYER_RULES_UNGRADED.map(() => "?").join(", ");
   for (const repo of repos) {
     const rows = await db.select<{ severity: string; n: number }>(
       `SELECT severity, COUNT(*) AS n FROM architecture_violations
        WHERE repo_full_name = ? AND rule_kind = 'layer_dependency'
+         AND rule_name NOT IN (${placeholders})
        GROUP BY severity`,
-      [repo],
+      [repo, ...LAYER_RULES_UNGRADED],
     );
     for (const row of rows) {
       const sev = (row.severity ?? "").toUpperCase();
