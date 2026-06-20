@@ -30,6 +30,9 @@ const SHEET_CQ: &str = "Qualitat del codi";
 
 const PROJECTE: &str = "Projecte";
 const QUALITAT_EQUIP: &str = "Qualitat de l'equip";
+const FACTOR_IA_EQUIP: &str = "Factor d'ús d'IA de l'equip";
+const PENAL_QUALITAT_EQUIP: &str = "Penalització de qualitat (equip)";
+const NOTA_PROJECTE: &str = "Nota del projecte (amb IA)";
 const MIDA_EQUIP: &str = "Mida de l'equip";
 
 const ESTUDIANT: &str = "Estudiant";
@@ -49,7 +52,13 @@ const PUNTS: &str = "Punts";
 
 /// Short Catalan gloss for the team header block (column C).
 const EXPL_QUALITAT_EQUIP: &str =
-    "Nota agregada del projecte segons la qualitat del codi, l'arquitectura i altres indicadors de l'equip.";
+    "Indicador de qualitat del projecte (codi, arquitectura i altres mètriques de l'equip), ABANS d'aplicar el descompte per ús d'IA.";
+const EXPL_FACTOR_IA_EQUIP: &str =
+    "Proporció de punts que conserva l'equip després de descomptar l'ús d'IA (punts efectius ÷ punts estimats de tot l'equip). La nota del projecte es multiplica per aquest factor: com més ús d'IA, més baixa la nota del projecte.";
+const EXPL_PENAL_QUALITAT_EQUIP: &str =
+    "Descompte col·lectiu per incidències de qualitat del codi (arquitectura, complexitat, anàlisi estàtica). El 80% de cada incidència recau en qui la va escriure (columna «Penalització de qualitat de codi») i el 20% es comparteix amb tot l'equip i resta de la nota del projecte. Valor negatiu.";
+const EXPL_NOTA_PROJECTE: &str =
+    "Nota global de l'equip un cop aplicat el descompte per ús d'IA. És la nota que es reparteix entre els estudiants segons la seva contribució; per això pot ser més baixa que la qualitat de l'equip.";
 const EXPL_MIDA_EQUIP: &str =
     "Nombre d'estudiants matriculats al projecte; s'utilitza per repartir la nota del projecte.";
 
@@ -257,18 +266,29 @@ fn write_notes_sheet(
     let header = header_format();
     let expl = explanation_format();
 
-    // Team header block (shared values).
+    // Team header block (shared values): quality (pre-AI) → AI factor →
+    // project grade (post-AI, what gets split) → team size, so the AI haircut
+    // is visible and the lower student grades are explained.
     sheet.write_string_with_format(0, 0, PROJECTE, &label)?;
     sheet.write_string(0, 1, project_name)?;
     sheet.write_string_with_format(1, 0, QUALITAT_EQUIP, &label)?;
     sheet.write_number_with_format(1, 1, grades.quality_grade, &dec)?;
     sheet.write_string_with_format(1, 2, EXPL_QUALITAT_EQUIP, &expl)?;
-    sheet.write_string_with_format(2, 0, MIDA_EQUIP, &label)?;
-    sheet.write_number_with_format(2, 1, grades.team_size as f64, &ints)?;
-    sheet.write_string_with_format(2, 2, EXPL_MIDA_EQUIP, &expl)?;
+    sheet.write_string_with_format(2, 0, FACTOR_IA_EQUIP, &label)?;
+    sheet.write_number_with_format(2, 1, grades.ai_factor, &ratio)?;
+    sheet.write_string_with_format(2, 2, EXPL_FACTOR_IA_EQUIP, &expl)?;
+    sheet.write_string_with_format(3, 0, PENAL_QUALITAT_EQUIP, &label)?;
+    sheet.write_number_with_format(3, 1, fmt_penalty(grades.team_quality_penalty), &dec)?;
+    sheet.write_string_with_format(3, 2, EXPL_PENAL_QUALITAT_EQUIP, &expl)?;
+    sheet.write_string_with_format(4, 0, NOTA_PROJECTE, &label)?;
+    sheet.write_number_with_format(4, 1, grades.project_final, &dec)?;
+    sheet.write_string_with_format(4, 2, EXPL_NOTA_PROJECTE, &expl)?;
+    sheet.write_string_with_format(5, 0, MIDA_EQUIP, &label)?;
+    sheet.write_number_with_format(5, 1, grades.team_size as f64, &ints)?;
+    sheet.write_string_with_format(5, 2, EXPL_MIDA_EQUIP, &expl)?;
 
-    // Table header (row 4), gloss row (5), students (6+).
-    const HEADER_ROW: u32 = 4;
+    // Table header (row 7), gloss row (8), students (9+).
+    const HEADER_ROW: u32 = 7;
     const EXPL_ROW: u32 = HEADER_ROW + 1;
     const DATA_ROW: u32 = EXPL_ROW + 1;
     for (col, title) in NOTES_HEADERS.iter().enumerate() {
@@ -300,8 +320,12 @@ fn write_notes_sheet(
     for col in 1..=9u16 {
         sheet.set_column_width(col, 14.0)?;
     }
-    sheet.set_column_width(2, 42.0)?;
+    sheet.set_column_width(2, 52.0)?;
     sheet.set_column_width(7, 22.0)?;
+    // Header-block gloss rows wrap; give them room.
+    for r in 1..=5u32 {
+        sheet.set_row_height(r, 30.0)?;
+    }
     sheet.set_row_height(EXPL_ROW, 64.0)?;
     Ok(())
 }
@@ -391,6 +415,7 @@ mod tests {
             project_penalty: 0.0,
             ai_factor: 1.0,
             project_final: 7.5,
+            team_quality_penalty: 0.0,
             team_size: students.len() as i64,
             axes: vec![],
             extra_tech: 0.0,
@@ -440,16 +465,24 @@ mod tests {
     fn column_explanations_align_with_headers() {
         assert_eq!(NOTES_HEADERS.len(), NOTES_EXPLANATIONS.len());
         assert_eq!(CQ_HEADERS.len(), CQ_EXPLANATIONS.len());
-        for text in NOTES_EXPLANATIONS
-            .iter()
-            .chain(CQ_EXPLANATIONS.iter())
-            .copied()
-        {
+        for text in NOTES_EXPLANATIONS.iter().chain(CQ_EXPLANATIONS.iter()) {
             assert!(
                 text.len() > 10,
                 "explanation should be a short sentence: {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn team_header_explains_ai_haircut() {
+        // The team block must make the AI discount visible so a high quality
+        // grade next to lower student grades is not misleading.
+        assert!(EXPL_FACTOR_IA_EQUIP.contains("IA"));
+        assert!(EXPL_FACTOR_IA_EQUIP.contains("punts efectius"));
+        assert!(EXPL_NOTA_PROJECTE.contains("descompte"));
+        assert!(EXPL_NOTA_PROJECTE.contains("reparteix"));
+        // Quality gloss now flags that it precedes the AI discount.
+        assert!(EXPL_QUALITAT_EQUIP.contains("ABANS"));
     }
 
     #[test]

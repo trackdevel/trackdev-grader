@@ -30,10 +30,10 @@ pub use grade::{grade, grade_cohort, round_grade};
 pub use modulation::keep;
 pub use policy::{
     arch_rule_grading_weight, arch_rule_hotspot_weight, arch_rule_ignored_in_grading,
-    count_crit_findings, has_gradable_artifact, hotspot_blame_magnitude, is_codequality_hotspot,
-    structural_production_loc, ARCHITECTURE_HOTSPOT, ARCH_RULES_IGNORED_IN_GRADING,
-    ARCH_RULES_REDUCED_WEIGHT_IN_GRADING, COMPLEXITY_CRIT_WEIGHT, COMPLEXITY_HOTSPOT,
-    STATIC_ANALYSIS_HOTSPOT,
+    behavioural_flag_graded, count_crit_findings, has_gradable_artifact, hotspot_blame_magnitude,
+    is_codequality_hotspot, quality_severity_weight, structural_production_loc,
+    ARCHITECTURE_HOTSPOT, ARCH_RULES_IGNORED_IN_GRADING, ARCH_RULES_REDUCED_WEIGHT_IN_GRADING,
+    COMPLEXITY_CRIT_WEIGHT, COMPLEXITY_HOTSPOT, STATIC_ANALYSIS_HOTSPOT,
 };
 pub use shape::{aggregate, resolve_tasks, structural_scopes};
 pub use spec::{

@@ -2,7 +2,8 @@
 
 use crate::modulation::keep;
 use crate::policy::{
-    is_codequality_hotspot, ARCHITECTURE_HOTSPOT, COMPLEXITY_HOTSPOT, STATIC_ANALYSIS_HOTSPOT,
+    behavioural_flag_graded, is_codequality_hotspot, ARCHITECTURE_HOTSPOT, COMPLEXITY_HOTSPOT,
+    STATIC_ANALYSIS_HOTSPOT,
 };
 use crate::spec::StructuralSpec;
 use crate::types::{
@@ -111,15 +112,24 @@ pub fn aggregate(
             for f in raw
                 .student_flags
                 .iter()
-                .filter(|f| f.student_id == s.student_id && f.severity == "CRITICAL")
+                .filter(|f| f.student_id == s.student_id)
             {
-                let mag = f.weighted.unwrap_or(0.0);
+                // Code-quality hotspots feed per-signal blame regardless of
+                // severity — both CRITICAL and WARNING violations count toward
+                // the quality penalty (the 80/20 author/team model). They are
+                // partitioned out of the behavioural CRITICAL count, which
+                // stays CRITICAL-only.
                 match f.flag_type.as_str() {
-                    ARCHITECTURE_HOTSPOT => arch_blame += mag,
-                    COMPLEXITY_HOTSPOT => cx_blame += mag,
-                    STATIC_ANALYSIS_HOTSPOT => sa_blame += mag,
+                    ARCHITECTURE_HOTSPOT => arch_blame += f.weighted.unwrap_or(0.0),
+                    COMPLEXITY_HOTSPOT => cx_blame += f.weighted.unwrap_or(0.0),
+                    STATIC_ANALYSIS_HOTSPOT => sa_blame += f.weighted.unwrap_or(0.0),
                     _ if is_codequality_hotspot(&f.flag_type) => {}
-                    _ => crit_count += 1.0,
+                    // Behavioural CRITICAL flags count toward the student
+                    // penalty, except policy-excluded ones (e.g. ZERO_TASKS).
+                    _ if f.severity == "CRITICAL" && behavioural_flag_graded(&f.flag_type) => {
+                        crit_count += 1.0
+                    }
+                    _ => {}
                 }
             }
             StudentScope {
@@ -555,6 +565,52 @@ mod tests {
         let u = &scopes.students[0];
         assert!((u.arch_blame - 4.0).abs() < 1e-9);
         assert!((u.student_critical_count - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ungraded_behavioural_flags_excluded_from_critical_count() {
+        let flag = |ft: &str| crate::types::StudentFlag {
+            student_id: "u".to_string(),
+            severity: "CRITICAL".to_string(),
+            source: "sprint".to_string(),
+            flag_type: ft.to_string(),
+            weighted: None,
+        };
+        let raw = RawProject {
+            project_id: 6,
+            name: "B".to_string(),
+            team_size: 1,
+            axis: AxisInputs {
+                documentation_raw: 0.0,
+                doc_present: false,
+                code_quality_raw: 0.0,
+                cc_pct: 0.0,
+                mutation_score: 0.0,
+                cq_present: false,
+                survival_raw: 0.0,
+                surv_present: false,
+                arch_crit_count: 0.0,
+                arch_warn_count: 0.0,
+                arch_present: false,
+            },
+            inventory: vec![],
+            tasks: vec![],
+            students: vec![RawStudent {
+                student_id: "u".to_string(),
+                full_name: "U".to_string(),
+            }],
+            crit_findings: vec![],
+            // ZERO_TASKS + LOW_COMPOSITE_SCORE are policy-excluded; LOW_REVIEWS
+            // and APPROVED_BROKEN_PR are graded → only 2 count.
+            student_flags: vec![
+                flag("ZERO_TASKS"),
+                flag("LOW_COMPOSITE_SCORE"),
+                flag("LOW_REVIEWS"),
+                flag("APPROVED_BROKEN_PR"),
+            ],
+        };
+        let scopes = aggregate(&raw, &[], &default_knobs());
+        assert!((scopes.students[0].student_critical_count - 2.0).abs() < 1e-9);
     }
 
     #[test]

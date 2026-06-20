@@ -152,13 +152,33 @@ fn equal_contributors_receive_project_final() {
     };
     let out = grade_cohort(&[raw], &spec).expect("grade");
     let pf = out.projects[0].output.grades.project_final;
-    let tol = 0.5 * 10f64.powi(-(spec.meta.decimals as i32));
-    for stu in &out.projects[0].output.grades.students {
+    // The ×team_size normalizer makes each equal contributor's net grade equal
+    // the project grade; the smooth student leniency curve (`student_lift_*`)
+    // then transforms it identically for all three. So the expected final is the
+    // curve applied to `pf`: pf + k·pf·max(0, pivot − pf)/pivot, clamped.
+    let k = spec.weights.get("student_lift_k").copied().unwrap_or(0.0);
+    let pivot = spec
+        .weights
+        .get("student_lift_pivot")
+        .copied()
+        .unwrap_or(7.0);
+    let expected = (pf + k * pf * (pivot - pf).max(0.0) / pivot).clamp(0.0, 10.0);
+    let students = &out.projects[0].output.grades.students;
+    for stu in students {
+        // Symmetry: every equal contributor receives the same final.
         assert!(
-            (stu.student_final - pf).abs() <= tol,
-            "student {} got {} expected ~{}",
+            (stu.student_final - students[0].student_final).abs() < 1e-9,
+            "equal contributors must tie: {} got {}",
+            stu.student_id,
+            stu.student_final
+        );
+        // And that common value is the leniency-curved project grade.
+        assert!(
+            (stu.student_final - expected).abs() <= 0.02,
+            "student {} got {} expected ~{} (curve of pf={})",
             stu.student_id,
             stu.student_final,
+            expected,
             pf
         );
     }

@@ -185,6 +185,12 @@ pub struct ProjectGrades {
     pub project_penalty: f64,
     pub ai_factor: f64,
     pub project_final: f64,
+    /// Collective code-quality penalty subtracted from `project_final`: the 20%
+    /// team share of every architecture/complexity/static-analysis finding,
+    /// capped at `qpen_team_cap`. The 80% author share lands on each student's
+    /// `codequality_penalty`. See `plans/quality_penalty_8020/PLAN.md`.
+    #[serde(default)]
+    pub team_quality_penalty: f64,
     pub team_size: i64,
     pub axes: Vec<AxisGrade>,
     /// EXTRA_TECH aggregate: weighted "extra technologies vs. baseline" units.

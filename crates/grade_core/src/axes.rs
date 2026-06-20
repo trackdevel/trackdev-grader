@@ -373,28 +373,13 @@ fn quality_axis(raw: &RawProject, w: &BTreeMap<String, f64>) -> AxisResult {
             ));
         }
     }
-    let base = present_renorm_mean(terms);
-    if !base.present {
-        // No maintainability/mutation signal → quality absent; the caller
-        // substitutes the neutral 10. The layer guard never invents quality.
-        return base;
-    }
-
-    // High-level architecture guard: subtract only on real layer breaches
-    // (`arch_*_count` are fed layer_dependency-only by the projection). 0 for
-    // the clean teams, so MI is not diluted by a near-constant arch term.
-    let arch_k = w.get("arch_k").copied().unwrap_or(1.0);
-    let arch_cap = w.get("arch_cap").copied().unwrap_or(3.0);
-    let arch_penalty = if raw.axis.arch_present {
-        let arch_weighted = raw.axis.arch_crit_count * 2.0 + raw.axis.arch_warn_count * 0.5;
-        (arch_k * arch_weighted).min(arch_cap)
-    } else {
-        0.0
-    };
-    AxisResult {
-        score: (base.score - arch_penalty).clamp(0.0, 10.0),
-        present: true,
-    }
+    // Quality axis is purely maintainability + mutation (how clean/tested the
+    // code is). Architecture / complexity / static-analysis breaches are NOT
+    // subtracted here any more — they are charged once through the 80/20
+    // author/team quality-penalty model (`grade.rs`), which removes the former
+    // double-count of `layer_dependency` (quality axis + per-student hotspot).
+    // See `plans/quality_penalty_8020/PLAN.md`.
+    present_renorm_mean(terms)
 }
 
 fn blend_repo_axis(
@@ -679,13 +664,14 @@ mod tests {
     }
 
     #[test]
-    fn quality_axis_subtracts_layer_arch_penalty() {
+    fn quality_axis_ignores_architecture_breaches() {
+        // Architecture no longer dents the quality axis (it is charged through
+        // the 80/20 author/team penalty instead). MI alone drives quality, so a
+        // team with many layer breaches reads the same as a clean one.
         let mut w = BTreeMap::new();
         w.insert("w_mi".into(), 0.35);
         w.insert("mi_floor".into(), 85.0);
         w.insert("mi_ceiling".into(), 98.0);
-        w.insert("arch_k".into(), 1.0);
-        w.insert("arch_cap".into(), 3.0);
         let mut clean = project_with_inventory();
         clean.axis.mutation_score = 0.0;
         clean.axis.code_quality_raw = 98.0; // MI_abs = 10.0
@@ -693,9 +679,10 @@ mod tests {
         clean.axis.arch_crit_count = 0.0;
         clean.axis.arch_warn_count = 0.0;
         let mut breach = clean.clone();
-        breach.axis.arch_warn_count = 4.0; // arch_weighted = 2.0 → penalty 2.0
+        breach.axis.arch_crit_count = 5.0;
+        breach.axis.arch_warn_count = 10.0;
         assert!((quality_axis(&clean, &w).score - 10.0).abs() < 1e-9);
-        assert!((quality_axis(&breach, &w).score - 8.0).abs() < 1e-9);
+        assert!((quality_axis(&breach, &w).score - 10.0).abs() < 1e-9);
     }
 
     #[test]
