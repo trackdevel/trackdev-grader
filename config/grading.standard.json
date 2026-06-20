@@ -177,33 +177,42 @@
       },
       {
         "expr": {
-          "op": "mul",
-          "factors": [
+          "op": "min",
+          "args": [
             {
               "op": "num",
               "value": 10
             },
             {
-              "op": "pow",
-              "base": {
-                "op": "div",
-                "num": {
-                  "name": "project_raw",
-                  "op": "var"
-                },
-                "den": {
+              "op": "mul",
+              "factors": [
+                {
                   "op": "num",
                   "value": 10
+                },
+                {
+                  "op": "pow",
+                  "base": {
+                    "op": "div",
+                    "num": {
+                      "name": "project_raw",
+                      "op": "var"
+                    },
+                    "den": {
+                      "op": "num",
+                      "value": 10
+                    }
+                  },
+                  "exp": {
+                    "name": "project_grade_gamma",
+                    "op": "var"
+                  }
                 }
-              },
-              "exp": {
-                "name": "project_grade_gamma",
-                "op": "var"
-              }
+              ]
             }
           ]
         },
-        "infix": "10 * pow(project_raw / 10, project_grade_gamma)",
+        "infix": "min(10, 10 * pow(project_raw / 10, project_grade_gamma))",
         "name": "project_final"
       }
     ],
@@ -499,7 +508,7 @@
     "Sonnet-4.6": 0.9
   },
   "notes": [
-    "Grading v4: project_final = work_base × quality_multiplier × ai_factor (uncapped — may exceed 10). work_base = present-renorm blend of size (w_size) and complexity (w_complexity), scaled by work_scale so the cohort-top reads 10. quality_multiplier = quality_floor + quality_blend × quality_eff/10. ai_factor = sum_eff/sum_raw scales the whole project grade down by team AI usage.",
+    "Grading v4: project_final = min(10, work_base × quality_multiplier × ai_factor − team_quality_penalty), clamped to a 10 ceiling. work_base = present-renorm blend of size (w_size) and complexity (w_complexity), scaled by work_scale. quality_multiplier = quality_floor + quality_blend × quality_eff/10. ai_factor = sum_eff/sum_raw scales the whole project grade down by team AI usage.",
     "quality_eff = absolute-mapped maintainability (code_quality_raw on mi_floor→0 .. mi_ceiling→10, NO cohort-percentile stretch) plus mutation when present, MINUS a subtractive layer-architecture penalty min(arch_cap, arch_k × (arch_crit×2 + arch_warn×0.5)). arch_* counts are layer_dependency only; specific per-file violations are charged to students, not the project.",
     "Size / complexity / quality axis scores are computed in grade_core::grade_cohort; work_base, quality_eff, and quality_multiplier are injected before project formulas run.",
     "ai_factor (= team sum_eff/sum_raw) multiplies project_final, so team AI usage lowers the whole project grade; combined with student_contribution=student_eff/sum_eff, each student's base resolves to quality × team_size × student_eff/sum_raw.",
@@ -507,7 +516,7 @@
     "codequality_penalty: cohort-wide percentile bands per signal (architecture / cyclomatic-complexity / static-analysis), ranked by weighted blame ÷ max(student_eff, cq_min_points). Top cq_crit_pct → cq_crit_pts, next band up to cq_warn_pct → cq_warn_pts, gated by cq_abs_floor, summed across signals and capped at cq_cap. Computed in grade_core::grade_cohort and injected as a per-student variable.",
     "Formulas are grade_core::Expr AST; infix is human review only.",
     "Div semantics: 0/0 → 0. Rounding on meta.final_outputs only.",
-    "Anchors auto-calibrated (14 projects): work_scale=1.2728, arch_k=0.8392; project_final 5.98–9.00 → 5.98–9.00. MI/arch/inventory floor & ceiling from cohort min/max; work_scale freezes the cohort-top work_base to the calibration target."
+    "Anchors auto-calibrated (14 projects), then work_scale MANUALLY overridden 1.2728→1.4925 so pds26-1b's pre-AI project grade reaches 10 (linear lift of all projects; project_final clamped at 10). arch_k=0.8392. MI/arch/inventory floor & ceiling from cohort min/max. NOTE: do not re-run calibrate-anchors or it resets work_scale to the cohort-top work_base target."
   ],
   "title": "Grading v4 — work-scaled project grade, author-charged code-quality penalties",
   "version": "4.0.0",
@@ -558,6 +567,6 @@
     "w_quality": 0.5,
     "w_size": 0.2,
     "w_spring": 0.4,
-    "work_scale": 1.2728
+    "work_scale": 1.4925
   }
 }

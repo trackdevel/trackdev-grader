@@ -177,33 +177,42 @@
       },
       {
         "expr": {
-          "op": "mul",
-          "factors": [
+          "op": "min",
+          "args": [
             {
               "op": "num",
               "value": 10
             },
             {
-              "op": "pow",
-              "base": {
-                "op": "div",
-                "num": {
-                  "name": "project_raw",
-                  "op": "var"
-                },
-                "den": {
+              "op": "mul",
+              "factors": [
+                {
                   "op": "num",
                   "value": 10
+                },
+                {
+                  "op": "pow",
+                  "base": {
+                    "op": "div",
+                    "num": {
+                      "name": "project_raw",
+                      "op": "var"
+                    },
+                    "den": {
+                      "op": "num",
+                      "value": 10
+                    }
+                  },
+                  "exp": {
+                    "name": "project_grade_gamma",
+                    "op": "var"
+                  }
                 }
-              },
-              "exp": {
-                "name": "project_grade_gamma",
-                "op": "var"
-              }
+              ]
             }
           ]
         },
-        "infix": "10 * pow(project_raw / 10, project_grade_gamma)",
+        "infix": "min(10, 10 * pow(project_raw / 10, project_grade_gamma))",
         "name": "project_final"
       }
     ],
@@ -558,6 +567,6 @@
     "w_quality": 0.5,
     "w_size": 0.2,
     "w_spring": 0.4,
-    "work_scale": 1.2728
+    "work_scale": 1.4925
   }
 }
