@@ -14,6 +14,8 @@ type ExprJson = {
   x?: ExprJson;
   lo?: ExprJson;
   hi?: ExprJson;
+  base?: ExprJson;
+  exp?: ExprJson;
 };
 
 export function freeVarsFromExpr(expr: unknown): Set<string> {
@@ -53,6 +55,10 @@ function walkExpr(expr: unknown, out: Set<string>): void {
       walkExpr(e.x, out);
       walkExpr(e.lo, out);
       walkExpr(e.hi, out);
+      break;
+    case "pow":
+      walkExpr(e.base, out);
+      walkExpr(e.exp, out);
       break;
     default:
       break;

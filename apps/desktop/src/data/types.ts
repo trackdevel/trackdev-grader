@@ -198,6 +198,8 @@ export type ProjectGrades = {
   project_penalty: number;
   ai_factor: number;
   project_final: number;
+  /** Collective 20% code-quality penalty subtracted from project_final (mirror of grade_core). */
+  team_quality_penalty?: number;
   team_size: number;
   axes: AxisGrade[];
   /** EXTRA_TECH aggregate (weighted extra-technologies units; mirror of grade_core). */

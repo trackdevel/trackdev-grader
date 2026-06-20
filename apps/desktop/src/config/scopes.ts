@@ -80,6 +80,9 @@ export const STRUCTURAL_SCOPE = [
   "sum_eff",
   "mean_raw",
   "ai_factor",
+  // Collective 20% code-quality penalty injected into project scope by
+  // grade_core (mirror of grade.rs); subtracted from project_final.
+  "team_quality_penalty",
   "crit_sa_count",
   "crit_security_count",
   "crit_cx_count",

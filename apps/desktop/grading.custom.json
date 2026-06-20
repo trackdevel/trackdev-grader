@@ -2,128 +2,107 @@
   "$schema": "./grading.schema.json",
   "anchors": {
     "activity_count": {
-      "ceiling": 11,
-      "floor": 0
+      "ceiling": 11.0,
+      "floor": 0.0
     },
     "arch_weighted": {
       "ceiling": 7.15,
-      "floor": 0
+      "floor": 0.0
     },
     "avg_cc_per_controller": {
       "ceiling": 1.64,
-      "floor": 0
+      "floor": 0.0
     },
     "avg_cc_per_fragment": {
-      "ceiling": 4,
-      "floor": 0
+      "ceiling": 4.0,
+      "floor": 0.0
     },
     "avg_statements_per_endpoint": {
       "ceiling": 3.94,
-      "floor": 0
+      "floor": 0.0
     },
     "code_quality_raw": {
-      "ceiling": 98,
-      "floor": 85
+      "ceiling": 98.0,
+      "floor": 85.0
     },
     "controller_count": {
-      "ceiling": 22,
-      "floor": 0
+      "ceiling": 22.0,
+      "floor": 0.0
     },
     "custom_query_count": {
       "ceiling": 58.3,
-      "floor": 0
+      "floor": 0.0
     },
     "endpoint_count": {
       "ceiling": 159.5,
-      "floor": 0
+      "floor": 0.0
     },
     "entity_count": {
       "ceiling": 30.7,
-      "floor": 0
+      "floor": 0.0
     },
     "fragment_count": {
       "ceiling": 46.2,
-      "floor": 0
+      "floor": 0.0
     },
     "mutation_score": {
-      "ceiling": 1,
-      "floor": 0
+      "ceiling": 1.0,
+      "floor": 0.0
     },
     "nav_dispatch_count": {
       "ceiling": 70.4,
-      "floor": 0
+      "floor": 0.0
     },
     "nav_dispatch_density": {
       "ceiling": 1.89,
-      "floor": 0
+      "floor": 0.0
     },
     "observe_call_count": {
       "ceiling": 166.1,
-      "floor": 0
+      "floor": 0.0
     },
     "production_loc": {
       "ceiling": 22214.1,
-      "floor": 0
+      "floor": 0.0
     },
     "production_statement_count": {
       "ceiling": 12523.1,
-      "floor": 0
+      "floor": 0.0
     },
     "reactive_state_field_count": {
       "ceiling": 119.9,
-      "floor": 0
+      "floor": 0.0
     },
     "reactive_wiring_density": {
       "ceiling": 4.15,
-      "floor": 0
+      "floor": 0.0
     },
     "repository_count": {
-      "ceiling": 11,
-      "floor": 0
+      "ceiling": 11.0,
+      "floor": 0.0
     },
     "room_database_count": {
       "ceiling": 1.1,
-      "floor": 0
+      "floor": 0.0
     },
     "scheduled_task_count": {
       "ceiling": 4.4,
-      "floor": 0
+      "floor": 0.0
     },
     "service_count": {
       "ceiling": 25.3,
-      "floor": 0
+      "floor": 0.0
     },
     "viewmodel_count": {
       "ceiling": 50.6,
-      "floor": 0
+      "floor": 0.0
     },
     "violation_density": {
-      "ceiling": 1,
-      "floor": 0
+      "ceiling": 1.0,
+      "floor": 0.0
     }
   },
-  "constants": [
-    {
-      "name": "curve_pass_raw",
-      "value": 3.01,
-      "description": "Grade curve lower anchor (raw): student_raw mapped to curve_pass_grade. Cohort-specific — currently de Bolós Palomino, Lluís."
-    },
-    {
-      "name": "curve_pass_grade",
-      "value": 4.0,
-      "description": "Grade curve lower anchor (grade): the grade that curve_pass_raw maps to (currently de Bolós Palomino, Lluís)."
-    },
-    {
-      "name": "curve_top_raw",
-      "value": 10.36,
-      "description": "Grade curve upper anchor (raw): student_raw mapped to curve_top_grade. Cohort-specific — current cohort max."
-    },
-    {
-      "name": "curve_top_grade",
-      "value": 11.0,
-      "description": "Grade curve upper anchor (grade): the grade that curve_top_raw maps to; >10 gives the top a clamp cushion (clamped to 10)."
-    }
-  ],
+  "constants": [],
   "formulas": {
     "project": [
       {
@@ -161,46 +140,70 @@
       },
       {
         "expr": {
-          "op": "mul",
-          "factors": [
+          "op": "max",
+          "args": [
             {
-              "op": "add",
-              "terms": [
-                {
-                  "op": "mul",
-                  "factors": [
-                    {
-                      "op": "var",
-                      "name": "work_base"
-                    },
-                    {
-                      "op": "var",
-                      "name": "quality_multiplier"
-                    }
-                  ]
-                },
-                {
-                  "op": "min",
-                  "args": [
-                    {
-                      "op": "var",
-                      "name": "extra_tech"
-                    },
-                    {
-                      "op": "num",
-                      "value": 1.5
-                    }
-                  ]
-                }
-              ]
+              "op": "sub",
+              "lhs": {
+                "factors": [
+                  {
+                    "name": "work_base",
+                    "op": "var"
+                  },
+                  {
+                    "name": "quality_multiplier",
+                    "op": "var"
+                  },
+                  {
+                    "name": "ai_factor",
+                    "op": "var"
+                  }
+                ],
+                "op": "mul"
+              },
+              "rhs": {
+                "name": "team_quality_penalty",
+                "op": "var"
+              }
             },
             {
-              "op": "var",
-              "name": "ai_factor"
+              "op": "num",
+              "value": 0
             }
           ]
         },
-        "infix": "(work_base * quality_multiplier + min(extra_tech, 1.5)) * ai_factor",
+        "infix": "max(work_base * quality_multiplier * ai_factor - team_quality_penalty, 0)",
+        "name": "project_raw"
+      },
+      {
+        "expr": {
+          "op": "mul",
+          "factors": [
+            {
+              "op": "num",
+              "value": 10
+            },
+            {
+              "op": "pow",
+              "base": {
+                "op": "div",
+                "num": {
+                  "name": "project_raw",
+                  "op": "var"
+                },
+                "den": {
+                  "op": "num",
+                  "value": 10
+                }
+              },
+              "exp": {
+                "name": "project_grade_gamma",
+                "op": "var"
+              }
+            }
+          ]
+        },
+        "infix": "10 * pow(project_raw / 10, project_grade_gamma)",
         "name": "project_final"
       }
     ],
@@ -263,35 +266,43 @@
       },
       {
         "expr": {
-          "op": "sub",
           "lhs": {
-            "op": "sub",
             "lhs": {
-              "op": "var",
-              "name": "student_base"
+              "name": "student_base",
+              "op": "var"
             },
+            "op": "sub",
             "rhs": {
-              "op": "var",
-              "name": "student_penalty"
+              "name": "student_penalty",
+              "op": "var"
             }
           },
+          "op": "sub",
           "rhs": {
-            "op": "var",
-            "name": "codequality_penalty"
+            "name": "codequality_penalty",
+            "op": "var"
           }
         },
         "infix": "student_base - student_penalty - codequality_penalty",
-        "name": "student_raw"
+        "name": "student_net"
       },
       {
         "expr": {
+          "hi": {
+            "op": "num",
+            "value": 10
+          },
+          "lo": {
+            "op": "num",
+            "value": 0
+          },
           "op": "clamp",
           "x": {
             "op": "add",
             "terms": [
               {
-                "op": "var",
-                "name": "curve_pass_grade"
+                "name": "student_net",
+                "op": "var"
               },
               {
                 "op": "div",
@@ -299,53 +310,44 @@
                   "op": "mul",
                   "factors": [
                     {
-                      "op": "sub",
-                      "lhs": {
-                        "op": "var",
-                        "name": "student_raw"
-                      },
-                      "rhs": {
-                        "op": "var",
-                        "name": "curve_pass_raw"
-                      }
+                      "name": "student_lift_k",
+                      "op": "var"
                     },
                     {
-                      "op": "sub",
-                      "lhs": {
-                        "op": "var",
-                        "name": "curve_top_grade"
-                      },
-                      "rhs": {
-                        "op": "var",
-                        "name": "curve_pass_grade"
-                      }
+                      "name": "student_net",
+                      "op": "var"
+                    },
+                    {
+                      "op": "max",
+                      "args": [
+                        {
+                          "op": "num",
+                          "value": 0
+                        },
+                        {
+                          "op": "sub",
+                          "lhs": {
+                            "name": "student_lift_pivot",
+                            "op": "var"
+                          },
+                          "rhs": {
+                            "name": "student_net",
+                            "op": "var"
+                          }
+                        }
+                      ]
                     }
                   ]
                 },
                 "den": {
-                  "op": "sub",
-                  "lhs": {
-                    "op": "var",
-                    "name": "curve_top_raw"
-                  },
-                  "rhs": {
-                    "op": "var",
-                    "name": "curve_pass_raw"
-                  }
+                  "name": "student_lift_pivot",
+                  "op": "var"
                 }
               }
             ]
-          },
-          "lo": {
-            "op": "num",
-            "value": 0
-          },
-          "hi": {
-            "op": "num",
-            "value": 10
           }
         },
-        "infix": "clamp(curve_pass_grade + (student_raw - curve_pass_raw) * (curve_top_grade - curve_pass_grade) / (curve_top_raw - curve_pass_raw), 0, 10)",
+        "infix": "clamp(student_net + student_lift_k * student_net * max(0, student_lift_pivot - student_net) / student_lift_pivot, 0, 10)",
         "name": "student_final"
       }
     ],
@@ -463,42 +465,15 @@
     ]
   },
   "levels": {
-    "A": 0,
+    "A": 0.0,
     "B": 0.25,
     "C": 0.5,
     "D": 0.75,
-    "E": 1
+    "E": 1.0
   },
   "manual_fields": {
-    "defs": [
-      {
-        "name": "execution",
-        "value": 5,
-        "description": "Execution quality"
-      },
-      {
-        "name": "ui",
-        "value": 5,
-        "description": "UI quality"
-      },
-      {
-        "name": "extras",
-        "value": 0,
-        "description": "Extra technology used "
-      }
-    ],
-    "values": {
-      "8": {
-        "execution": 9,
-        "ui": 9,
-        "extras": 8
-      }
-    },
-    "notes": {
-      "8": {
-        "extras": "- Xat complet\n- Crypto"
-      }
-    }
+    "defs": [],
+    "values": {}
   },
   "meta": {
     "decimals": 2,
@@ -507,27 +482,27 @@
       "student_final"
     ],
     "penalty_mode": "subtractive",
-    "quantize_final": 0
+    "quantize_final": 0.0
   },
   "models": {
-    "Cap": 0,
+    "Cap": 0.0,
     "Copilot-Auto": 0.7,
     "Cursor": 0.9,
     "DeepSeek-v4": 0.85,
-    "GPT-5.2-codex": 1,
-    "GPT-5.3-codex": 1,
-    "GPT-5.4": 1,
-    "GPT-5.5": 1,
-    "Gemini-3.1": 1,
+    "GPT-5.2-codex": 1.0,
+    "GPT-5.3-codex": 1.0,
+    "GPT-5.4": 1.0,
+    "GPT-5.5": 1.0,
+    "Gemini-3.1": 1.0,
     "Kimi-2.6": 0.85,
-    "Opus-4.6-4.7": 1,
+    "Opus-4.6-4.7": 1.0,
     "Sonnet-4.6": 0.9
   },
   "notes": [
-    "Grading v4: project_final = work_base × quality_multiplier (uncapped — may exceed 10). work_base = present-renorm blend of size (w_size) and complexity (w_complexity), scaled by work_scale so the cohort-top reads 10. quality_multiplier = quality_floor + quality_blend × quality_eff/10.",
+    "Grading v4: project_final = work_base × quality_multiplier × ai_factor (uncapped — may exceed 10). work_base = present-renorm blend of size (w_size) and complexity (w_complexity), scaled by work_scale so the cohort-top reads 10. quality_multiplier = quality_floor + quality_blend × quality_eff/10. ai_factor = sum_eff/sum_raw scales the whole project grade down by team AI usage.",
     "quality_eff = absolute-mapped maintainability (code_quality_raw on mi_floor→0 .. mi_ceiling→10, NO cohort-percentile stretch) plus mutation when present, MINUS a subtractive layer-architecture penalty min(arch_cap, arch_k × (arch_crit×2 + arch_warn×0.5)). arch_* counts are layer_dependency only; specific per-file violations are charged to students, not the project.",
     "Size / complexity / quality axis scores are computed in grade_core::grade_cohort; work_base, quality_eff, and quality_multiplier are injected before project formulas run.",
-    "Story points and ai_factor never enter project_final. AI keep affects only student_eff → student_contribution.",
+    "ai_factor (= team sum_eff/sum_raw) multiplies project_final, so team AI usage lowers the whole project grade; combined with student_contribution=student_eff/sum_eff, each student's base resolves to quality × team_size × student_eff/sum_raw.",
     "student_base = project_final × student_contribution × team_size (enrolled roster). student_final subtracts behavioural CRITICAL flags (student_penalty) AND codequality_penalty, clamped to [0,10].",
     "codequality_penalty: cohort-wide percentile bands per signal (architecture / cyclomatic-complexity / static-analysis), ranked by weighted blame ÷ max(student_eff, cq_min_points). Top cq_crit_pct → cq_crit_pts, next band up to cq_warn_pct → cq_warn_pts, gated by cq_abs_floor, summed across signals and capped at cq_cap. Computed in grade_core::grade_cohort and injected as a per-student variable.",
     "Formulas are grade_core::Expr AST; infix is human review only.",
@@ -537,32 +512,44 @@
   "title": "Grading v4 — work-scaled project grade, author-charged code-quality penalties",
   "version": "4.0.0",
   "weights": {
-    "ai_strength": 1,
-    "arch_cap": 3,
+    "ai_strength": 1.0,
+    "arch_cap": 3.0,
     "arch_k": 0.8392,
     "arch_norm": 3.575,
-    "cq_abs_floor": 0,
-    "cq_cap": 1,
+    "cq_abs_floor": 0.0,
+    "cq_cap": 1.0,
     "cq_crit_pct": 0.1,
     "cq_crit_pts": 0.5,
-    "cq_min_points": 1,
+    "cq_min_points": 1.0,
     "cq_warn_pct": 0.3,
     "cq_warn_pts": 0.25,
+    "qpen_arch_scale": 0.1,
+    "qpen_author_cap": 2.0,
+    "qpen_author_share": 0.8,
+    "qpen_cx_scale": 0.02,
+    "qpen_sa_scale": 0.1,
+    "qpen_sig_cap": 1.0,
+    "project_grade_gamma": 1.0,
+    "student_lift_k": 0.64,
+    "student_lift_pivot": 7.0,
+    "qpen_team_cap": 1.5,
+    "qpen_team_share": 0.2,
     "crit_flag_points": 0.75,
-    "density_ceiling": 1,
+    "density_ceiling": 1.0,
     "floor_keep": 0.2,
-    "inventory_count_ceiling": 50,
-    "inventory_density_ceiling": 10,
-    "inventory_depth_ceiling": 30,
-    "mi_ceiling": 98,
-    "mi_floor": 85,
+    "inventory_count_ceiling": 50.0,
+    "inventory_density_ceiling": 10.0,
+    "inventory_depth_ceiling": 30.0,
+    "mi_ceiling": 98.0,
+    "mi_floor": 85.0,
     "prod_loc_ceiling": 22214.1,
-    "prod_stmt_ceiling": 12000,
-    "quality_blend": 0.2,
-    "quality_floor": 0.8,
-    "student_penalty_cap": 1,
+    "prod_stmt_ceiling": 12000.0,
+    "quality_blend": 0.5,
+    "quality_floor": 0.5,
+    "student_penalty_cap": 1.0,
+    "undeclared_keep": 0.5,
     "undeclared_level_l": 0.5,
-    "undeclared_model_m": 0,
+    "undeclared_model_m": 0.0,
     "w_android": 0.6,
     "w_arch": 0.3,
     "w_complexity": 0.3,
@@ -571,16 +558,6 @@
     "w_quality": 0.5,
     "w_size": 0.2,
     "w_spring": 0.4,
-    "work_scale": 1.2728,
-    "w_extra_dep": 1,
-    "w_fcm_spring": 2,
-    "w_fcm_android": 3,
-    "w_spec": 3,
-    "w_email": 2,
-    "w_graphics": 2,
-    "w_av": 2,
-    "extra_tech_cap": 3,
-    "absolute_axes": 1,
-    "undeclared_keep": 0.5
+    "work_scale": 1.2728
   }
 }
