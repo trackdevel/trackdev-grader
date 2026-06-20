@@ -213,21 +213,41 @@ pub fn architecture_scan_present(conn: &Connection, repos: &[String]) -> rusqlit
     Ok(false)
 }
 
+/// `layer_dependency` rule names that are detected and reported but **excluded
+/// from the project quality penalty** by policy decision (2026-06): in this
+/// course, Android use-cases and services importing API DTOs
+/// (`domain->!presentation`, `application->!presentation`) is an accepted
+/// pattern, so it must not lower the grade. `presentation->!infrastructure`
+/// (controllers reaching repositories directly) remains graded. Excluding here
+/// — at the grading boundary, not the scanner — keeps the violations visible in
+/// reports and survives re-scans.
+const LAYER_RULES_UNGRADED: &[&str] = &["domain->!presentation", "application->!presentation"];
+
 /// Grading v4: the project quality axis sees only **high-level** architecture
 /// — `layer_dependency` breaches (wrong package layering, a team-level design
-/// decision). Every per-file AST rule (`FINDVIEWBYID_USAGE`,
-/// `FRAGMENT_BYPASSES_VIEWMODEL`, …) is charged to the offending student via
-/// the `*_HOTSPOT` artifact flags, not to the team.
+/// decision), minus the [`LAYER_RULES_UNGRADED`] policy exclusions. Every
+/// per-file AST rule (`FINDVIEWBYID_USAGE`, `FRAGMENT_BYPASSES_VIEWMODEL`, …)
+/// is charged to the offending student via the `*_HOTSPOT` artifact flags, not
+/// to the team.
 pub fn architecture_counts(conn: &Connection, project_id: i64) -> rusqlite::Result<(f64, f64)> {
     let repos = project_repos(conn, project_id)?;
+    // Build a static `NOT IN (...)` list from the policy exclusions. The values
+    // are compile-time constants (no user input), so inlining them is safe.
+    let excluded = LAYER_RULES_UNGRADED
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT severity, COUNT(*) FROM architecture_violations
+         WHERE repo_full_name = ? AND rule_kind = 'layer_dependency'
+           AND rule_name NOT IN ({excluded})
+         GROUP BY severity"
+    );
     let mut crit = 0.0;
     let mut warn = 0.0;
     for repo in &repos {
-        let mut stmt = conn.prepare(
-            "SELECT severity, COUNT(*) FROM architecture_violations
-             WHERE repo_full_name = ? AND rule_kind = 'layer_dependency'
-             GROUP BY severity",
-        )?;
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![repo], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?;

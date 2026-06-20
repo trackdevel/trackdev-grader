@@ -73,7 +73,7 @@ describe("loadInventory", () => {
         url TEXT, title TEXT, state TEXT, merged INTEGER
       );
       CREATE TABLE pr_authors (pr_id TEXT, student_id TEXT);
-      CREATE TABLE architecture_violations (repo_full_name TEXT, severity TEXT, rule_kind TEXT);
+      CREATE TABLE architecture_violations (repo_full_name TEXT, severity TEXT, rule_kind TEXT, rule_name TEXT);
       CREATE TABLE architecture_runs (repo_full_name TEXT, status TEXT);
       CREATE TABLE student_artifact_flags (
         project_id INTEGER, student_id TEXT, severity TEXT, flag_type TEXT, details TEXT
