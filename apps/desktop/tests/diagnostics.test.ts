@@ -96,4 +96,73 @@ describe("loadProjectDiagnostics display tasks", () => {
       db.close();
     }
   });
+
+  it("returns an empty structural inventory when the inventory tables are absent", async () => {
+    const db = seedDb();
+    try {
+      const diag = await loadProjectDiagnostics(makeExecutor(db), 1, [10, 20]);
+      expect(diag.structural).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("loadProjectDiagnostics structural inventory", () => {
+  function seedInventory(): Database.Database {
+    const db = seedDb();
+    db.exec(`
+      CREATE TABLE project_inventory_runs (
+        repo_full_name TEXT PRIMARY KEY, project_id INTEGER, status TEXT,
+        metric_count INTEGER, file_count INTEGER
+      );
+      CREATE TABLE repo_structural_metrics (
+        repo_full_name TEXT, metric_key TEXT, value REAL,
+        PRIMARY KEY (repo_full_name, metric_key)
+      );
+
+      -- Two repos for project 1 (a Spring backend and an Android client) plus a
+      -- repo belonging to another project that must not leak in.
+      INSERT INTO project_inventory_runs VALUES
+        ('org/spring-team', 1, 'OK', 2, 40),
+        ('org/android-team', 1, 'OK', 2, 25),
+        ('org/spring-other', 2, 'OK', 1, 99);
+
+      INSERT INTO repo_structural_metrics VALUES
+        ('org/spring-team', 'production_loc', 1200),
+        ('org/spring-team', 'controller_count', 3),
+        ('org/android-team', 'production_loc', 800),
+        ('org/android-team', 'fragment_count', 4),
+        ('org/spring-other', 'production_loc', 5000);
+    `);
+    return db;
+  }
+
+  it("groups metrics per repo, scopes by project, and carries file_count from the run", async () => {
+    const db = seedInventory();
+    try {
+      const diag = await loadProjectDiagnostics(makeExecutor(db), 1, [10, 20]);
+      expect(diag.structural.map((r) => r.repo_full_name)).toEqual([
+        "org/android-team",
+        "org/spring-team",
+      ]);
+
+      const spring = diag.structural.find((r) => r.repo_full_name === "org/spring-team")!;
+      expect(spring.file_count).toBe(40);
+      expect(spring.status).toBe("OK");
+      expect(spring.metrics.production_loc).toBe(1200);
+      expect(spring.metrics.controller_count).toBe(3);
+      // Android-only key is absent on the Spring repo (reads as zero downstream).
+      expect(spring.metrics.fragment_count).toBeUndefined();
+
+      const android = diag.structural.find((r) => r.repo_full_name === "org/android-team")!;
+      expect(android.file_count).toBe(25);
+      expect(android.metrics.fragment_count).toBe(4);
+
+      // The other project's repo never appears.
+      expect(diag.structural.some((r) => r.repo_full_name === "org/spring-other")).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
 });

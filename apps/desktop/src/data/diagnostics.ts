@@ -48,12 +48,27 @@ export type ProjectTechnology = {
   depth: number;
 };
 
+/**
+ * Absolute size/structure inventory for one of a project's repos
+ * (`project_inventory_runs` + `repo_structural_metrics`). Display-only: these
+ * are the "how big / how complex" counters (LOC, statements, components), never
+ * a grade input. `metrics` maps stable `metric_key` → value; `file_count` comes
+ * from the run row (it is not a `repo_structural_metrics` key).
+ */
+export type RepoInventory = {
+  repo_full_name: string;
+  status: string;
+  file_count: number;
+  metrics: Record<string, number>;
+};
+
 export type ProjectDiagnostics = {
   flags: DetailedFlag[];
   aiDetect: AiDetectRow[];
   plagiarism: boolean;
   tasks: DisplayTask[];
   technologies: ProjectTechnology[];
+  structural: RepoInventory[];
 };
 
 async function loadDisplayTasks(
@@ -144,6 +159,63 @@ async function loadExtraTechnologies(
   }));
 }
 
+/**
+ * Per-repo absolute size/structure metrics for a project, scoped via
+ * `project_inventory_runs`. The numeric `repo_structural_metrics` rows carry
+ * everything except `file_count` (which lives on the run). Empty when neither
+ * inventory table is present (pre-inventory DB). The display layer decides which
+ * keys to show; here we hand over every numeric key verbatim.
+ */
+async function loadStructuralInventory(
+  db: SqlExecutor,
+  projectId: number,
+): Promise<RepoInventory[]> {
+  if (!(await tableExists(db, "project_inventory_runs"))) return [];
+
+  const runs = await db.select<{
+    repo_full_name: string;
+    status: string;
+    file_count: number;
+  }>(
+    `SELECT repo_full_name, status, file_count
+     FROM project_inventory_runs
+     WHERE project_id = ?
+     ORDER BY repo_full_name ASC`,
+    [projectId],
+  );
+  if (runs.length === 0) return [];
+
+  const byRepo = new Map<string, RepoInventory>();
+  for (const r of runs) {
+    byRepo.set(r.repo_full_name, {
+      repo_full_name: r.repo_full_name,
+      status: r.status,
+      file_count: r.file_count,
+      metrics: {},
+    });
+  }
+
+  if (await tableExists(db, "repo_structural_metrics")) {
+    const metrics = await db.select<{
+      repo_full_name: string;
+      metric_key: string;
+      value: number;
+    }>(
+      `SELECT m.repo_full_name, m.metric_key, m.value
+       FROM repo_structural_metrics m
+       JOIN project_inventory_runs r ON r.repo_full_name = m.repo_full_name
+       WHERE r.project_id = ?`,
+      [projectId],
+    );
+    for (const m of metrics) {
+      const repo = byRepo.get(m.repo_full_name);
+      if (repo) repo.metrics[m.metric_key] = m.value;
+    }
+  }
+
+  return runs.map((r) => byRepo.get(r.repo_full_name)!);
+}
+
 export async function loadProjectDiagnostics(
   db: SqlExecutor,
   projectId: number,
@@ -230,6 +302,7 @@ export async function loadProjectDiagnostics(
 
   const tasks = await loadDisplayTasks(db, projectId, sprintIds);
   const technologies = await loadExtraTechnologies(db, projectId);
+  const structural = await loadStructuralInventory(db, projectId);
 
-  return { flags, aiDetect, plagiarism, tasks, technologies };
+  return { flags, aiDetect, plagiarism, tasks, technologies, structural };
 }
