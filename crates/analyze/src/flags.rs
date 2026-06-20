@@ -1237,6 +1237,56 @@ fn low_composite_score(
     Ok(flags)
 }
 
+/// LOW_REVIEWS: a student's team-normalized PR-review participation
+/// (`student_sprint_contribution.review_signal`) is below threshold. Unlike
+/// LOW_COMPOSITE_SCORE — which blends code/tasks already captured by effective
+/// points and is excluded from grading — review effort is collaboration that the
+/// effective-point split does NOT capture, so the CRITICAL band is a graded
+/// behavioural penalty (it is not in `BEHAVIOURAL_FLAGS_UNGRADED`).
+fn low_reviews(
+    conn: &Connection,
+    sprint_id: i64,
+    dt: &DetectorThresholdsConfig,
+) -> rusqlite::Result<Vec<Flag>> {
+    let warn = dt.review_warn;
+    let crit = dt.review_crit;
+    let mut stmt = conn.prepare(
+        "SELECT student_id, review_signal
+         FROM student_sprint_contribution WHERE sprint_id = ?",
+    )?;
+    let rows: Vec<(String, Option<f64>)> = stmt
+        .query_map([sprint_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<f64>>(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    let mut flags = Vec::new();
+    for (sid, signal) in rows {
+        let s = match signal {
+            Some(x) => x,
+            None => continue,
+        };
+        let severity: &'static str = if s < crit {
+            "CRITICAL"
+        } else if s < warn {
+            "WARNING"
+        } else {
+            continue;
+        };
+        flags.push(Flag {
+            student_id: sid,
+            flag_type: "LOW_REVIEWS",
+            severity,
+            details: json!({
+                "review_signal": round3(s),
+                "review_warn": warn,
+                "review_crit": crit,
+            }),
+        });
+    }
+    Ok(flags)
+}
+
 fn ghost_contributor(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<Flag>> {
     let mut stmt = conn.prepare(
         "SELECT student_id, composite_score, code_signal
@@ -1639,39 +1689,70 @@ fn architecture_hotspot(
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     use std::collections::BTreeMap;
+    // Dampening: group a student's violations by (rule_name, file) so a single
+    // systemic pattern firing many times in one file counts once — the in-file
+    // blame is capped at 1.0. Each group is severity-weighted (CRITICAL ≫
+    // WARNING) and rule-weighted. See plans/quality_penalty_8020/PLAN.md.
+    #[derive(Default)]
+    struct Group {
+        blame: f64,
+        worst_severity: String,
+        rule_kind: Option<String>,
+    }
+    let mut groups: BTreeMap<(String, String, String), Group> = BTreeMap::new();
+    for (student_id, severity, weight, rule_name, rule_kind, file_path) in rows {
+        if grade_core::arch_rule_hotspot_weight(&rule_name) <= 0.0 {
+            continue;
+        }
+        let g = groups
+            .entry((student_id, rule_name, file_path))
+            .or_default();
+        g.blame += weight;
+        if severity_rank(&severity) > severity_rank(&g.worst_severity) {
+            g.worst_severity = severity;
+        }
+        g.rule_kind = rule_kind;
+    }
+
     #[derive(Default)]
     struct Acc {
         weighted: f64,
         worst_severity: String,
-        offenders: Vec<Value>,
+        offenders: Vec<(f64, Value)>,
     }
     let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
-    for (student_id, severity, weight, rule_name, rule_kind, file_path) in rows {
+    for ((student_id, rule_name, file_path), g) in groups {
         let rule_weight = grade_core::arch_rule_hotspot_weight(&rule_name);
-        if rule_weight <= 0.0 {
+        let sev_weight = grade_core::quality_severity_weight(&g.worst_severity);
+        let contribution = g.blame.min(1.0) * rule_weight * sev_weight;
+        if contribution <= 0.0 {
             continue;
         }
-        let effective_weight = weight * rule_weight;
         let acc = by_student.entry(student_id).or_default();
-        acc.weighted += effective_weight;
-        if severity_rank(&severity) > severity_rank(&acc.worst_severity) {
-            acc.worst_severity = severity.clone();
+        acc.weighted += contribution;
+        if severity_rank(&g.worst_severity) > severity_rank(&acc.worst_severity) {
+            acc.worst_severity = g.worst_severity.clone();
         }
-        acc.offenders.push(json!({
-            "rule_name": rule_name,
-            "rule_kind": rule_kind,
-            "file_path": file_path,
-            "severity": severity,
-            "weight": effective_weight,
-            "rule_grading_weight": rule_weight,
-        }));
+        acc.offenders.push((
+            contribution,
+            json!({
+                "rule_name": rule_name,
+                "rule_kind": g.rule_kind,
+                "file_path": file_path,
+                "severity": g.worst_severity,
+                "weight": round3(contribution),
+                "rule_grading_weight": rule_weight,
+            }),
+        ));
     }
     let mut flags = Vec::new();
-    for (student_id, acc) in by_student {
+    for (student_id, mut acc) in by_student {
         if acc.weighted >= min_weighted {
-            // Trim the per-student offender list to keep the JSON compact.
-            let mut offenders = acc.offenders;
-            offenders.truncate(10);
+            // Trim to the top contributors to keep the JSON compact.
+            acc.offenders
+                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let offenders: Vec<Value> =
+                acc.offenders.into_iter().take(10).map(|(_, v)| v).collect();
             let severity = if acc.worst_severity.is_empty() {
                 "WARNING"
             } else if acc.worst_severity == "CRITICAL" {
@@ -1747,33 +1828,63 @@ fn static_analysis_hotspot(
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     use std::collections::BTreeMap;
+    // Dampening: group by (rule_id, file) with in-file blame capped at 1.0 and
+    // severity weighting, so a single rule firing across a file counts once.
+    #[derive(Default)]
+    struct Group {
+        blame: f64,
+        worst_severity: String,
+        analyzer: String,
+        category: Option<String>,
+    }
+    let mut groups: BTreeMap<(String, String, String), Group> = BTreeMap::new();
+    for (student_id, severity, weight, analyzer, rule_id, category, file_path) in rows {
+        let g = groups.entry((student_id, rule_id, file_path)).or_default();
+        g.blame += weight;
+        if severity_rank(&severity) > severity_rank(&g.worst_severity) {
+            g.worst_severity = severity;
+        }
+        g.analyzer = analyzer;
+        g.category = category;
+    }
+
     #[derive(Default)]
     struct Acc {
         weighted: f64,
         worst_severity: String,
-        offenders: Vec<Value>,
+        offenders: Vec<(f64, Value)>,
     }
     let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
-    for (student_id, severity, weight, analyzer, rule_id, category, file_path) in rows {
-        let acc = by_student.entry(student_id).or_default();
-        acc.weighted += weight;
-        if severity_rank(&severity) > severity_rank(&acc.worst_severity) {
-            acc.worst_severity = severity.clone();
+    for ((student_id, rule_id, file_path), g) in groups {
+        let contribution =
+            g.blame.min(1.0) * grade_core::quality_severity_weight(&g.worst_severity);
+        if contribution <= 0.0 {
+            continue;
         }
-        acc.offenders.push(json!({
-            "analyzer": analyzer,
-            "rule_id": rule_id,
-            "category": category,
-            "file_path": file_path,
-            "severity": severity,
-            "weight": weight,
-        }));
+        let acc = by_student.entry(student_id).or_default();
+        acc.weighted += contribution;
+        if severity_rank(&g.worst_severity) > severity_rank(&acc.worst_severity) {
+            acc.worst_severity = g.worst_severity.clone();
+        }
+        acc.offenders.push((
+            contribution,
+            json!({
+                "analyzer": g.analyzer,
+                "rule_id": rule_id,
+                "category": g.category,
+                "file_path": file_path,
+                "severity": g.worst_severity,
+                "weight": round3(contribution),
+            }),
+        ));
     }
     let mut flags = Vec::new();
-    for (student_id, acc) in by_student {
+    for (student_id, mut acc) in by_student {
         if acc.weighted >= min_weighted {
-            let mut offenders = acc.offenders;
-            offenders.truncate(10);
+            acc.offenders
+                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let offenders: Vec<Value> =
+                acc.offenders.into_iter().take(10).map(|(_, v)| v).collect();
             let severity = if acc.worst_severity.is_empty() {
                 "WARNING"
             } else if acc.worst_severity == "CRITICAL" {
@@ -1846,13 +1957,17 @@ fn complexity_hotspot(
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     use std::collections::BTreeMap;
+    // Dampening: group findings by (file, method) so repeated findings on the
+    // same method count once (blame capped at 1.0), severity-weighted
+    // (CRITICAL ≫ WARNING) instead of by raw severity_rank.
     #[derive(Default)]
-    struct Acc {
-        score: f64,
+    struct Group {
+        blame: f64,
         worst_severity: String,
-        offenders: Vec<(f64, Value)>,
+        best_measured: f64,
+        sample: Option<Value>,
     }
-    let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String, String), Group> = BTreeMap::new();
     for (
         student_id,
         severity,
@@ -1868,20 +1983,19 @@ fn complexity_hotspot(
         repo_full_name,
     ) in rows
     {
-        let rank = severity_rank(&severity) as f64;
-        let contribution = weight * rank;
-        let acc = by_student.entry(student_id).or_default();
-        acc.score += contribution;
-        if severity_rank(&severity) > severity_rank(&acc.worst_severity) {
-            acc.worst_severity = severity.clone();
+        let g = groups
+            .entry((student_id, file_path.clone(), method_name.clone()))
+            .or_default();
+        g.blame += weight;
+        if severity_rank(&severity) > severity_rank(&g.worst_severity) {
+            g.worst_severity = severity.clone();
         }
-        acc.offenders.push((
-            contribution,
-            json!({
+        let mv = measured_value.unwrap_or(0.0);
+        if g.sample.is_none() || mv > g.best_measured {
+            g.best_measured = mv;
+            g.sample = Some(json!({
                 "rule_key": rule_key,
                 "severity": severity,
-                "weight": round3(weight),
-                "score_contribution": round3(contribution),
                 "repo_full_name": repo_full_name,
                 "file_path": file_path,
                 "class_name": class_name,
@@ -1890,8 +2004,33 @@ fn complexity_hotspot(
                 "end_line": end_line,
                 "measured_value": measured_value,
                 "threshold": threshold,
-            }),
-        ));
+            }));
+        }
+    }
+
+    #[derive(Default)]
+    struct Acc {
+        score: f64,
+        worst_severity: String,
+        offenders: Vec<(f64, Value)>,
+    }
+    let mut by_student: BTreeMap<String, Acc> = BTreeMap::new();
+    for ((student_id, _file, _method), g) in groups {
+        let contribution =
+            g.blame.min(1.0) * grade_core::quality_severity_weight(&g.worst_severity);
+        if contribution <= 0.0 {
+            continue;
+        }
+        let acc = by_student.entry(student_id).or_default();
+        acc.score += contribution;
+        if severity_rank(&g.worst_severity) > severity_rank(&acc.worst_severity) {
+            acc.worst_severity = g.worst_severity.clone();
+        }
+        let mut sample = g.sample.unwrap_or_else(|| json!({}));
+        if let Some(obj) = sample.as_object_mut() {
+            obj.insert("score_contribution".into(), json!(round3(contribution)));
+        }
+        acc.offenders.push((contribution, sample));
     }
 
     let mut flags = Vec::new();
@@ -2218,6 +2357,7 @@ pub fn detect_flags_for_sprint_id(
         "LOW_COMPOSITE_SCORE",
         low_composite_score(conn, sprint_id, dt)
     );
+    total += run!("LOW_REVIEWS", low_reviews(conn, sprint_id, dt));
     total += run!("GHOST_CONTRIBUTOR", ghost_contributor(conn, sprint_id));
     total += run!("HIDDEN_CONTRIBUTOR", hidden_contributor(conn, sprint_id));
     total += run!("PR_DOES_NOT_COMPILE", pr_does_not_compile(conn, sprint_id));

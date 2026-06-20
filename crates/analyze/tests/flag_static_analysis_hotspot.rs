@@ -55,14 +55,15 @@ fn fires_when_weighted_sum_at_or_above_threshold() {
         &conn,
         "A.java",
         "UnusedPrivateField",
-        "WARNING",
+        "CRITICAL",
         "pmd",
         "bug",
     );
-    let f2 = insert_finding(&conn, "B.java", "EmptyCatchBlock", "WARNING", "pmd", "bug");
+    let f2 = insert_finding(&conn, "B.java", "EmptyCatchBlock", "CRITICAL", "pmd", "bug");
     insert_attribution(&conn, f1, "alice", 1.0);
     insert_attribution(&conn, f2, "alice", 1.0);
-    // sum = 2.0; with a 2.0 threshold the flag fires.
+    // Two CRITICAL (rule, file) groups, blame capped at 1.0 → 1.0 + 1.0 = 2.0;
+    // with a 2.0 threshold the flag fires.
     detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &config_with_threshold(2.0))
         .unwrap();
 
@@ -123,7 +124,8 @@ fn threshold_zero_emits_magnitude_for_small_warning_blame() {
         "alice",
     )
     .unwrap();
-    assert_eq!(details["weighted"].as_f64(), Some(0.5));
+    // One WARNING group: min(1, 0.5) × severity 0.25 = 0.125.
+    assert_eq!(details["weighted"].as_f64(), Some(0.125));
 }
 
 #[test]
@@ -156,7 +158,7 @@ fn worst_severity_propagates_to_flag() {
     insert_attribution(&conn, f1, "alice", 1.5);
     insert_attribution(&conn, f2, "alice", 0.6);
 
-    detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &config_with_threshold(2.0))
+    detect_artifact_flags_for_project_id(&conn, common::PROJECT_ID, &config_with_threshold(0.0))
         .unwrap();
     let sev = common::artifact_flag_severity_for(
         &conn,
@@ -174,10 +176,10 @@ fn each_student_evaluated_independently() {
     common::seed_default_project(&conn);
     common::seed_student(&conn, "alice");
     common::seed_student(&conn, "bob");
-    let f1 = insert_finding(&conn, "A.java", "R1", "WARNING", "pmd", "bug");
-    let f2 = insert_finding(&conn, "B.java", "R2", "WARNING", "pmd", "bug");
-    let f3 = insert_finding(&conn, "C.java", "R3", "WARNING", "pmd", "bug");
-    // Alice owns 2.5 across three findings → fires under threshold 2.0.
+    let f1 = insert_finding(&conn, "A.java", "R1", "CRITICAL", "pmd", "bug");
+    let f2 = insert_finding(&conn, "B.java", "R2", "CRITICAL", "pmd", "bug");
+    let f3 = insert_finding(&conn, "C.java", "R3", "CRITICAL", "pmd", "bug");
+    // Alice owns 1.0 + 1.0 + 0.5 = 2.5 across three findings → fires under threshold 2.0.
     insert_attribution(&conn, f1, "alice", 1.0);
     insert_attribution(&conn, f2, "alice", 1.0);
     insert_attribution(&conn, f3, "alice", 0.5);
