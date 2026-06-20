@@ -1,0 +1,16 @@
+[package]
+name = "grade_md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+grade_core = { path = "../grade_core" }
+
+[dev-dependencies]
+tempfile.workspace = true

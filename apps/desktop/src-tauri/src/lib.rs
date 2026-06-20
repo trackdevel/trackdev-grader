@@ -123,8 +123,9 @@ fn read_last_session(app: tauri::AppHandle) -> Result<Option<String>, String> {
 
 /// Write a student-facing final-grade workbook for one project. The grades are
 /// computed in the webview (WASM, live spec) and handed here verbatim, so the
-/// file matches exactly what the professor sees on screen. Shares the writer
-/// with the CLI's `grade-xlsx`, so both surfaces produce identical layouts.
+/// file matches exactly what the professor sees on screen. This `.xlsx` is the
+/// desktop-only download surface; the CLI's student-facing report is Markdown
+/// (`grade-md`).
 #[tauri::command]
 fn export_grade_xlsx(payload: GradeExportPayload) -> Result<(), String> {
     grade_xlsx::write_grade_workbook(

@@ -1656,6 +1656,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "grade_md"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "grade_core",
+ "tempfile",
+]
+
+[[package]]
 name = "grade_xlsx"
 version = "0.1.0"
 dependencies = [
@@ -4460,7 +4469,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "grade_core",
- "grade_xlsx",
+ "grade_md",
  "libc",
  "rayon",
  "rusqlite",

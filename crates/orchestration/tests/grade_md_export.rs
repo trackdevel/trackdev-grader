@@ -1,12 +1,14 @@
-//! `export_grade_workbooks` writes one `notes_<project>.xlsx` per gradable
-//! project and skips empty-shell projects.
+//! `export_grade_markdown` writes one student-facing `GRADES.md` per gradable
+//! project and skips empty-shell projects. The flat `--out` form is exercised
+//! here (the default per-project form writes beside each REPORT.md, which needs
+//! on-disk repo clones).
 
 use std::fs;
 use std::path::PathBuf;
 
 use grade_core::GradeSpec;
 use sprint_grader_core::Database;
-use sprint_grader_orchestration::export_grade_workbooks;
+use sprint_grader_orchestration::export_grade_markdown;
 use tempfile::tempdir;
 
 const TODAY: &str = "2026-06-19";
@@ -65,20 +67,26 @@ fn seed_db(db: &Database) {
 }
 
 #[test]
-fn writes_one_file_per_gradable_project_and_skips_empty_shell() {
+fn writes_one_markdown_per_gradable_project_and_skips_empty_shell() {
     let db_dir = tempdir().unwrap();
     let db = Database::open(&db_dir.path().join("g.db")).expect("open db");
     db.create_tables().expect("schema");
     seed_db(&db);
 
+    let entregues = tempdir().unwrap();
     let out = tempdir().unwrap();
     let spec = load_spec();
-    let written = export_grade_workbooks(&db, TODAY, &spec, None, out.path()).expect("export");
+    let written =
+        export_grade_markdown(&db, TODAY, &spec, None, entregues.path(), Some(out.path()))
+            .expect("export");
 
     assert_eq!(written.len(), 1, "only the gradable project yields a file");
-    let path = out.path().join("notes_team-01.xlsx");
+    let path = out.path().join("notes_team-01.md");
     assert!(path.is_file(), "expected {}", path.display());
-    assert!(fs::metadata(&path).unwrap().len() > 0);
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(body.contains("# Notes — Team 01"));
+    assert!(body.contains("## Equip"));
+    assert!(body.contains("Alice Liddell"));
     // The empty-shell project produced nothing.
-    assert!(!out.path().join("notes_team-02.xlsx").exists());
+    assert!(!out.path().join("notes_team-02.md").exists());
 }
