@@ -297,6 +297,14 @@
       },
       {
         "expr": {
+          "name": "student_net",
+          "op": "var"
+        },
+        "infix": "student_net",
+        "name": "student_curved"
+      },
+      {
+        "expr": {
           "hi": {
             "op": "num",
             "value": 10
@@ -310,7 +318,7 @@
             "op": "add",
             "terms": [
               {
-                "name": "student_net",
+                "name": "student_curved",
                 "op": "var"
               },
               {
@@ -323,7 +331,7 @@
                       "op": "var"
                     },
                     {
-                      "name": "student_net",
+                      "name": "student_curved",
                       "op": "var"
                     },
                     {
@@ -340,7 +348,7 @@
                             "op": "var"
                           },
                           "rhs": {
-                            "name": "student_net",
+                            "name": "student_curved",
                             "op": "var"
                           }
                         }
@@ -356,7 +364,7 @@
             ]
           }
         },
-        "infix": "clamp(student_net + student_lift_k * student_net * max(0, student_lift_pivot - student_net) / student_lift_pivot, 0, 10)",
+        "infix": "clamp(student_curved + student_lift_k * student_curved * max(0, student_lift_pivot - student_curved) / student_lift_pivot, 0, 10)",
         "name": "student_final"
       }
     ],
@@ -508,18 +516,19 @@
     "Sonnet-4.6": 0.9
   },
   "notes": [
-    "Grading v4: project_final = min(10, work_base × quality_multiplier × ai_factor − team_quality_penalty), clamped to a 10 ceiling. work_base = present-renorm blend of size (w_size) and complexity (w_complexity), scaled by work_scale. quality_multiplier = quality_floor + quality_blend × quality_eff/10. ai_factor = sum_eff/sum_raw scales the whole project grade down by team AI usage.",
+    "Grading v5: project_final = min(10, 10·(project_raw/10)^project_grade_gamma), clamped to a 10 ceiling. project_raw = max(work_base × quality_multiplier × ai_factor − team_quality_penalty, 0). work_base = (present-renorm blend of size and complexity, scaled by work_scale) + extra_tech. project_grade_gamma=2.4921 anchors pds26-3b Sergi Fosas at 5.0. Student curve is transparent in v5: student_curved = student_net (the anchor/gamma tent was removed).",
+    "extra_tech is computed in grade_core from baseline-subtracted inventory depth detectors (FCM, MinIO, OkHttp APIs, …) and merged into work_base before project formulas run; work_base_present is true when either structural axes or extra_tech contribute.",
     "quality_eff = absolute-mapped maintainability (code_quality_raw on mi_floor→0 .. mi_ceiling→10, NO cohort-percentile stretch) plus mutation when present, MINUS a subtractive layer-architecture penalty min(arch_cap, arch_k × (arch_crit×2 + arch_warn×0.5)). arch_* counts are layer_dependency only; specific per-file violations are charged to students, not the project.",
-    "Size / complexity / quality axis scores are computed in grade_core::grade_cohort; work_base, quality_eff, and quality_multiplier are injected before project formulas run.",
+    "Size / complexity / quality axis scores are computed in grade_core::grade_cohort; structural work_base, quality_eff, and quality_multiplier are injected before project formulas run, then extra_tech is merged into work_base (structural×work_scale + extra_tech).",
     "ai_factor (= team sum_eff/sum_raw) multiplies project_final, so team AI usage lowers the whole project grade; combined with student_contribution=student_eff/sum_eff, each student's base resolves to quality × team_size × student_eff/sum_raw.",
-    "student_base = project_final × student_contribution × team_size (enrolled roster). student_final subtracts behavioural CRITICAL flags (student_penalty) AND codequality_penalty, clamped to [0,10].",
+    "student_base = project_final × student_contribution × team_size (enrolled roster). student_net = student_base − student_penalty − codequality_penalty. v5 transparent curve: student_curved = student_net (no anchor/gamma); student_final applies student_lift_* and clamps [0,10]. An equal contributor on project P scores P for P≥student_lift_pivot; below-equal shares and penalties scale down. Pareto-up vs the old anchor curve.",
     "codequality_penalty: cohort-wide percentile bands per signal (architecture / cyclomatic-complexity / static-analysis), ranked by weighted blame ÷ max(student_eff, cq_min_points). Top cq_crit_pct → cq_crit_pts, next band up to cq_warn_pct → cq_warn_pts, gated by cq_abs_floor, summed across signals and capped at cq_cap. Computed in grade_core::grade_cohort and injected as a per-student variable.",
     "Formulas are grade_core::Expr AST; infix is human review only.",
     "Div semantics: 0/0 → 0. Rounding on meta.final_outputs only.",
     "Anchors auto-calibrated (14 projects), then work_scale MANUALLY overridden 1.2728→1.4925 so pds26-1b's pre-AI project grade reaches 10 (linear lift of all projects; project_final clamped at 10). arch_k=0.8392. MI/arch/inventory floor & ceiling from cohort min/max. NOTE: do not re-run calibrate-anchors or it resets work_scale to the cohort-top work_base target."
   ],
-  "title": "Grading v4 — work-scaled project grade, author-charged code-quality penalties",
-  "version": "4.0.0",
+  "title": "Grading v5 — transparent student curve, work-scaled project grade, author-charged code-quality penalties",
+  "version": "5.0.0",
   "weights": {
     "ai_strength": 1.0,
     "arch_cap": 3.0,
@@ -538,7 +547,7 @@
     "qpen_cx_scale": 0.02,
     "qpen_sa_scale": 0.1,
     "qpen_sig_cap": 1.0,
-    "project_grade_gamma": 1.0,
+    "project_grade_gamma": 2.4921,
     "student_lift_k": 0.64,
     "student_lift_pivot": 7.0,
     "qpen_team_cap": 1.5,

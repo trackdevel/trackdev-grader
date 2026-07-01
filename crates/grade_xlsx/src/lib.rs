@@ -418,6 +418,7 @@ mod tests {
             team_quality_penalty: 0.0,
             team_size: students.len() as i64,
             axes: vec![],
+            work_base_structural: 0.0,
             extra_tech: 0.0,
             extra_tech_components: vec![],
             students,

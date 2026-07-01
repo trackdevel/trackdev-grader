@@ -193,9 +193,12 @@ pub struct ProjectGrades {
     pub team_quality_penalty: f64,
     pub team_size: i64,
     pub axes: Vec<AxisGrade>,
+    /// Size/complexity `work_base` before `extra_tech` is merged in (diagnostics).
+    #[serde(default)]
+    pub work_base_structural: f64,
     /// EXTRA_TECH aggregate: weighted "extra technologies vs. baseline" units.
-    /// Injected into the project formula scope as `extra_tech` at default weight 0
-    /// (grade-inert until a formula references it).
+    /// Folded into `work_base` before project formulas run (`work_base_structural
+    /// × work_scale` is already applied in the axis score).
     #[serde(default)]
     pub extra_tech: f64,
     /// Per-signal breakdown of `extra_tech` (only signals with raw > 0).

@@ -235,10 +235,10 @@ fn grade_project_with_scopes(
     let axis_scores = cohort.map(|c| &c.axes);
     let mut project_scope = build_project_scope(raw, scopes, &weights, &manual, axis_scores);
     project_scope.insert("team_quality_penalty".into(), team_quality_penalty);
-    // EXTRA_TECH: inject the aggregate before project formulas run so a formula
-    // can reference `extra_tech`. Default weight 0 → grade-inert until wired.
     let (extra_tech, extra_tech_components) = crate::axes::compute_extra_tech(raw, spec);
     project_scope.insert("extra_tech".into(), extra_tech);
+    let work_base_structural =
+        apply_extra_tech_to_work_base(&mut project_scope, axis_scores, extra_tech);
     let mut project_tree = Vec::new();
     for fd in &spec.formulas.project {
         let node = eval(&fd.expr, &project_scope, &fd.name, &fd.infix)?;
@@ -361,6 +361,7 @@ fn grade_project_with_scopes(
         ),
         team_size: raw.team_size,
         axes,
+        work_base_structural,
         extra_tech,
         extra_tech_components,
         students: student_grades,
@@ -452,11 +453,44 @@ fn build_project_scope(
     scope
 }
 
+/// `work_base = work_base_structural + extra_tech` (extra_tech is not scaled by
+/// `work_scale`). `work_base_present` is true when either side contributes.
+fn apply_extra_tech_to_work_base(
+    project_scope: &mut Scope,
+    axis_scores: Option<&ProjectAxisScores>,
+    extra_tech: f64,
+) -> f64 {
+    let structural = axis_scores
+        .map(|a| a.work_base)
+        .unwrap_or_else(|| project_scope.get("work_base").copied().unwrap_or(0.0));
+    let structural_present = axis_scores
+        .map(|a| a.work_base_present)
+        .unwrap_or_else(|| {
+            project_scope
+                .get("work_base_present")
+                .map(|v| *v > 0.0)
+                .unwrap_or(false)
+        });
+    let merged = structural + extra_tech;
+    let present = structural_present || extra_tech > 0.0;
+    project_scope.insert("work_base".into(), merged);
+    project_scope.insert("work_base_present".into(), bool01(present));
+    structural
+}
+
 fn build_axis_grades(
     axis_scores: Option<&ProjectAxisScores>,
     project_scope: &Scope,
 ) -> Vec<AxisGrade> {
     if let Some(ax) = axis_scores {
+        let work_base = project_scope
+            .get("work_base")
+            .copied()
+            .unwrap_or(ax.work_base);
+        let work_base_present = project_scope
+            .get("work_base_present")
+            .map(|v| *v > 0.0)
+            .unwrap_or(ax.work_base_present);
         return vec![
             AxisGrade {
                 key: "size".into(),
@@ -479,14 +513,14 @@ fn build_axis_grades(
             AxisGrade {
                 key: "work_base".into(),
                 raw: None,
-                score: Some(ax.work_base),
-                present: ax.work_base_present,
+                score: Some(work_base),
+                present: work_base_present,
             },
             AxisGrade {
                 key: "quality_multiplier".into(),
                 raw: None,
                 score: Some(ax.quality_multiplier),
-                present: ax.work_base_present,
+                present: work_base_present,
             },
         ];
     }
@@ -644,6 +678,78 @@ mod tests {
             (actual - expected).abs() <= tol,
             "project {pid} {field}: got {actual}, expected {expected}, tol {tol}"
         );
+    }
+
+    #[test]
+    fn work_base_axis_includes_extra_tech_on_structural_base() {
+        let spec = load_spec();
+        let metrics = BTreeMap::from([
+            ("production_loc".into(), 5000.0),
+            ("production_statement_count".into(), 2000.0),
+            ("endpoint_count".into(), 10.0),
+            ("controller_count".into(), 5.0),
+            ("service_count".into(), 8.0),
+            ("specification_def_count".into(), 4.0),
+        ]);
+        let raw = RawProject {
+            project_id: 99,
+            name: "extra-tech".into(),
+            team_size: 1,
+            axis: AxisInputs {
+                documentation_raw: 0.0,
+                doc_present: false,
+                code_quality_raw: 90.0,
+                cc_pct: 0.0,
+                mutation_score: 0.0,
+                cq_present: true,
+                survival_raw: 0.0,
+                surv_present: false,
+                arch_crit_count: 0.0,
+                arch_warn_count: 0.0,
+                arch_present: false,
+            },
+            inventory: vec![
+                RepoMetrics {
+                    repo_full_name: "spring-team99".into(),
+                    metrics: metrics.clone(),
+                },
+                RepoMetrics {
+                    repo_full_name: "android-team99".into(),
+                    metrics,
+                },
+            ],
+            tasks: vec![crate::types::RawTask {
+                assignee_id: "s1".into(),
+                raw_points: 10.0,
+                ai_model: None,
+                ai_level: None,
+                declared: true,
+                ai_exempt: false,
+            }],
+            students: vec![RawStudent {
+                student_id: "s1".into(),
+                full_name: "S".into(),
+            }],
+            crit_findings: vec![],
+            student_flags: vec![],
+        };
+        let cohort = grade_cohort(&[raw], &spec).expect("grade_cohort");
+        let g = &cohort.projects[0].output.grades;
+        assert!(g.extra_tech > 0.0, "expected extra_tech > 0");
+        let wb = g
+            .axes
+            .iter()
+            .find(|a| a.key == "work_base")
+            .expect("work_base axis");
+        assert!(wb.present);
+        let merged = wb.score.unwrap();
+        assert!(
+            (merged - (g.work_base_structural + g.extra_tech)).abs() < 1e-9,
+            "merged={merged} structural={} extra={}",
+            g.work_base_structural,
+            g.extra_tech
+        );
+        assert!(merged > g.work_base_structural);
     }
 
     #[test]

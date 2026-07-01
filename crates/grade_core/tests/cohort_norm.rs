@@ -153,16 +153,16 @@ fn equal_contributors_receive_project_final() {
     let out = grade_cohort(&[raw], &spec).expect("grade");
     let pf = out.projects[0].output.grades.project_final;
     // The ×team_size normalizer makes each equal contributor's net grade equal
-    // the project grade; the smooth student leniency curve (`student_lift_*`)
-    // then transforms it identically for all three. So the expected final is the
-    // curve applied to `pf`: pf + k·pf·max(0, pivot − pf)/pivot, clamped.
+    // the project grade; Grading v5's transparent curve sets student_curved =
+    // student_net, then student_lift_* transforms it identically for all three.
     let k = spec.weights.get("student_lift_k").copied().unwrap_or(0.0);
     let pivot = spec
         .weights
         .get("student_lift_pivot")
         .copied()
         .unwrap_or(7.0);
-    let expected = (pf + k * pf * (pivot - pf).max(0.0) / pivot).clamp(0.0, 10.0);
+    let curved = pf;
+    let expected = (curved + k * curved * (pivot - curved).max(0.0) / pivot).clamp(0.0, 10.0);
     let students = &out.projects[0].output.grades.students;
     for stu in students {
         // Symmetry: every equal contributor receives the same final.
