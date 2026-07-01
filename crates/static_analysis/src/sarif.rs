@@ -22,7 +22,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use camino::Utf8Path;
 use serde::Deserialize;
-use sprint_grader_core::paths::repo_relative;
+use sprint_grader_core::paths::{repo_relative, resolve_existing_java_file};
 use tracing::warn;
 
 use crate::adapter::{Category, Finding, Severity};
@@ -299,18 +299,16 @@ fn canonicalise_path(raw: &str, repo_root: Option<&Utf8Path>) -> Option<String> 
     let Some(root) = repo_root else {
         return Some(raw.to_string());
     };
-    // Already repo-relative? Treat as authoritative — Checkstyle in
-    // particular emits paths relative to whatever CWD it was launched
-    // from, and when our launcher uses `repo_root` as cwd those are
-    // already correct. Run them through repo_relative anyway so any
-    // residual `..` segments collapse and the output is POSIX-slashed.
-    let path = Utf8Path::new(raw);
-    let candidate = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
-    };
-    repo_relative(root, &candidate).ok()
+    let stripped = strip_file_scheme(raw);
+    let path = Utf8Path::new(&stripped);
+    if path.is_absolute() {
+        return repo_relative(root, path).ok();
+    }
+    if let Some(resolved) = resolve_existing_java_file(root, &stripped) {
+        return Some(resolved);
+    }
+    // Lexical fallback for unit tests and not-yet-materialised paths.
+    repo_relative(root, &root.join(path)).ok()
 }
 
 /// Strip the `file:` URI scheme from a SARIF artifact URI. SpotBugs and
@@ -748,5 +746,36 @@ mod tests {
         let findings = parse_str(body, Some(tmp.path())).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].file_path, "src/main/java/Foo.java");
+    }
+
+    #[test]
+    fn parse_resolves_source_root_relative_android_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let java = tmp.path().join("app/src/main/java/org/example/ChatDao_Impl.java");
+        std::fs::create_dir_all(java.parent().unwrap()).unwrap();
+        std::fs::write(&java, "class ChatDao_Impl {}\n").unwrap();
+        let body = r#"{
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {"driver": {"name": "Checkstyle", "rules": []}},
+                "results": [{
+                    "ruleId": "TypeName",
+                    "level": "error",
+                    "message": {"text": "..."},
+                    "locations": [{
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": "org/example/ChatDao_Impl.java"},
+                            "region": {"startLine": 1}
+                        }
+                    }]
+                }]
+            }]
+        }"#;
+        let findings = parse_str(body, Some(tmp.path())).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].file_path,
+            "app/src/main/java/org/example/ChatDao_Impl.java"
+        );
     }
 }

@@ -24,7 +24,7 @@ function seedDb(): Database.Database {
     CREATE TABLE sprints (id INTEGER PRIMARY KEY, name TEXT, project_id INTEGER, start_date TEXT);
     CREATE TABLE tasks (
       id INTEGER PRIMARY KEY, task_key TEXT, name TEXT, type TEXT, status TEXT,
-      estimation_points INTEGER, assignee_id TEXT, sprint_id INTEGER
+      estimation_points INTEGER, assignee_id TEXT, sprint_id INTEGER, parent_task_id INTEGER
     );
     CREATE TABLE task_ai_usage (
       task_id INTEGER PRIMARY KEY, model_value TEXT, level_value TEXT, declared INTEGER
@@ -92,6 +92,26 @@ describe("loadProjectDiagnostics display tasks", () => {
     try {
       const diag = await loadProjectDiagnostics(makeExecutor(db), 1, []);
       expect(diag.tasks).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("inherits parent USER_STORY AI when the task has no own declaration", async () => {
+    const db = seedDb();
+    try {
+      db.exec(`
+        INSERT INTO tasks VALUES (10, 'US-1', 'story', 'USER_STORY', 'DONE', NULL, 'alice', 20, NULL);
+        INSERT INTO tasks VALUES (11, 'T-11', 'inherits', 'TASK', 'DONE', 4, 'alice', 20, 10);
+        INSERT INTO task_ai_usage VALUES (10, 'GPT-5.5', 'E', 1);
+      `);
+      const diag = await loadProjectDiagnostics(makeExecutor(db), 1, [20]);
+      const inherits = diag.tasks.find((t) => t.task_key === "T-11");
+      expect(inherits).toMatchObject({
+        ai_model: "GPT-5.5",
+        ai_level: "E",
+        declared: true,
+      });
     } finally {
       db.close();
     }

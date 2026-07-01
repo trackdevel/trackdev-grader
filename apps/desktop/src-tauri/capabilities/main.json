@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
-  "description": "Dialog open/save, read/write spec files, read-only SQL for grading.db.",
+  "description": "Dialog open/save, read/write spec files, read-only SQL for grading.db, and window destroy so the persist-then-close handler can close the window.",
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-destroy",
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-confirm",

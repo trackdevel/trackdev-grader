@@ -1,3 +1,4 @@
+import { resolveEffectiveAiUsage } from "./taskAi";
 import type { SqlExecutor } from "./types";
 
 function placeholders(n: number): string {
@@ -21,9 +22,8 @@ export type AiDetectRow = {
 
 /**
  * A graded task enriched for the student-detail table: TrackDev identity
- * (`task_id`/`task_key` for the task-info link) plus sprint context. This is a
- * display-only mirror of the grade-input `RawTask` (which stays minimal so the
- * Rust-generated `reference.raw_projects.json` fixture is not perturbed).
+ * (`task_id`/`task_key` for the task-info link) plus sprint context. AI fields
+ * mirror the grade-input `RawTask` resolution (own attribute → parent USER_STORY).
  */
 export type DisplayTask = {
   task_id: number;
@@ -81,6 +81,7 @@ async function loadDisplayTasks(
   // Ordered by sprint then id so the per-student table reads chronologically.
   // AI declaration was adopted mid-course, so early-sprint tasks legitimately
   // have empty model/level cells — the sprint column makes that self-evident.
+  // `ptai` is the parent USER_STORY's AI usage — mirror of projection.ts / raw.rs.
   const rows = await db.select<{
     task_id: number;
     task_key: string | null;
@@ -90,14 +91,21 @@ async function loadDisplayTasks(
     model_value: string | null;
     level_value: string | null;
     declared: number | null;
+    parent_model_value: string | null;
+    parent_level_value: string | null;
+    parent_declared: number | null;
   }>(
     `SELECT t.id AS task_id, t.task_key AS task_key, sp.name AS sprint,
             t.assignee_id, t.estimation_points,
-            tai.model_value, tai.level_value, tai.declared
+            tai.model_value, tai.level_value, tai.declared,
+            ptai.model_value AS parent_model_value,
+            ptai.level_value AS parent_level_value,
+            ptai.declared    AS parent_declared
      FROM tasks t
      JOIN students s ON s.id = t.assignee_id
      LEFT JOIN sprints sp ON sp.id = t.sprint_id
      LEFT JOIN task_ai_usage tai ON tai.task_id = t.id
+     LEFT JOIN task_ai_usage ptai ON ptai.task_id = t.parent_task_id
      WHERE s.team_project_id = ?
        AND t.sprint_id IN (${ph})
        AND t.status = 'DONE'
@@ -107,16 +115,24 @@ async function loadDisplayTasks(
      ORDER BY t.sprint_id ASC, t.id ASC`,
     [projectId, ...sprintIds],
   );
-  return rows.map((r) => ({
-    task_id: r.task_id,
-    task_key: r.task_key,
-    sprint: r.sprint,
-    assignee_id: r.assignee_id,
-    raw_points: r.estimation_points,
-    ai_model: r.model_value,
-    ai_level: r.level_value,
-    declared: (r.declared ?? 0) === 1,
-  }));
+  return rows.map((r) => {
+    const ai = resolveEffectiveAiUsage(
+      { model_value: r.model_value, level_value: r.level_value, declared: r.declared },
+      {
+        model_value: r.parent_model_value,
+        level_value: r.parent_level_value,
+        declared: r.parent_declared,
+      },
+    );
+    return {
+      task_id: r.task_id,
+      task_key: r.task_key,
+      sprint: r.sprint,
+      assignee_id: r.assignee_id,
+      raw_points: r.estimation_points,
+      ...ai,
+    };
+  });
 }
 
 async function tableExists(db: SqlExecutor, name: string): Promise<boolean> {

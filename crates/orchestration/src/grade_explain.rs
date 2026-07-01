@@ -35,6 +35,13 @@ pub fn export_grade_markdown(
 ) -> Result<Vec<PathBuf>> {
     let projects = load_cohort_raw_projects(db, today, project_filter)?;
     let cohort = grade_cohort(projects.as_slice(), spec)?;
+    let ranks = grade_md::cohort_ranks_by_project_final(
+        &cohort
+            .projects
+            .iter()
+            .map(|p| (p.project_id, p.output.grades.project_final))
+            .collect::<Vec<_>>(),
+    );
     if let Some(dir) = out_dir {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
@@ -65,12 +72,25 @@ pub fn export_grade_markdown(
                 }
             },
         };
+        let (work_base, work_base_present) =
+            grade_md::ProjectGradeContext::work_base_from_grades(&pg.output.grades);
+        let (cohort_rank, cohort_size) = ranks
+            .get(&pg.project_id)
+            .copied()
+            .unwrap_or((1, cohort.projects.len().max(1)));
+        let context = grade_md::ProjectGradeContext {
+            work_base,
+            work_base_present,
+            cohort_rank,
+            cohort_size,
+        };
         grade_md::write_grades_markdown(
             &path,
             &raw.name,
             &names,
             &pg.output.grades,
             &raw.student_flags,
+            &context,
             spec.meta.decimals,
         )?;
         info!(project = %raw.name, path = %path.display(), "wrote GRADES.md");
@@ -136,16 +156,24 @@ pub fn explain_grades(
             .iter()
             .filter(|s| s.codequality_penalty > 0.0)
             .count();
-        let axes = compute_project_axes(raw, &pg.normalized, &cohort.bounds, spec);
+        let g = &pg.output.grades;
+        let (work_base, work_base_present) =
+            grade_md::ProjectGradeContext::work_base_from_grades(g);
         let _ = writeln!(out, "\n=== {} (id={}) ===", raw.name, raw.project_id);
         let _ = writeln!(
             out,
-            "project_final={:.2}  work_base={:.2} (present={})  ×  multiplier={:.3}  ai_factor={:.3}",
-            pg.output.grades.project_final,
-            axes.work_base,
-            axes.work_base_present,
-            axes.quality_multiplier,
-            pg.output.grades.ai_factor,
+            "project_final={:.2}  work_base={:.2} (present={})  [= structural {:.2} + extra_tech {:.2}]  ×  multiplier={:.3}  ai_factor={:.3}",
+            g.project_final,
+            work_base,
+            work_base_present,
+            g.work_base_structural,
+            g.extra_tech,
+            g.axes
+                .iter()
+                .find(|a| a.key == "quality_multiplier")
+                .and_then(|a| a.score)
+                .unwrap_or(0.0),
+            g.ai_factor,
         );
         let sc = structural_scopes(raw, spec);
         let _ = writeln!(
@@ -161,6 +189,7 @@ pub fn explain_grades(
             out,
             "  (project_final = 10·(project_raw/10)^gamma, project_raw = work_base×mult×ai − team_quality_penalty)",
         );
+        let axes = compute_project_axes(raw, &pg.normalized, &cohort.bounds, spec);
         let _ = writeln!(
             out,
             "  size={:.2} (present={})  complexity={:.2} (present={})  quality={:.2} (present={})  quality_eff={:.2}",

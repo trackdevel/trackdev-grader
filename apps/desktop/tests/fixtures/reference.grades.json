@@ -6,7 +6,7 @@
       "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 0.58,
-      "final_grade": 6.41,
+      "final_grade": 3.3,
       "review_gate": null,
       "team_size": 2,
       "axes": [
@@ -49,10 +49,10 @@
         "effective_points": 12.5,
         "ai_keep": 0.8333333333333334,
         "contribution": 0.8620689655172413,
-        "base_grade": 11.04,
+        "base_grade": 5.68,
         "student_penalty": 0.0,
         "codequality_penalty": 0.0,
-        "final_grade": 10.0,
+        "final_grade": 6.37,
         "review_gate": null
       },
       {
@@ -61,10 +61,10 @@
         "effective_points": 1.9999999999999996,
         "ai_keep": 0.19999999999999996,
         "contribution": 0.1379310344827586,
-        "base_grade": 1.77,
+        "base_grade": 0.91,
         "student_penalty": 0.75,
         "codequality_penalty": 0.0,
-        "final_grade": 1.57,
+        "final_grade": 0.26,
         "review_gate": null
       }
     ]
@@ -76,7 +76,7 @@
       "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 1.0,
-      "final_grade": 5.69,
+      "final_grade": 2.45,
       "review_gate": null,
       "team_size": 1,
       "axes": [
@@ -119,10 +119,10 @@
         "effective_points": 10.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "base_grade": 5.69,
+        "base_grade": 2.45,
         "student_penalty": 0.0,
         "codequality_penalty": 0.0,
-        "final_grade": 6.37,
+        "final_grade": 3.47,
         "review_gate": null
       }
     ]
@@ -134,7 +134,7 @@
       "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 1.0,
-      "final_grade": 2.99,
+      "final_grade": 0.49,
       "review_gate": null,
       "team_size": 2,
       "axes": [
@@ -177,10 +177,10 @@
         "effective_points": 8.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "base_grade": 5.97,
+        "base_grade": 0.98,
         "student_penalty": 0.0,
         "codequality_penalty": 0.0,
-        "final_grade": 6.53,
+        "final_grade": 1.52,
         "review_gate": null
       },
       {
@@ -204,7 +204,7 @@
       "quality_penalized": 0.0,
       "project_penalty": 0.0,
       "ai_factor": 1.0,
-      "final_grade": 7.69,
+      "final_grade": 5.2,
       "review_gate": null,
       "team_size": 1,
       "axes": [
@@ -247,10 +247,10 @@
         "effective_points": 10.0,
         "ai_keep": 1.0,
         "contribution": 1.0,
-        "base_grade": 7.69,
+        "base_grade": 5.2,
         "student_penalty": 0.0,
         "codequality_penalty": 0.8,
-        "final_grade": 6.96,
+        "final_grade": 5.45,
         "review_gate": null
       }
     ]

@@ -63,14 +63,15 @@ pub fn repo_kind(repo_full_name: &str) -> &'static str {
     }
 }
 
-/// EXTRA_TECH aggregate: a raw weighted count of "extra technologies vs.
-/// baseline" across the project's repos. Breadth (`extra_dependency_count`) is
-/// counted per-unit; each curated depth feature is saturated to `[0,1]` (via
-/// `extra_tech_cap`, except the already-bounded `fcm_android_room_store/2`) then
-/// weighted. All weights/caps come from `spec.weights` with defaults, so the
-/// value is deterministic (no cohort coupling) and the professor tunes it in the
-/// desktop. Returns `(extra_tech, components)`; components list only signals with
-/// `raw > 0`.
+/// EXTRA_TECH aggregate: a raw weighted count of *actual usage* of extra
+/// technologies vs. baseline across the project's repos. Each curated depth
+/// feature is saturated to `[0,1]` (via `extra_tech_cap`, except the
+/// already-bounded `fcm_android_room_store/2`) then weighted. Gradle-only
+/// dependency declarations (`extra_dependency_count`) are collected for
+/// observability but do not enter this score. All weights/caps come from
+/// `spec.weights` with defaults, so the value is deterministic (no cohort
+/// coupling) and the professor tunes it in the desktop. Returns
+/// `(extra_tech, components)`; components list only signals with `raw > 0`.
 pub fn compute_extra_tech(raw: &RawProject, spec: &GradeSpec) -> (f64, Vec<ExtraTechComponent>) {
     let sum = |key: &str| -> f64 {
         raw.inventory
@@ -82,21 +83,21 @@ pub fn compute_extra_tech(raw: &RawProject, spec: &GradeSpec) -> (f64, Vec<Extra
     let cap = w("extra_tech_cap", 3.0).max(1.0);
     let sat = |x: f64| x.min(cap) / cap;
 
-    let dep = sum("extra_dependency_count");
     let fcm_send = sum("fcm_send_call_count");
     let fcm_room = sum("fcm_android_room_store");
     let spec_defs = sum("specification_def_count");
     let email = sum("email_send_site_count");
     let gfx = sum("graphics_custom_draw_count");
     let av = sum("av_usage_count");
+    let okhttp_apis = sum("okhttp_external_api_count");
+    let minio_io = sum("minio_object_io_site_count");
 
     // (key, raw, weight, normalized contribution-per-weight)
-    let entries: [(&str, f64, f64, f64); 7] = [
-        ("extra_dependency_count", dep, w("w_extra_dep", 1.0), dep),
+    let entries: [(&str, f64, f64, f64); 8] = [
         (
             "fcm_send_call_count",
             fcm_send,
-            w("w_fcm_spring", 2.0),
+            w("w_fcm_spring", 3.0),
             sat(fcm_send),
         ),
         (
@@ -124,6 +125,18 @@ pub fn compute_extra_tech(raw: &RawProject, spec: &GradeSpec) -> (f64, Vec<Extra
             sat(gfx),
         ),
         ("av_usage_count", av, w("w_av", 2.0), sat(av)),
+        (
+            "okhttp_external_api_count",
+            okhttp_apis,
+            w("w_okhttp_external_api", 1.0),
+            okhttp_apis,
+        ),
+        (
+            "minio_object_io_site_count",
+            minio_io,
+            w("w_minio_object_io", 2.0),
+            sat(minio_io),
+        ),
     ];
 
     let mut total = 0.0;
@@ -581,9 +594,9 @@ mod tests {
     }
 
     #[test]
-    fn compute_extra_tech_weights_breadth_and_depth() {
+    fn compute_extra_tech_weights_depth_usage_only() {
         let mut raw = project_with_inventory();
-        // spring repo: 3 new deps + 5 Specification defs + 1 FCM send
+        // spring repo: 5 Specification defs + 1 FCM send (deps ignored)
         raw.inventory[0]
             .metrics
             .insert("extra_dependency_count".into(), 3.0);
@@ -602,17 +615,31 @@ mod tests {
             .insert("av_usage_count".into(), 6.0);
 
         let (total, comps) = compute_extra_tech(&raw, &empty_spec());
-        // defaults cap=3: dep 3*1=3; spec sat(5)=1 *3=3; fcm_send sat(1)=1/3 *2=0.667;
-        // room (2/2)=1 *3=3; av sat(6)=1 *2=2  →  total ≈ 11.667
-        assert!((total - 11.6667).abs() < 0.01, "total={total}");
-        assert_eq!(comps.len(), 5);
-        let dep = comps
+        // defaults cap=3: spec sat(5)=1 *3=3; fcm_send sat(1)=1/3 *3=1;
+        // room (2/2)=1 *3=3; av sat(6)=1 *2=2  →  total = 9
+        assert!((total - 9.0).abs() < 0.01, "total={total}");
+        assert_eq!(comps.len(), 4);
+        assert!(comps
             .iter()
-            .find(|c| c.key == "extra_dependency_count")
-            .unwrap();
-        assert_eq!(dep.contribution, 3.0);
+            .all(|c| c.key != "extra_dependency_count"));
         // Zero-valued signals (graphics, email) are omitted from the breakdown.
         assert!(comps.iter().all(|c| c.key != "graphics_custom_draw_count"));
+    }
+
+    #[test]
+    fn compute_extra_tech_includes_minio_object_io() {
+        let mut raw = project_with_inventory();
+        raw.inventory[0]
+            .metrics
+            .insert("minio_object_io_site_count".into(), 2.0);
+        let (total, comps) = compute_extra_tech(&raw, &empty_spec());
+        let minio = comps
+            .iter()
+            .find(|c| c.key == "minio_object_io_site_count")
+            .expect("minio component");
+        // sat(2) with cap=3 → 2/3; weight default 2 → contribution 4/3
+        assert!((minio.contribution - 4.0 / 3.0).abs() < 0.01);
+        assert!((total - minio.contribution).abs() < 0.01);
     }
 
     #[test]

@@ -155,8 +155,21 @@ pub fn run() {
             read_last_session,
             export_grade_xlsx,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app_handle, event| {
+            // tauri-plugin-sql keeps a SQLx pool and its async runtime alive
+            // for the app's lifetime. On Linux that background state can stop
+            // the process from terminating after the last window closes — the
+            // app "hangs" and only Ctrl+C ends it. Once exit is requested (all
+            // windows gone), force a clean process exit instead of waiting on
+            // pool/runtime teardown. Safe here: grading.db is opened read-only
+            // and closed after each load, and the last session is already
+            // persisted by the window's onCloseRequested handler.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                std::process::exit(0);
+            }
+        });
 }
 
 #[cfg(test)]

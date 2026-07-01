@@ -102,18 +102,26 @@ export default function App() {
 
     void (async () => {
       const win = getCurrentWindow();
-      unlisten = await win.onCloseRequested((event) => {
-        // A second click (or a re-fired event) must let the close through —
-        // never prevent it twice, or the window becomes unclosable.
+      unlisten = await win.onCloseRequested(async (event) => {
+        // Guard BEFORE preventDefault so the window can never get wedged: if
+        // this persist-then-close path ever fails, a second click on the X
+        // falls through un-prevented and the native close proceeds.
         if (closingRef.current) return;
         closingRef.current = true;
         event.preventDefault();
         const { appConfigPath: cfg, dbPath, specPath } = sessionSnapshotRef.current;
-        // Fire-and-forget: never block the UI thread or the close path on I/O.
-        void persistLastSession(buildLastSession(cfg, dbPath, specPath)).catch((e) => {
+        // Persist best-effort: a failed/slow write must never block the close.
+        try {
+          await persistLastSession(buildLastSession(cfg, dbPath, specPath));
+        } catch (e) {
           console.error("Failed to persist last session on close:", e);
-        });
-        void win.close();
+        }
+        // destroy() force-closes without re-emitting closeRequested (no
+        // re-entrancy). It requires `core:window:allow-destroy` in
+        // capabilities/main.json — without that grant the ACL denies the call
+        // and the window stays open. That missing permission was the root
+        // cause of the "app won't close, only Ctrl+C kills it" bug.
+        await win.destroy();
       });
     })();
 

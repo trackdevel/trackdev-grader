@@ -4609,6 +4609,7 @@ dependencies = [
  "anyhow",
  "camino",
  "chrono",
+ "once_cell",
  "rusqlite",
  "serde",
  "serde_json",
@@ -4619,6 +4620,8 @@ dependencies = [
  "thiserror 1.0.69",
  "toml 0.8.2",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-java",
 ]
 
 [[package]]

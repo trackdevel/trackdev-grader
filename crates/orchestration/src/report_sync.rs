@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use sprint_grader_collect::{run_collection, CollectOpts};
 use sprint_grader_core::{Config, Database};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::pipeline::{rerun_post_collection_for_sprint_ids, resolve_all_sprint_tuples};
 
@@ -127,20 +127,8 @@ pub fn sync_reports_through_sprint(
 
     let mut published_repos = Vec::new();
     if opts.push {
-        for (repo_root, report_paths) in repo_reports {
-            if !repo_has_report_changes(&repo_root, &report_paths)
-                .with_context(|| format!("git status failed for {}", repo_root.display()))?
-            {
-                continue;
-            }
-            publish_report_updates(&repo_root, &report_paths).with_context(|| {
-                format!(
-                    "failed to publish report updates for {}",
-                    repo_root.display()
-                )
-            })?;
-            published_repos.push(repo_root);
-        }
+        let batch = publish_all_repo_updates(&repo_reports)?;
+        published_repos = batch.pushed;
     }
 
     Ok(SyncReportsResult {
@@ -208,6 +196,65 @@ fn is_android_repo_name(repo_name: &str) -> bool {
     lower.starts_with("android") || lower.contains("-android")
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PublishBatchResult {
+    pub pushed: Vec<PathBuf>,
+    pub skipped_unchanged: Vec<PathBuf>,
+}
+
+/// Publish tracked report paths in each android clone. Logs per-repo progress
+/// and a final summary. Repos whose report files are unchanged since the last
+/// commit are skipped.
+pub fn publish_all_repo_updates(
+    repo_updates: &BTreeMap<PathBuf, Vec<PathBuf>>,
+) -> Result<PublishBatchResult> {
+    let total = repo_updates.len();
+    if total == 0 {
+        info!("publish: no android repo clones to update");
+        return Ok(PublishBatchResult::default());
+    }
+    info!(
+        repos = total,
+        "publish: checking git status (set RUST_LOG=info if you see no per-repo lines)"
+    );
+    let mut result = PublishBatchResult::default();
+    for (idx, (repo_root, paths)) in repo_updates.iter().enumerate() {
+        let name = repo_short_name(repo_root);
+        info!(
+            repo = %name,
+            step = idx + 1,
+            total,
+            path = %repo_root.display(),
+            "publish: checking for changes"
+        );
+        let has_changes = repo_has_report_changes(repo_root, paths).with_context(|| {
+            format!("git status failed for {}", repo_root.display())
+        })?;
+        if !has_changes {
+            info!(repo = %name, "publish: unchanged — skip");
+            result.skipped_unchanged.push(repo_root.clone());
+            continue;
+        }
+        let rels = relative_report_paths(repo_root, paths)?;
+        info!(
+            repo = %name,
+            files = ?rels,
+            "publish: git add / commit / fetch / rebase / push"
+        );
+        publish_report_updates(repo_root, paths).with_context(|| {
+            format!("failed to publish report updates for {}", repo_root.display())
+        })?;
+        info!(repo = %name, "publish: pushed to origin/main");
+        result.pushed.push(repo_root.clone());
+    }
+    info!(
+        pushed = result.pushed.len(),
+        skipped = result.skipped_unchanged.len(),
+        "publish complete"
+    );
+    Ok(result)
+}
+
 pub fn repo_has_report_changes(repo_root: &Path, report_paths: &[PathBuf]) -> Result<bool> {
     let rels = relative_report_paths(repo_root, report_paths)?;
     if rels.is_empty() {
@@ -240,11 +287,14 @@ pub fn repo_has_report_changes(repo_root: &Path, report_paths: &[PathBuf]) -> Re
 /// discarded; the clone is the grader's working area and REPORT.md is
 /// reproducible from the DB on every run.
 pub(crate) fn sync_repo_to_origin_main(repo_root: &Path) -> Result<()> {
-    run_cmd(repo_root, "git", &["fetch", "--quiet", "origin"])
+    let name = repo_short_name(repo_root);
+    info!(repo = %name, "sync: git fetch origin");
+    run_git(repo_root, &["fetch", "--quiet", "origin"], true)
         .with_context(|| format!("git fetch origin failed in {}", repo_root.display()))?;
-    run_cmd(repo_root, "git", &["switch", "main"])
+    info!(repo = %name, "sync: git switch main && reset --hard origin/main");
+    run_git(repo_root, &["switch", "main"], false)
         .with_context(|| format!("git switch main failed in {}", repo_root.display()))?;
-    run_cmd(repo_root, "git", &["reset", "--hard", "origin/main"]).with_context(|| {
+    run_git(repo_root, &["reset", "--hard", "origin/main"], false).with_context(|| {
         format!(
             "git reset --hard origin/main failed in {}",
             repo_root.display()
@@ -254,17 +304,17 @@ pub(crate) fn sync_repo_to_origin_main(repo_root: &Path) -> Result<()> {
 }
 
 pub fn publish_report_updates(repo_root: &Path, report_paths: &[PathBuf]) -> Result<()> {
-    ensure_command_available("git", repo_root)?;
+    ensure_command_available(repo_root)?;
     let rels = relative_report_paths(repo_root, report_paths)?;
     if rels.is_empty() {
         return Ok(());
     }
 
-    run_cmd(repo_root, "git", &["switch", "main"])?;
+    run_git(repo_root, &["switch", "main"], false)?;
 
     let mut add_args = vec!["add".to_string(), "--".to_string()];
     add_args.extend(rels.iter().cloned());
-    run_cmd_owned(repo_root, "git", &add_args)?;
+    run_git_owned(repo_root, &add_args, false)?;
 
     let mut commit_args = vec![
         "commit".to_string(),
@@ -273,18 +323,18 @@ pub fn publish_report_updates(repo_root: &Path, report_paths: &[PathBuf]) -> Res
         "--".to_string(),
     ];
     commit_args.extend(rels.iter().cloned());
-    run_cmd_owned(repo_root, "git", &commit_args)?;
+    run_git_owned(repo_root, &commit_args, false)?;
 
     // Re-fetch and rebase: students may have pushed to origin/main since
     // sync_repo_to_origin_main ran for this repo. Without this, the push
     // gets rejected as a non-fast-forward.
-    run_cmd(repo_root, "git", &["fetch", "--quiet", "origin"])?;
-    if let Err(err) = run_cmd(repo_root, "git", &["rebase", "origin/main"]) {
-        let _ = run_cmd(repo_root, "git", &["rebase", "--abort"]);
+    run_git(repo_root, &["fetch", "--quiet", "origin"], true)?;
+    if let Err(err) = run_git(repo_root, &["rebase", "origin/main"], false) {
+        let _ = run_git(repo_root, &["rebase", "--abort"], false);
         return Err(err.context("git rebase origin/main failed during publish"));
     }
 
-    run_cmd(repo_root, "git", &["push", "origin", "main"])?;
+    run_git(repo_root, &["push", "origin", "main"], true)?;
     Ok(())
 }
 
@@ -305,10 +355,83 @@ fn relative_report_paths(repo_root: &Path, report_paths: &[PathBuf]) -> Result<V
         .collect()
 }
 
-fn ensure_command_available(bin: &str, cwd: &Path) -> Result<()> {
-    run_cmd(cwd, bin, &["--version"]).map(|_| ())
+fn ensure_command_available(cwd: &Path) -> Result<()> {
+    run_git(cwd, &["--version"], false).map(|_| ())
 }
 
+fn repo_short_name(repo_root: &Path) -> String {
+    repo_root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string()
+}
+
+/// Run `git` with optional non-interactive network env (`GIT_TERMINAL_PROMPT=0`
+/// so fetch/push fail fast instead of blocking on a credential prompt).
+fn run_git(cwd: &Path, args: &[&str], network: bool) -> Result<String> {
+    let output = git_command(cwd, args, network, &[])
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !output.status.success() {
+        let hint = if network {
+            " (network git: ensure GitHub credentials/SSH are configured; \
+             GIT_TERMINAL_PROMPT=0 prevents hanging on password prompts)"
+        } else {
+            ""
+        };
+        bail!(
+            "git {} failed{}: {}",
+            args.join(" "),
+            hint,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn run_git_owned(cwd: &Path, args: &[String], network: bool) -> Result<String> {
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = git_command(cwd, &arg_refs, network, args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !output.status.success() {
+        let hint = if network {
+            " (network git: ensure GitHub credentials/SSH are configured; \
+             GIT_TERMINAL_PROMPT=0 prevents hanging on password prompts)"
+        } else {
+            ""
+        };
+        bail!(
+            "git {} failed{}: {}",
+            args.join(" "),
+            hint,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_command<'a>(
+    cwd: &Path,
+    args: &[&str],
+    network: bool,
+    owned_args: &'a [String],
+) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd);
+    if owned_args.is_empty() {
+        cmd.args(args);
+    } else {
+        cmd.args(owned_args);
+    }
+    if network {
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+    }
+    cmd
+}
+
+#[allow(dead_code)]
 fn run_cmd(cwd: &Path, bin: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(bin)
         .current_dir(cwd)
@@ -326,6 +449,7 @@ fn run_cmd(cwd: &Path, bin: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[allow(dead_code)]
 fn run_cmd_owned(cwd: &Path, bin: &str, args: &[String]) -> Result<String> {
     let output = Command::new(bin)
         .current_dir(cwd)

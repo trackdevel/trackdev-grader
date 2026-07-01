@@ -1,6 +1,6 @@
 //! EXTRA_TECH depth detectors (Layer B).
 //!
-//! Static AST detection of five curated "advanced" features, calibrated against
+//! Static AST detection of curated "advanced" features, calibrated against
 //! the real cohort under `data/entregues`. Produces numeric metric keys (for
 //! `repo_structural_metrics` + the `extra_tech` aggregate) and itemized
 //! [`FeatureFinding`]s (for `repo_extra_technologies` / the report + desktop).
@@ -134,6 +134,34 @@ pub fn detect_depth(files: &[ScannedFile], stack: Stack) -> DepthScan {
                 category: "email".into(),
                 evidence: email.evidence.unwrap_or_default(),
                 depth: email.send_sites as f64,
+            });
+        }
+
+        let okhttp = detect_okhttp_external_apis(&prod);
+        metrics.insert(
+            metrics::OKHTTP_EXTERNAL_API_COUNT.into(),
+            okhttp.api_count as f64,
+        );
+        if okhttp.api_count > 0 {
+            features.push(FeatureFinding {
+                technology: "External API (OkHttp)".into(),
+                category: "external_api".into(),
+                evidence: okhttp.evidence.unwrap_or_default(),
+                depth: okhttp.api_count as f64,
+            });
+        }
+
+        let minio = detect_minio_object_io(&prod);
+        metrics.insert(
+            metrics::MINIO_OBJECT_IO_SITE_COUNT.into(),
+            minio.io_sites as f64,
+        );
+        if minio.io_sites > 0 {
+            features.push(FeatureFinding {
+                technology: "MinIO object storage".into(),
+                category: "storage".into(),
+                evidence: minio.evidence.unwrap_or_default(),
+                depth: minio.io_sites as f64,
             });
         }
     }
@@ -417,6 +445,227 @@ fn detect_email(files: &[&ScannedFile]) -> EmailScan {
         send_sites,
         evidence,
     }
+}
+
+// ---------------------------------------------------------------------------
+// OkHttp external APIs (Spring)
+// ---------------------------------------------------------------------------
+
+struct OkHttpApiScan {
+    api_count: u32,
+    evidence: Option<String>,
+}
+
+/// Count distinct external API hosts reached via OkHttp in production Spring
+/// sources. Scans `http(s)://` string literals in files that import `okhttp3`
+/// and that issue outbound calls (`Request.Builder` / `newCall`).
+fn detect_okhttp_external_apis(files: &[&ScannedFile]) -> OkHttpApiScan {
+    let mut hosts = BTreeSet::new();
+    let mut evidence = None;
+    for f in files {
+        if !uses_okhttp(f) || !file_issues_okhttp_requests(f) {
+            continue;
+        }
+        let src = f.source();
+        for_each_descendant(f.root(), &mut |n| {
+            if !matches!(n.kind(), "string_literal" | "binary_expression") {
+                return;
+            }
+            for url in extract_http_url_literals(n, src) {
+                if let Some(host) = external_api_host(&url) {
+                    if hosts.insert(host.clone()) && evidence.is_none() {
+                        evidence = Some(format!(
+                            "{}:{} ({})",
+                            f.rel_path,
+                            n.start_position().row + 1,
+                            host
+                        ));
+                    }
+                }
+            }
+        });
+    }
+    let api_count = hosts.len() as u32;
+    let evidence = if api_count == 0 {
+        None
+    } else {
+        Some(format!(
+            "{}; hosts={}",
+            evidence.unwrap_or_else(|| "okhttp".into()),
+            hosts.iter().cloned().collect::<Vec<_>>().join(", ")
+        ))
+    };
+    OkHttpApiScan {
+        api_count,
+        evidence,
+    }
+}
+
+fn uses_okhttp(f: &ScannedFile) -> bool {
+    f.imports.iter().any(|i| i.text.contains("okhttp3."))
+}
+
+// ---------------------------------------------------------------------------
+// MinIO object storage (Spring upload / download)
+// ---------------------------------------------------------------------------
+
+struct MinioIoScan {
+    io_sites: u32,
+    evidence: Option<String>,
+}
+
+/// Count `putObject` / `getObject` call sites on `MinioClient` receivers in
+/// production Spring sources (upload and download).
+fn detect_minio_object_io(files: &[&ScannedFile]) -> MinioIoScan {
+    let mut io_sites = 0u32;
+    let mut evidence = None;
+    for f in files {
+        if !f.imports.iter().any(|i| i.text.contains("io.minio")) {
+            continue;
+        }
+        let src = f.source();
+        let mut client_names: BTreeSet<String> = BTreeSet::new();
+        for_each_descendant(f.root(), &mut |n| {
+            if !matches!(
+                n.kind(),
+                "field_declaration" | "formal_parameter" | "local_variable_declaration"
+            ) {
+                return;
+            }
+            let Some(t) = field_node(n, "type") else {
+                return;
+            };
+            if simple_type_name(t, src).as_deref() != Some("MinioClient") {
+                return;
+            }
+            for nm in declarator_names(n, src) {
+                client_names.insert(nm);
+            }
+        });
+        if client_names.is_empty() {
+            continue;
+        }
+        for_each_descendant(f.root(), &mut |n| {
+            if n.kind() != "method_invocation" {
+                return;
+            }
+            let name = field_text(n, "name", src).unwrap_or_default();
+            if name != "putObject" && name != "getObject" {
+                return;
+            }
+            let obj = n
+                .child_by_field_name("object")
+                .map(|o| node_text(o, src))
+                .unwrap_or_default();
+            let recv = obj.trim_start_matches("this.").to_string();
+            let base = recv.split('.').next().unwrap_or(&recv).to_string();
+            if client_names.contains(&recv) || client_names.contains(&base) {
+                io_sites += 1;
+                if evidence.is_none() {
+                    evidence = Some(format!("{}:{}", f.rel_path, n.start_position().row + 1));
+                }
+            }
+        });
+    }
+    MinioIoScan {
+        io_sites,
+        evidence,
+    }
+}
+
+fn file_issues_okhttp_requests(f: &ScannedFile) -> bool {
+    let src = f.source();
+    let mut issues = false;
+    for_each_descendant(f.root(), &mut |n| {
+        if issues {
+            return;
+        }
+        if n.kind() != "method_invocation" {
+            return;
+        }
+        let name = field_text(n, "name", src).unwrap_or_default();
+        let obj = n
+            .child_by_field_name("object")
+            .map(|o| node_text(o, src))
+            .unwrap_or_default();
+        if name == "newCall" || (name == "url" && obj.contains("Builder")) {
+            issues = true;
+        }
+    });
+    issues
+}
+
+fn extract_http_url_literals(node: Node, src: &[u8]) -> Vec<String> {
+    match node.kind() {
+        "string_literal" => {
+            let raw = unquote_java_string(&node_text(node, src));
+            if raw.starts_with("http://") || raw.starts_with("https://") {
+                vec![raw]
+            } else {
+                Vec::new()
+            }
+        }
+        "binary_expression" => {
+            let left = node.child_by_field_name("left");
+            let right = node.child_by_field_name("right");
+            let mut out = left
+                .map(|l| extract_http_url_literals(l, src))
+                .unwrap_or_default();
+            out.extend(
+                right
+                    .map(|r| extract_http_url_literals(r, src))
+                    .unwrap_or_default(),
+            );
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn unquote_java_string(raw: &str) -> String {
+    let t = raw.trim();
+    if t.len() >= 2
+        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')))
+    {
+        t[1..t.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    } else {
+        t.to_string()
+    }
+}
+
+fn external_api_host(url_like: &str) -> Option<String> {
+    let s = url_like.trim();
+    if !s.starts_with("http://") && !s.starts_with("https://") {
+        return None;
+    }
+    let rest = s.split("://").nth(1)?;
+    let authority = rest.split(&['/', '?', '#'][..]).next()?;
+    let host_port = authority.rsplit('@').next()?;
+    let host = if let Some((h, port)) = host_port.rsplit_once(':') {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            h
+        } else {
+            host_port
+        }
+    } else {
+        host_port
+    };
+    let host = host.to_ascii_lowercase();
+    if is_internal_host(&host) {
+        return None;
+    }
+    Some(host)
+}
+
+fn is_internal_host(host: &str) -> bool {
+    host == "localhost"
+        || host.ends_with(".local")
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host == "0.0.0.0"
 }
 
 // ---------------------------------------------------------------------------
@@ -991,6 +1240,123 @@ public class Player {
         );
         let got2 = detect_depth(&[av], Stack::Android).metrics;
         assert!(got2[metrics::AV_USAGE_COUNT] >= 1.0);
+    }
+
+    #[test]
+    fn okhttp_external_api_counts_distinct_hosts_and_skips_internal() {
+        let outbound = sf(
+            "src/main/java/com/x/OutboundMessageService.java",
+            r#"package com.x;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+public class OutboundMessageService {
+    private final OkHttpClient httpClient = new OkHttpClient();
+    private boolean sendToMeta(String token) {
+        String url = "https://graph.facebook.com/v18.0/me/messages?access_token=" + token;
+        Request request = new Request.Builder().url(url).post(RequestBody.create("{}", MediaType.get("application/json"))).build();
+        return httpClient.newCall(request).execute().isSuccessful();
+    }
+    private boolean sendToTelegram(String token, String chatId) {
+        String url = "https://api.telegram.org/bot" + token + "/sendMessage";
+        Request request = new Request.Builder().url(url).post(RequestBody.create("{}", MediaType.get("application/json"))).build();
+        return httpClient.newCall(request).execute().isSuccessful();
+    }
+    private boolean pingLocal() {
+        Request request = new Request.Builder().url("http://localhost:8080/health").get().build();
+        return httpClient.newCall(request).execute().isSuccessful();
+    }
+}"#,
+        );
+        let scan = detect_depth(&[outbound], Stack::Spring);
+        assert_eq!(scan.metrics[metrics::OKHTTP_EXTERNAL_API_COUNT], 2.0);
+        assert!(scan.features.iter().any(|f| f.category == "external_api"));
+    }
+
+    #[test]
+    fn minio_object_io_counts_put_and_get_on_minio_client() {
+        let image = sf(
+            "src/main/java/com/x/ImageService.java",
+            r#"package com.x;
+import io.minio.GetObjectArgs;
+import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
+import java.io.InputStream;
+import java.util.Optional;
+public class ImageService {
+    private final Optional<MinioClient> minioClient;
+    private final String minioBucket;
+    public ImageService(Optional<MinioClient> minioClient, String minioBucket) {
+        this.minioClient = minioClient;
+        this.minioBucket = minioBucket;
+    }
+    public void upload(InputStream istream, String objectName) throws Exception {
+        MinioClient client = getClientOrThrow();
+        client.putObject(
+            PutObjectArgs.builder()
+                .bucket(minioBucket)
+                .object(objectName)
+                .stream(istream, -1, 10485760)
+                .build());
+    }
+    public InputStream download(String filename) throws Exception {
+        MinioClient client = getClientOrThrow();
+        return client.getObject(
+            GetObjectArgs.builder()
+                .bucket(minioBucket)
+                .object(filename)
+                .build());
+    }
+    private MinioClient getClientOrThrow() {
+        return minioClient.orElseThrow();
+    }
+}"#,
+        );
+        let scan = detect_depth(&[image], Stack::Spring);
+        assert_eq!(scan.metrics[metrics::MINIO_OBJECT_IO_SITE_COUNT], 2.0);
+        assert!(scan.features.iter().any(|f| f.category == "storage"));
+
+        let config = sf(
+            "src/main/java/com/x/MinioConfig.java",
+            r#"package com.x;
+import io.minio.MinioClient;
+import org.springframework.context.annotation.Bean;
+public class MinioConfig {
+    @Bean
+    public MinioClient minioClient() {
+        return MinioClient.builder().endpoint("https://minio.example.com").build();
+    }
+}"#,
+        );
+        let cfg = detect_depth(&[config], Stack::Spring);
+        assert_eq!(cfg.metrics[metrics::MINIO_OBJECT_IO_SITE_COUNT], 0.0);
+    }
+
+    #[test]
+    fn okhttp_dynamic_base_url_counts_literal_host() {
+        let paypal = sf(
+            "src/main/java/com/x/PaypalService.java",
+            r#"package com.x;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.MediaType;
+public class PaypalService {
+    private final OkHttpClient client = new OkHttpClient();
+    private String baseUrl = "https://api-m.sandbox.paypal.com";
+    public void create() {
+        Request httpRequest = new Request.Builder()
+            .url(baseUrl + "/v2/checkout/orders")
+            .post(RequestBody.create("{}", MediaType.get("application/json")))
+            .build();
+        client.newCall(httpRequest).execute();
+    }
+}"#,
+        );
+        let got = detect_depth(&[paypal], Stack::Spring).metrics;
+        assert_eq!(got[metrics::OKHTTP_EXTERNAL_API_COUNT], 1.0);
     }
 
     #[test]

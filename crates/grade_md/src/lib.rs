@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use grade_core::{behavioural_flag_graded, is_codequality_hotspot, ProjectGrades, StudentFlag};
+use grade_core::{behavioural_flag_graded, is_codequality_hotspot, ExtraTechComponent, ProjectGrades, StudentFlag};
 
 /// Fixed filename for the student-facing grade report (one per project, beside
 /// `REPORT.md`).
@@ -43,6 +43,10 @@ const NO_PENALTIES: &str = "Cap incidència registrada.";
 const NOTA_PROJECTE: &str = "Nota del projecte";
 const QUALITAT_EQUIP: &str = "Qualitat de l'equip";
 const FACTOR_IA_EQUIP: &str = "Factor d'ús d'IA";
+const WORK_BASE: &str = "Base de treball (nota absoluta)";
+const COHORT_POSITION: &str = "Posició a la cohort";
+const EXTRA_TECH_HEADER: &str = "Tecnologies extra detectades";
+const NO_EXTRA_TECH: &str = "Cap tecnologia extra detectada.";
 
 const NOTA_FINAL: &str = "Nota final";
 const CONTRIBUCIO_BRUTA: &str = "Contribució (punts originals)";
@@ -59,6 +63,11 @@ ABANS d'aplicar el descompte per ús d'IA.";
 const GLOSS_FACTOR_IA_EQUIP: &str =
     "Proporció de punts que conserva l'equip després de descomptar l'ús d'IA declarat \
 (1 = cap descompte). Com més ús d'IA, més baix és aquest factor.";
+const GLOSS_WORK_BASE: &str =
+    "Indicador absolut de la mida i complexitat del treball lliurat, abans de \
+multiplicar per la qualitat i l'ús d'IA.";
+const GLOSS_COHORT_POSITION: &str =
+    "Lloc de l'equip dins la cohort completa segons la nota del projecte (1 = millor).";
 
 /// Glosses for the per-student headline quantities.
 const GLOSS_NOTA_FINAL: &str =
@@ -201,6 +210,78 @@ fn graded_behaviour_flags<'a>(flags: &'a [StudentFlag], student_id: &str) -> Vec
     seen
 }
 
+/// Per-project values for the team block beyond [`ProjectGrades`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectGradeContext {
+    pub work_base: f64,
+    pub work_base_present: bool,
+    /// 1-based rank within the graded cohort (`1` = highest `project_final`).
+    pub cohort_rank: usize,
+    pub cohort_size: usize,
+}
+
+impl ProjectGradeContext {
+    pub fn work_base_from_grades(grades: &ProjectGrades) -> (f64, bool) {
+        grades
+            .axes
+            .iter()
+            .find(|a| a.key == "work_base")
+            .map(|a| (a.score.unwrap_or(0.0), a.present))
+            .unwrap_or((0.0, false))
+    }
+}
+
+/// Competition-style ranks by `project_final` (descending). Tied teams share a rank.
+pub fn cohort_ranks_by_project_final(project_finals: &[(i64, f64)]) -> BTreeMap<i64, (usize, usize)> {
+    let cohort_size = project_finals.len();
+    let mut sorted = project_finals.to_vec();
+    sorted.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let mut out = BTreeMap::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let score = sorted[i].1;
+        let mut j = i + 1;
+        while j < sorted.len() && (sorted[j].1 - score).abs() < 1e-9 {
+            j += 1;
+        }
+        let rank = i + 1;
+        for &(id, _) in &sorted[i..j] {
+            out.insert(id, (rank, cohort_size));
+        }
+        i = j;
+    }
+    out
+}
+
+/// Catalan label for an extra-tech signal key (no weights or raw counts).
+fn extra_tech_feature_label(key: &str) -> &str {
+    match key {
+        "fcm_send_call_count" => "Missatgeria Firebase (enviaments des del servidor)",
+        "fcm_android_room_store" => "Missatgeria Firebase (Android, emmagatzematge)",
+        "specification_def_count" => "Especificacions JPA (Spring Data)",
+        "email_send_site_count" => "Correu electrònic (JavaMailSender)",
+        "graphics_custom_draw_count" => "Gràfics personalitzats (Android)",
+        "av_usage_count" => "Àudio / vídeo (Android)",
+        "okhttp_external_api_count" => "APIs externes via OkHttp (servidor)",
+        "minio_object_io_site_count" => "Emmagatzematge d'objectes MinIO (pujada / baixada)",
+        other => other,
+    }
+}
+
+fn detected_extra_tech_labels(components: &[ExtraTechComponent]) -> Vec<&str> {
+    let mut labels: Vec<&str> = components
+        .iter()
+        .map(|c| extra_tech_feature_label(&c.key))
+        .collect();
+    labels.sort_unstable();
+    labels.dedup();
+    labels
+}
+
 // --- Renderer -------------------------------------------------------------
 
 /// Render the full `GRADES.md` body for one project. Pure — no I/O.
@@ -209,6 +290,7 @@ pub fn render_grades_markdown(
     names: &BTreeMap<String, String>,
     grades: &ProjectGrades,
     student_flags: &[StudentFlag],
+    context: &ProjectGradeContext,
     decimals: u32,
 ) -> String {
     let mut out = String::new();
@@ -237,10 +319,34 @@ pub fn render_grades_markdown(
         "| {FACTOR_IA_EQUIP} | {} |",
         fmt_ratio(grades.ai_factor)
     );
+    let work_base_cell = if context.work_base_present {
+        fmt_num(context.work_base, decimals)
+    } else {
+        "—".to_string()
+    };
+    let _ = writeln!(out, "| {WORK_BASE} | {work_base_cell} |");
+    let _ = writeln!(
+        out,
+        "| {COHORT_POSITION} | {} / {} |",
+        context.cohort_rank, context.cohort_size
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "- **{NOTA_PROJECTE}**: {GLOSS_NOTA_PROJECTE}");
     let _ = writeln!(out, "- **{QUALITAT_EQUIP}**: {GLOSS_QUALITAT_EQUIP}");
     let _ = writeln!(out, "- **{FACTOR_IA_EQUIP}**: {GLOSS_FACTOR_IA_EQUIP}");
+    let _ = writeln!(out, "- **{WORK_BASE}**: {GLOSS_WORK_BASE}");
+    let _ = writeln!(out, "- **{COHORT_POSITION}**: {GLOSS_COHORT_POSITION}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "**{EXTRA_TECH_HEADER}**");
+    let _ = writeln!(out);
+    let extra = detected_extra_tech_labels(&grades.extra_tech_components);
+    if extra.is_empty() {
+        let _ = writeln!(out, "{NO_EXTRA_TECH}");
+    } else {
+        for label in extra {
+            let _ = writeln!(out, "- {label}");
+        }
+    }
     let _ = writeln!(out);
 
     // --- Students ---------------------------------------------------------
@@ -337,9 +443,17 @@ pub fn write_grades_markdown(
     names: &BTreeMap<String, String>,
     grades: &ProjectGrades,
     student_flags: &[StudentFlag],
+    context: &ProjectGradeContext,
     decimals: u32,
 ) -> Result<()> {
-    let body = render_grades_markdown(project_name, names, grades, student_flags, decimals);
+    let body = render_grades_markdown(
+        project_name,
+        names,
+        grades,
+        student_flags,
+        context,
+        decimals,
+    );
     std::fs::write(out_path, body).with_context(|| format!("write {}", out_path.display()))?;
     Ok(())
 }
@@ -347,7 +461,7 @@ pub fn write_grades_markdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grade_core::{CodeQualityComponent, StudentGrades};
+    use grade_core::{CodeQualityComponent, ExtraTechComponent, StudentGrades};
 
     fn mk_student(id: &str, cq: Vec<CodeQualityComponent>) -> StudentGrades {
         StudentGrades {
@@ -375,10 +489,30 @@ mod tests {
             project_final: 7.0,
             team_quality_penalty: 0.0,
             team_size: students.len() as i64,
-            axes: vec![],
-            extra_tech: 0.0,
-            extra_tech_components: vec![],
+            axes: vec![grade_core::AxisGrade {
+                key: "work_base".into(),
+                raw: None,
+                score: Some(8.25),
+                present: true,
+            }],
+            work_base_structural: 6.25,
+            extra_tech: 2.0,
+            extra_tech_components: vec![ExtraTechComponent {
+                key: "fcm_send_call_count".into(),
+                raw: 1.0,
+                weight: 3.0,
+                contribution: 1.0,
+            }],
             students,
+        }
+    }
+
+    fn sample_context() -> ProjectGradeContext {
+        ProjectGradeContext {
+            work_base: 8.25,
+            work_base_present: true,
+            cohort_rank: 3,
+            cohort_size: 14,
         }
     }
 
@@ -466,13 +600,29 @@ mod tests {
         ]);
         let flags = vec![flag("alice", "CRITICAL", "GHOST_CONTRIBUTOR")];
 
-        let md = render_grades_markdown("Team 07", &names, &grades, &flags, 2);
+        let md = render_grades_markdown(
+            "Team 07",
+            &names,
+            &grades,
+            &flags,
+            &sample_context(),
+            2,
+        );
 
         // Team block headline quantities.
         assert!(md.contains("# Notes — Team 07"));
         assert!(md.contains("| Nota del projecte | 7 |"));
         assert!(md.contains("| Qualitat de l'equip | 7.5 |"));
         assert!(md.contains("| Factor d'ús d'IA | 0.950 |"));
+        assert!(md.contains("| Base de treball (nota absoluta) | 8.25 |"));
+        assert!(md.contains(
+            "Indicador absolut de la mida i complexitat del treball lliurat"
+        ));
+        assert!(!md.contains("Indicador absolut (0–10)"));
+        assert!(md.contains("| Posició a la cohort | 3 / 14 |"));
+        assert!(md.contains("Missatgeria Firebase (enviaments des del servidor)"));
+        assert!(!md.contains("weight"));
+        assert!(!md.contains("contribution"));
 
         // Student block.
         assert!(md.contains("### Alice Liddell"));
@@ -488,5 +638,13 @@ mod tests {
         // Transparency invariant: no raw point deductions leak into penalties.
         assert!(!md.contains("-1"));
         assert!(!md.contains("punts descomptats"));
+    }
+
+    #[test]
+    fn cohort_ranks_ties_share_rank() {
+        let ranks = cohort_ranks_by_project_final(&[(1, 9.0), (2, 8.0), (3, 9.0)]);
+        assert_eq!(ranks[&1], (1, 3));
+        assert_eq!(ranks[&3], (1, 3));
+        assert_eq!(ranks[&2], (3, 3));
     }
 }

@@ -4,6 +4,7 @@
 //! paths (see the static-analysis URL bug captured by W1.T4).
 
 use std::io;
+use std::process::Command;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -33,6 +34,73 @@ pub fn repo_relative(repo_root: &Utf8Path, path: &Utf8Path) -> Result<String, Pa
     // to the URL builder verbatim, and GitHub expects forward slashes.
     let s = rel.as_str().replace('\\', "/");
     Ok(s)
+}
+
+/// Conventional Java source roots under a cloned repo (Spring + Android).
+pub const JAVA_SOURCE_ROOT_SUFFIXES: &[&str] = &[
+    "src/main/java",
+    "src/test/java",
+    "app/src/main/java",
+    "app/src/test/java",
+];
+
+/// Resolve a Java file path that may be repo-relative or relative to a
+/// source root (as PMD / Checkstyle SARIF often emit) to an on-disk path
+/// expressed relative to `repo_root`. Returns `None` when no matching file
+/// is found.
+pub fn resolve_existing_java_file(repo_root: &Utf8Path, file_path: &str) -> Option<String> {
+    let normalized = file_path.replace('\\', "/");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let direct = repo_root.join(&normalized);
+    if direct.is_file() {
+        return repo_relative(repo_root, &direct).ok();
+    }
+
+    for suffix in JAVA_SOURCE_ROOT_SUFFIXES {
+        let candidate = repo_root.join(suffix).join(&normalized);
+        if candidate.is_file() {
+            return repo_relative(repo_root, &candidate).ok();
+        }
+    }
+
+    find_tracked_path_suffix(repo_root, &normalized)
+}
+
+/// `git ls-files` suffix lookup for paths like `org/foo/Bar.java` when the
+/// analyzer omitted the `app/src/main/java/` prefix.
+fn find_tracked_path_suffix(repo_root: &Utf8Path, suffix: &str) -> Option<String> {
+    let file_name = suffix.rsplit('/').next()?;
+    let output = Command::new("git")
+        .args(["ls-files", "--", &format!("**/{file_name}")])
+        .current_dir(repo_root.as_std_path())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut matches: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| *line == suffix || line.ends_with(&format!("/{suffix}")))
+        .map(str::to_string)
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    matches.sort_by_key(|p| java_path_preference_key(p));
+    Some(matches[0].clone())
+}
+
+fn java_path_preference_key(path: &str) -> u8 {
+    if path.contains("/src/main/java/") || path.contains("/src/test/java/") {
+        0
+    } else if path.contains("/build/generated/") {
+        1
+    } else {
+        2
+    }
 }
 
 fn canonicalize_or_lexical(path: &Utf8Path) -> Result<Utf8PathBuf, PathError> {
@@ -150,5 +218,70 @@ mod tests {
         assert!(!is_repo_relative("C:/Foo.java"));
         assert!(!is_repo_relative("C:\\Foo.java"));
         assert!(!is_repo_relative("\\foo"));
+    }
+
+    #[test]
+    fn resolve_existing_java_file_finds_under_app_src_main_java() {
+        let (_g, root) = utf8_tempdir();
+        let nested = root.join("app/src/main/java/org/example/Foo.java");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "class Foo {}\n").unwrap();
+        run_git_init(&root);
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-q", "-m", "init"]);
+
+        let resolved =
+            resolve_existing_java_file(&root, "org/example/Foo.java").expect("must resolve");
+        assert_eq!(resolved, "app/src/main/java/org/example/Foo.java");
+    }
+
+    #[test]
+    fn resolve_existing_java_file_prefers_src_over_build_generated() {
+        let (_g, root) = utf8_tempdir();
+        let src = root.join("app/src/main/java/org/example/Bar.java");
+        let gen = root
+            .join("app/build/generated/ap_generated_sources/out/org/example/Bar.java");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(gen.parent().unwrap()).unwrap();
+        std::fs::write(&src, "class Bar {}\n").unwrap();
+        std::fs::write(&gen, "class Bar {}\n").unwrap();
+        run_git_init(&root);
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-q", "-m", "init"]);
+
+        let resolved =
+            resolve_existing_java_file(&root, "org/example/Bar.java").expect("must resolve");
+        assert_eq!(resolved, "app/src/main/java/org/example/Bar.java");
+    }
+
+    fn run_git_init(root: &Utf8Path) {
+        use std::process::Command;
+        Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(root.as_std_path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "t@example.com"])
+            .current_dir(root.as_std_path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(root.as_std_path())
+            .status()
+            .unwrap();
+    }
+
+    fn run_git(root: &Utf8Path, args: &[&str]) {
+        use std::process::Command;
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(root.as_std_path())
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }

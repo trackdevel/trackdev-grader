@@ -15,9 +15,7 @@ use tracing_subscriber::EnvFilter;
 use sprint_grader_collect::{run_collection, CollectOpts};
 use sprint_grader_core::{Config, Database};
 use sprint_grader_orchestration::pipeline::resolve_all_sprint_tuples;
-use sprint_grader_orchestration::{
-    android_repo_root, publish_report_updates, repo_has_report_changes,
-};
+use sprint_grader_orchestration::{android_repo_root, publish_all_repo_updates};
 use sprint_grader_quality_llm::{run as run_quality_flags, QualityFlagsOpts};
 
 fn parse_project_filter(projects: Option<String>) -> Option<Vec<String>> {
@@ -419,6 +417,37 @@ enum Command {
         #[arg(long)]
         reports: bool,
     },
+    /// Grading-prep pipeline: like `run-all` but skips PR/task doc evaluation.
+    ///
+    /// Identical incremental semantics to `run-all` (no purge, watermark +
+    /// etag caching, per-project skip when no new PRs/tasks). Omits the
+    /// local-hybrid / remote-LLM PR-doc pre-pass, per-sprint `llm_eval_pr_docs`,
+    /// and task-description scoring — those tables are not inputs to Grading v4.
+    /// Heuristic PR flags (`EMPTY_DESCRIPTION`, `GENERIC_TITLE`) still run.
+    /// Architecture LLM rubric is skipped (AST scan still runs). AI detection: NO.
+    GradeAll {
+        #[command(flatten)]
+        projects: ProjectsArg,
+        #[arg(long)]
+        skip_github: bool,
+        #[arg(long)]
+        skip_repos: bool,
+        /// Skip the Java static-analysis (PMD/Checkstyle/SpotBugs) stage.
+        /// Default: stage runs when `config/static_analysis.toml` exists.
+        #[arg(long)]
+        skip_static_analysis: bool,
+        #[arg(long)]
+        force_pr_refresh: bool,
+        /// After analysis, force-rebase each project's android clone
+        /// onto `origin/main` and render the team-facing REPORT.md
+        /// (static-analysis section stripped) into the clone. Nothing
+        /// is committed or pushed — review the result with `git diff`
+        /// inside each clone and publish later via
+        /// `sprint-grader sync-reports --skip-collect --push` or a
+        /// manual `git push`.
+        #[arg(long)]
+        reports: bool,
+    },
     /// End-of-sprint full run: purge → re-collect → full analysis + AI detection.
     ///
     /// ALWAYS PURGES before collecting. --projects only narrows the blast radius: with --projects, the cascade is scoped to the listed projects; without it, every project in the DB is wiped. Either way the purge clears pull_requests, tasks, sprints, fingerprints, pr_github_etags, the per-PR `last_github_fetch_updated_at` watermark, and every derived table — which is why re-collection re-fetches every PR (the cache is gone). That is the end-of-sprint contract: rebuild from scratch.
@@ -627,6 +656,11 @@ enum Command {
         /// project's REPORT.md.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Commit and push updated `GRADES.md` files directly to `main` in each
+        /// team's android clone. Ignored when `--out` is set (files are outside
+        /// the repo working trees).
+        #[arg(long)]
+        push: bool,
     },
     /// Suggest hybrid-normalization anchors from the live cohort (Grading v2 Wave 4).
     CalibrateAnchors {
@@ -1302,6 +1336,7 @@ fn main() -> Result<()> {
                     );
                     continue;
                 };
+                info!(project = %g.name, "generating REPORT.md");
                 let report_path = repo_root.join("REPORT.md");
                 sprint_grader_report::generate_markdown_report_multi_to_path(
                     &db.conn,
@@ -1344,18 +1379,17 @@ fn main() -> Result<()> {
             }
 
             if push {
-                let mut published_repos = 0usize;
-                for (repo_root, report_paths) in &repo_reports {
-                    if !repo_has_report_changes(repo_root, report_paths)
-                        .with_context(|| format!("git status failed for {}", repo_root.display()))?
-                    {
-                        continue;
-                    }
-                    publish_report_updates(repo_root, report_paths)
-                        .with_context(|| format!("publish failed for {}", repo_root.display()))?;
-                    published_repos += 1;
+                info!(
+                    repos = repo_reports.len(),
+                    "--push: REPORT.md generation done; starting publish"
+                );
+                let batch = publish_all_repo_updates(&repo_reports)?;
+                if batch.pushed.is_empty() && !batch.skipped_unchanged.is_empty() {
+                    info!(
+                        skipped = batch.skipped_unchanged.len(),
+                        "no repos had REPORT.md changes to push"
+                    );
                 }
-                info!(published_repos, "reports pushed");
             }
 
             info!(
@@ -1420,6 +1454,37 @@ fn main() -> Result<()> {
                 &opts,
             )
             .context("run-all pipeline failed")?;
+        }
+        Command::GradeAll {
+            projects,
+            skip_github,
+            skip_repos,
+            skip_static_analysis,
+            force_pr_refresh,
+            reports,
+        } => {
+            drop(db);
+            let opts = sprint_grader_orchestration::pipeline::PipelineOptions {
+                today: today.clone(),
+                project_filter: parse_project_filter(projects.projects),
+                entregues_dir: entregues_dir.clone(),
+                config_dir: config_dir.clone(),
+                skip_github,
+                skip_repos,
+                skip_reports: false,
+                skip_static_analysis,
+                skip_arch_llm: true,
+                force_pr_refresh,
+                max_workers: None,
+                team_reports: reports,
+            };
+            sprint_grader_orchestration::run_pipeline(
+                &config,
+                &db_path,
+                sprint_grader_orchestration::PipelineVariant::GradeAll,
+                &opts,
+            )
+            .context("grade-all pipeline failed")?;
         }
         Command::Iterate {
             projects,
@@ -1701,6 +1766,7 @@ fn main() -> Result<()> {
             projects,
             spec,
             out,
+            push,
         } => {
             let filter = parse_project_filter(projects.projects);
             let spec_path = if spec.is_absolute() {
@@ -1722,6 +1788,25 @@ fn main() -> Result<()> {
             )
             .context("grade-md failed")?;
             info!(count = written.len(), "GRADES.md files written");
+
+            if push {
+                if out.is_some() {
+                    warn!("--push ignored when --out is set (files are outside android clones)");
+                } else {
+                    info!("--push: GRADES.md generation done; starting publish");
+                    let mut repo_grades: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> =
+                        std::collections::BTreeMap::new();
+                    for path in &written {
+                        if let Some(repo_root) = path.parent() {
+                            repo_grades
+                                .entry(repo_root.to_path_buf())
+                                .or_default()
+                                .push(path.clone());
+                        }
+                    }
+                    let _batch = publish_all_repo_updates(&repo_grades)?;
+                }
+            }
         }
         Command::CalibrateAnchors {
             projects,

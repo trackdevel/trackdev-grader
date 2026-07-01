@@ -32,14 +32,18 @@ export const WEIGHT_KEYS = [
   "quality_floor",
   "quality_blend",
   // EXTRA_TECH aggregate weights/cap (default 0-impact until referenced).
-  "w_extra_dep",
   "w_fcm_spring",
   "w_fcm_android",
   "w_spec",
   "w_email",
   "w_graphics",
   "w_av",
+  "w_okhttp_external_api",
+  "w_minio_object_io",
   "extra_tech_cap",
+  "project_grade_gamma",
+  "student_lift_k",
+  "student_lift_pivot",
 ] as const;
 
 /** Injected by grade_cohort before project formulas (Grading v3). */

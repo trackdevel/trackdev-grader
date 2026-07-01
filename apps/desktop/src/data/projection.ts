@@ -1,3 +1,4 @@
+import { resolveEffectiveAiUsage } from "./taskAi";
 import type {
   AxisInputs,
   RawProject,
@@ -238,37 +239,20 @@ async function loadTasks(
        AND t.estimation_points IS NOT NULL`,
     [projectId, ...sprintIds],
   );
-  // "Set" means the both-present gate: declared === 1 AND model AND level.
-  const isSet = (
-    model: string | null,
-    level: string | null,
-    declared: number | null,
-  ): boolean => (declared ?? 0) === 1 && model !== null && level !== null;
   return rows.map((r): RawTask => {
     const base = { assignee_id: r.assignee_id, raw_points: r.estimation_points };
     if (aiForbiddenSprints.has(r.sprint_id)) {
       return { ...base, ai_model: null, ai_level: null, declared: false, ai_exempt: true };
     }
-    // Own attribute → parent USER_STORY's attribute → undeclared.
-    if (isSet(r.model_value, r.level_value, r.declared)) {
-      return {
-        ...base,
-        ai_model: r.model_value,
-        ai_level: r.level_value,
-        declared: true,
-        ai_exempt: false,
-      };
-    }
-    if (isSet(r.parent_model_value, r.parent_level_value, r.parent_declared)) {
-      return {
-        ...base,
-        ai_model: r.parent_model_value,
-        ai_level: r.parent_level_value,
-        declared: true,
-        ai_exempt: false,
-      };
-    }
-    return { ...base, ai_model: null, ai_level: null, declared: false, ai_exempt: false };
+    const ai = resolveEffectiveAiUsage(
+      { model_value: r.model_value, level_value: r.level_value, declared: r.declared },
+      {
+        model_value: r.parent_model_value,
+        level_value: r.parent_level_value,
+        declared: r.parent_declared,
+      },
+    );
+    return { ...base, ...ai, ai_exempt: false };
   });
 }
 
