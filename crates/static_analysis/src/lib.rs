@@ -13,6 +13,7 @@ pub mod attribution;
 pub mod checkstyle;
 pub mod config;
 pub mod i18n;
+pub mod naming;
 pub mod pmd;
 pub mod presets;
 pub mod sarif;
@@ -224,6 +225,37 @@ pub fn scan_repo_to_db(
         }
     }
 
+    // Built-in naming: snake_case type declarations → CRITICAL.
+    let source_roots = discover_source_roots(repo_path);
+    let mut naming_findings =
+        naming::scan_snake_case_types(repo_path, &source_roots);
+    naming_findings.retain(|f| f.severity.at_least(rules.severity_floor));
+    if naming_findings.len() > rules.max_findings_per_analyzer {
+        naming_findings.truncate(rules.max_findings_per_analyzer);
+    }
+    persist_findings(
+        conn,
+        repo_full_name,
+        naming::BUILTIN_ANALYZER_ID,
+        naming::BUILTIN_ANALYZER_VERSION,
+        head_sha.as_deref(),
+        &naming_findings,
+    )?;
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    conn.execute(
+        "INSERT OR REPLACE INTO static_analysis_runs
+            (repo_full_name, analyzer, status, findings_count,
+             duration_ms, head_sha, diagnostics, ran_at)
+         VALUES (?, ?, 'OK', ?, 0, ?, '', ?)",
+        params![
+            repo_full_name,
+            naming::BUILTIN_ANALYZER_ID,
+            naming_findings.len() as i64,
+            head_sha,
+            now,
+        ],
+    )?;
+
     // Attribution. Mirrors the architecture crate's lib.rs idiom: log
     // and continue on error, so a single team's broken git repo can't
     // abort the wider pipeline.
@@ -355,30 +387,14 @@ fn run_analyzer_with_classes(
     let findings_count = findings.len() as i64;
 
     if matches!(output.status, AnalyzerStatus::Ok) {
-        let mut stmt = conn.prepare(
-            "INSERT OR IGNORE INTO static_analysis_findings
-                (repo_full_name, analyzer, analyzer_version, rule_id,
-                 category, severity, file_path, start_line, end_line, message,
-                 help_uri, fingerprint, head_sha)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        persist_findings(
+            conn,
+            repo_full_name,
+            analyzer.id(),
+            analyzer.version(),
+            head_sha,
+            &findings,
         )?;
-        for f in &findings {
-            stmt.execute(params![
-                repo_full_name,
-                f.analyzer,
-                analyzer.version(),
-                f.rule_id,
-                f.category.as_str(),
-                f.severity.as_str(),
-                f.file_path,
-                f.start_line.map(|n| n as i64),
-                f.end_line.map(|n| n as i64),
-                f.message,
-                f.help_uri,
-                f.fingerprint,
-                head_sha,
-            ])?;
-        }
     }
 
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -415,6 +431,41 @@ fn run_analyzer_with_classes(
             duration_ms = output.duration_ms,
             "analyzer ok"
         );
+    }
+    Ok(())
+}
+
+fn persist_findings(
+    conn: &Connection,
+    repo_full_name: &str,
+    analyzer_id: &str,
+    analyzer_version: &str,
+    head_sha: Option<&str>,
+    findings: &[Finding],
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT OR IGNORE INTO static_analysis_findings
+            (repo_full_name, analyzer, analyzer_version, rule_id,
+             category, severity, file_path, start_line, end_line, message,
+             help_uri, fingerprint, head_sha)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )?;
+    for f in findings {
+        stmt.execute(params![
+            repo_full_name,
+            analyzer_id,
+            analyzer_version,
+            f.rule_id,
+            f.category.as_str(),
+            f.severity.as_str(),
+            f.file_path,
+            f.start_line.map(|n| n as i64),
+            f.end_line.map(|n| n as i64),
+            f.message,
+            f.help_uri,
+            f.fingerprint,
+            head_sha,
+        ])?;
     }
     Ok(())
 }
@@ -480,7 +531,7 @@ mod tests {
 
     #[test]
     fn scan_repo_to_db_is_idempotent_with_disabled_analyzers() {
-        // Empty repo + all analyzers disabled → no findings, no runs.
+        // Empty repo + external analyzers disabled → builtin naming only.
         let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -499,7 +550,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(runs, 0);
+        assert_eq!(runs, 1, "builtin grader naming scan records one run row");
     }
 
     #[test]

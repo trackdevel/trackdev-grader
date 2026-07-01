@@ -11,6 +11,9 @@
 # `static_analysis_hotspot_min_weighted = 10.0` in `course.toml
 # [detector_thresholds]` keeps it effectively silent. Lower it when ready
 # to grade.
+#
+# Built-in `grader` analyzer: `SNAKE_CASE_TYPE_NAME` (CRITICAL) flags Java
+# types declared in snake_case (e.g. `user_service` instead of `UserService`).
 
 severity_floor = "INFO"            # drop findings below this before INSERT
 max_findings_per_analyzer = 200    # per (repo, sprint, analyzer) cap

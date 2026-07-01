@@ -25,7 +25,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use camino::Utf8Path;
 use rusqlite::{params, Connection};
+use sprint_grader_core::paths::resolve_existing_java_file;
 use sprint_grader_core::time::{containing_sprint_id, load_sprint_windows, track_min_time};
 use sprint_grader_survival::blame::{blame_file, build_email_to_student_map, EmailStudentMap};
 use tracing::warn;
@@ -86,7 +88,7 @@ pub fn attribute_findings_for_repo(
         // blame insists on either a repo-relative path or one inside the
         // repo's working tree — convert here as a last line of defence so
         // the attribution stage doesn't silently drop these findings.
-        let rel_path = relativise_to_repo(repo_path, &file_path);
+        let rel_path = blame_path_for_repo(repo_path, &file_path);
         let blame = blame_file(repo_path, &rel_path);
         if blame.is_empty() {
             warn!(
@@ -141,6 +143,19 @@ pub fn attribute_findings_for_repo(
         }
     }
     Ok(written)
+}
+
+/// Resolve a stored finding path to a repo-relative path that `git blame`
+/// can open. Analyzers often emit paths relative to a Java source root
+/// (e.g. `org/foo/Bar.java`) rather than the repo root
+/// (`app/src/main/java/org/foo/Bar.java`).
+fn blame_path_for_repo(repo_path: &Path, file_path: &str) -> String {
+    if let Some(repo_utf8) = Utf8Path::from_path(repo_path) {
+        if let Some(resolved) = resolve_existing_java_file(repo_utf8, file_path) {
+            return resolved;
+        }
+    }
+    relativise_to_repo(repo_path, file_path)
 }
 
 /// Make `file_path` relative to `repo_path` when possible. SARIF artifact
@@ -445,5 +460,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(null_attr_count, 0);
+    }
+
+    #[test]
+    fn attributes_findings_when_path_is_source_root_relative() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        seed_db(&conn, 1);
+
+        let (_g, repo) = init_repo();
+        let body = (1..=5).map(|i| format!("// l{i}\n")).collect::<String>();
+        commit_file(
+            &repo,
+            "app/src/main/java/org/example/Foo.java",
+            &body,
+            "alice@example.com",
+            "Alice",
+            "init",
+        );
+
+        let fid = insert_finding(
+            &conn,
+            "udg/x",
+            "org/example/Foo.java",
+            "R1",
+            Some(1),
+            Some(5),
+        );
+        let n = attribute_findings_for_repo(&conn, &repo, "udg/x").unwrap();
+        assert_eq!(n, 1, "must blame via resolved app/src/main/java path");
+
+        let sid: String = conn
+            .query_row(
+                "SELECT student_id FROM static_analysis_finding_attribution WHERE finding_id = ?",
+                [fid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sid, "alice");
     }
 }
