@@ -94,12 +94,17 @@ runnable and testable.
 
 ### Pipeline variants
 
-The orchestration crate exposes four top-level pipelines:
+The orchestration crate exposes five top-level pipelines:
 
 - **`run-all`** — additive cumulative run. Incremental collection (per-PR
   watermark + GitHub ETag); per project, skips survival/compile/architecture
   when no new PRs/tasks were collected. No AI detection. Survival failure is
-  fatal. *Does not* purge.
+  fatal. *Does not* purge. Runs PR/task doc evaluation (heuristic + LLM when configured).
+- **`grade-all`** — same incremental contract as `run-all`, but **skips**
+  PR/task doc evaluation entirely (not a Grading v4 input). Skips the
+  architecture LLM rubric. Heuristic PR flags (`EMPTY_DESCRIPTION`,
+  `GENERIC_TITLE`) still run. Use this to refresh grade inputs without
+  paying for LLM doc scoring.
 - **`iterate`** — same as `run-all`, plus a historical `--skip-arch-llm`
   flag from before the AST migration. Since Wave 4 the per-file LLM
   architecture rubric is off by default in `course.toml`, so this flag is
@@ -127,6 +132,7 @@ PR documentation evaluation by variant:
 | Pipeline    | Heuristic doc eval | LLM doc eval                       |
 |-------------|--------------------|------------------------------------|
 | `run-all`   | ✓                  | ✓ if `ANTHROPIC_API_KEY` is set    |
+| `grade-all` | ✗                  | ✗                                  |
 | `iterate`   | ✓                  | ✓ if `ANTHROPIC_API_KEY` is set    |
 | `go`        | ✓                  | ✓ if `ANTHROPIC_API_KEY` is set    |
 | `go-quick`  | ✓                  | ✗ — heuristic only, even with key  |
@@ -271,6 +277,7 @@ Or, equivalently, the orchestrated forms:
 
 ```bash
 sprint-grader run-all              # additive full run, no AI detection
+sprint-grader grade-all            # like run-all, no PR/task doc scoring
 sprint-grader go-quick             # iterative, with AI detection, no LLM judge
 sprint-grader go                   # end-of-sprint, full pipeline
 ```
@@ -670,6 +677,7 @@ Orchestration / utility:
 | Command | Purpose |
 |---|---|
 | `run-all [--skip-static-analysis]` | Additive full pipeline; no AI detection. Incremental collection (watermark + ETag); skips survival/compile/architecture per project when no new PRs/tasks. Static-analysis stage runs when `config/static_analysis.toml` exists; pass the flag to bypass. |
+| `grade-all [--skip-static-analysis]` | Same incremental contract as `run-all`, but skips PR/task doc evaluation (LLM and heuristic) and the architecture LLM rubric. Use to refresh Grading v4 inputs without doc-scoring cost. |
 | `iterate [--skip-static-analysis]` | Same as `run-all`. Carries a historical `--skip-arch-llm` flag from before Wave 4; with the LLM judge off by default it is now a no-op for any course that hasn't opted back in. AST-based architecture scan always runs. |
 | `go [--dry-run] [--require-clean-tree] [--skip-static-analysis]` | End-of-sprint: **always** purges then re-collects → full pipeline + AI detection. `--projects` only narrows the purge scope (without it, every project in the DB is wiped). `--dry-run` previews the cascade per-table row counts and exits before any pipeline stage runs. `--require-clean-tree` refuses to start if `git status --porcelain` reports a dirty working tree. |
 | `go-quick [--dry-run] [--require-clean-tree] [--run-static-analysis]` | Same purge/re-collect contract as `go`, but PR doc evaluation always runs heuristic-only (no Claude calls) and the static-analysis stage is skipped by default — pass `--run-static-analysis` to opt in. Same `--dry-run` / `--require-clean-tree` semantics as `go`. |

@@ -29,6 +29,10 @@ use crate::{android_repo_root, repo_has_report_changes};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineVariant {
     RunAll,
+    /// Like `RunAll` but skips PR/task doc evaluation (LLM and heuristic).
+    /// Grading v4 does not consume `pr_doc_evaluation` or
+    /// `task_description_evaluation`; use this for faster grade-prep runs.
+    GradeAll,
     Go,
     GoQuick,
 }
@@ -37,6 +41,7 @@ impl PipelineVariant {
     pub fn name(&self) -> &'static str {
         match self {
             PipelineVariant::RunAll => "run-all",
+            PipelineVariant::GradeAll => "grade-all",
             PipelineVariant::Go => "go",
             PipelineVariant::GoQuick => "go-quick",
         }
@@ -48,6 +53,16 @@ impl PipelineVariant {
 
     fn purge_existing(&self) -> bool {
         matches!(self, PipelineVariant::Go | PipelineVariant::GoQuick)
+    }
+
+    /// Incremental collection + per-project reprocess gate (no purge).
+    fn incremental_run(&self) -> bool {
+        matches!(self, PipelineVariant::RunAll | PipelineVariant::GradeAll)
+    }
+
+    /// Skip PR doc pre-pass, per-sprint `llm_eval_pr_docs`, and task-description scoring.
+    fn skip_pr_doc_evaluation(&self) -> bool {
+        matches!(self, PipelineVariant::GradeAll)
     }
 }
 
@@ -244,6 +259,7 @@ fn run_parallel_project_block(
     sprint_ids: &[i64],
     max_workers: usize,
     use_llm_pr_docs: bool,
+    skip_pr_doc_evaluation: bool,
 ) -> Result<Vec<ProjectResult>> {
     let workers = max_workers.max(1).min(sprint_ids.len().max(1));
     info!(
@@ -265,7 +281,15 @@ fn run_parallel_project_block(
         sprint_ids
             .par_iter()
             .copied()
-            .map(|sid| run_project_stage_block(db_path, config, sid, use_llm_pr_docs))
+            .map(|sid| {
+                run_project_stage_block(
+                    db_path,
+                    config,
+                    sid,
+                    use_llm_pr_docs,
+                    skip_pr_doc_evaluation,
+                )
+            })
             .collect()
     });
 
@@ -284,6 +308,7 @@ fn run_project_stage_block(
     config: &Config,
     sprint_id: i64,
     use_llm_pr_docs: bool,
+    skip_pr_doc_evaluation: bool,
 ) -> ProjectResult {
     let start = Instant::now();
     let mut errors: Vec<(String, String)> = Vec::new();
@@ -351,21 +376,23 @@ fn run_project_stage_block(
             config.evaluate.judge.as_str(),
             "local-hybrid" | "claude-cli" | "cursor-cli" | "anthropic-api" | "deepseek-api"
         );
-    if !pre_pass_owns_pr_docs {
-        stage("llm_eval_pr_docs", &mut || {
-            sprint_grader_evaluate::run_pr_doc_evaluation_for_sprint_id(
-                &conn,
-                sprint_id,
-                config,
-                use_llm_pr_docs,
-            )
-            .map(|_| ())
+    if !skip_pr_doc_evaluation {
+        if !pre_pass_owns_pr_docs {
+            stage("llm_eval_pr_docs", &mut || {
+                sprint_grader_evaluate::run_pr_doc_evaluation_for_sprint_id(
+                    &conn,
+                    sprint_id,
+                    config,
+                    use_llm_pr_docs,
+                )
+                .map(|_| ())
+            });
+        }
+        stage("llm_eval_task_descriptions", &mut || {
+            sprint_grader_evaluate::score_task_descriptions_for_sprint_id(&conn, sprint_id, config)
+                .map(|_| ())
         });
     }
-    stage("llm_eval_task_descriptions", &mut || {
-        sprint_grader_evaluate::score_task_descriptions_for_sprint_id(&conn, sprint_id, config)
-            .map(|_| ())
-    });
     stage("inequality", &mut || {
         sprint_grader_analyze::compute_all_inequality(&conn, sprint_id)
     });
@@ -594,7 +621,7 @@ pub fn rerun_post_collection_for_sprint_ids(
     run_remote_llm_pre_pass(db_path, config, sprint_ids, true)?;
 
     let workers = max_workers.unwrap_or(sprint_ids.len());
-    let results = run_parallel_project_block(db_path, config, sprint_ids, workers, true)?;
+    let results = run_parallel_project_block(db_path, config, sprint_ids, workers, true, false)?;
     for r in &results {
         if !r.stage_errors.is_empty() {
             let failed: Vec<&str> = r.stage_errors.iter().map(|(k, _)| k.as_str()).collect();
@@ -933,15 +960,15 @@ pub fn run_pipeline(
         }
     }
 
-    // [RunAll only] Snapshot PR + task counts before collection so we can
+    // [run-all / grade-all] Snapshot PR + task counts before collection so we can
     // detect which projects received new data. go/go-quick purge first so
     // they always do a full reprocess — no snapshot needed there.
-    let early_project_ids: Vec<i64> = if variant == PipelineVariant::RunAll {
+    let early_project_ids: Vec<i64> = if variant.incremental_run() {
         resolve_project_ids_from_names(&db.conn, opts.project_filter.as_deref())
     } else {
         Vec::new()
     };
-    let pre_counts: HashMap<i64, (i64, i64)> = if variant == PipelineVariant::RunAll {
+    let pre_counts: HashMap<i64, (i64, i64)> = if variant.incremental_run() {
         snapshot_pr_task_counts(&db.conn, &early_project_ids)
     } else {
         HashMap::new()
@@ -1012,11 +1039,11 @@ pub fn run_pipeline(
         .flat_map(|g| g.sprint_ids.iter().copied())
         .collect();
 
-    // [RunAll only] Post-collection snapshot: determine which projects have
+    // [run-all / grade-all] Post-collection snapshot: determine which projects have
     // new PRs or tasks. For go/go-quick every project is fully reprocessed
-    // (they purge existing data). For run-all we skip the expensive stages
+    // (they purge existing data). For incremental variants we skip the expensive stages
     // (survival, compile, architecture) for projects where nothing changed.
-    let projects_with_new_data: HashSet<i64> = if variant == PipelineVariant::RunAll {
+    let projects_with_new_data: HashSet<i64> = if variant.incremental_run() {
         let post_ids: Vec<i64> = groups.iter().map(|g| g.project_id).collect();
         let post_counts = snapshot_pr_task_counts(&db.conn, &post_ids);
         let mut set = HashSet::new();
@@ -1055,7 +1082,7 @@ pub fn run_pipeline(
     // Clone/update repos only for projects with new data (RunAll); for
     // go/go-quick use the original project_ids_filter (full scope).
     if !opts.skip_repos && !opts.skip_github {
-        if variant == PipelineVariant::RunAll {
+        if variant.incremental_run() {
             let new_data_ids: Vec<i64> = projects_with_new_data.iter().copied().collect();
             clone_repos_from_db(&db, &opts.entregues_dir, Some(&new_data_ids))?;
         } else {
@@ -1134,7 +1161,8 @@ pub fn run_pipeline(
     // is a defensive no-op (Invariant C) — the pre-pass owns this judge.
     // On `Err`, log a warn and fall back by calling `evaluate_prs_heuristic`
     // for each affected sprint so the report column doesn't stay NULL.
-    if config.evaluate.judge == "local-hybrid" && !flat_sprint_ids.is_empty() {
+    let skip_pr_doc_eval = variant.skip_pr_doc_evaluation();
+    if config.evaluate.judge == "local-hybrid" && !flat_sprint_ids.is_empty() && !skip_pr_doc_eval {
         info!(
             stage = 3,
             sprints = flat_sprint_ids.len(),
@@ -1176,8 +1204,9 @@ pub fn run_pipeline(
     // Remote-LLM pre-pass: see `run_remote_llm_pre_pass` doc-comment.
     // Gated on `use_llm_pr_docs` so `go-quick` (heuristic-only) is
     // unaffected and continues to run heuristic scoring per sprint
-    // inside the parallel block.
-    let use_llm_pr_docs = !matches!(variant, PipelineVariant::GoQuick);
+    // inside the parallel block. `grade-all` skips doc evaluation entirely.
+    let use_llm_pr_docs =
+        !matches!(variant, PipelineVariant::GoQuick) && !skip_pr_doc_eval;
     run_remote_llm_pre_pass(db_path, config, &flat_sprint_ids, use_llm_pr_docs)?;
 
     // Stage 3: parallel per-(project, sprint) analysis.
@@ -1194,6 +1223,7 @@ pub fn run_pipeline(
         &flat_sprint_ids,
         max_workers,
         use_llm_pr_docs,
+        skip_pr_doc_eval,
     )?;
     for r in &results {
         if r.stage_errors.is_empty() {
@@ -1760,6 +1790,7 @@ mod tests {
     #[test]
     fn variant_name_matches_python() {
         assert_eq!(PipelineVariant::RunAll.name(), "run-all");
+        assert_eq!(PipelineVariant::GradeAll.name(), "grade-all");
         assert_eq!(PipelineVariant::Go.name(), "go");
         assert_eq!(PipelineVariant::GoQuick.name(), "go-quick");
     }
@@ -1767,6 +1798,7 @@ mod tests {
     #[test]
     fn only_go_variants_run_ai_detection() {
         assert!(!PipelineVariant::RunAll.ai_detection());
+        assert!(!PipelineVariant::GradeAll.ai_detection());
         assert!(PipelineVariant::Go.ai_detection());
         assert!(PipelineVariant::GoQuick.ai_detection());
     }
@@ -1774,8 +1806,25 @@ mod tests {
     #[test]
     fn only_go_variants_purge_existing() {
         assert!(!PipelineVariant::RunAll.purge_existing());
+        assert!(!PipelineVariant::GradeAll.purge_existing());
         assert!(PipelineVariant::Go.purge_existing());
         assert!(PipelineVariant::GoQuick.purge_existing());
+    }
+
+    #[test]
+    fn grade_all_skips_pr_doc_evaluation() {
+        assert!(!PipelineVariant::RunAll.skip_pr_doc_evaluation());
+        assert!(PipelineVariant::GradeAll.skip_pr_doc_evaluation());
+        assert!(!PipelineVariant::Go.skip_pr_doc_evaluation());
+        assert!(!PipelineVariant::GoQuick.skip_pr_doc_evaluation());
+    }
+
+    #[test]
+    fn incremental_run_matches_run_all_and_grade_all() {
+        assert!(PipelineVariant::RunAll.incremental_run());
+        assert!(PipelineVariant::GradeAll.incremental_run());
+        assert!(!PipelineVariant::Go.incremental_run());
+        assert!(!PipelineVariant::GoQuick.incremental_run());
     }
 
     fn mk_mem_conn() -> rusqlite::Connection {
