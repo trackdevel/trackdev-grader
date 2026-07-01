@@ -329,10 +329,14 @@ pub fn extract_json_object(s: &str) -> Option<Value> {
 
 // ---- Resume-guard helper ----
 
-/// Body length (chars) at or above which a `pr_doc_evaluation` row with
-/// `description_score = 0.0` is treated as stale and re-evaluated.
+/// Body length (bytes, matching SQLite `length()`) at or above which a
+/// `pr_doc_evaluation` row with `description_score = 0.0` may be stale.
 /// See `pr_doc_row_present_and_fresh` for the why.
 const STALE_BODY_LEN_THRESHOLD: i64 = 50;
+
+fn pr_body_byte_len(body: Option<&str>) -> i64 {
+    body.map(|s| s.len() as i64).unwrap_or(0)
+}
 
 /// Returns true iff `pr_doc_evaluation` already has a row for this
 /// `(pr_id, sprint_id)` AND the row is *fresh* — i.e., it isn't an
@@ -347,38 +351,86 @@ const STALE_BODY_LEN_THRESHOLD: i64 = 50;
 /// populate the body would never re-score, because the bare existence
 /// of any row matched the resume guard.
 ///
-/// This helper closes that gap: when `description_score = 0.0` AND the
-/// current PR body has at least `STALE_BODY_LEN_THRESHOLD` characters,
-/// the row is considered stale and the caller MUST re-evaluate (the
-/// `INSERT OR REPLACE` UPSERT then overwrites the stale row).
+/// This helper closes that gap: when `description_score = 0.0`, the
+/// current PR body has at least `STALE_BODY_LEN_THRESHOLD` bytes, AND
+/// `scored_body_len` shows the row was produced while the body was still
+/// short/empty, the row is considered stale and the caller MUST
+/// re-evaluate (the `INSERT OR REPLACE` UPSERT then overwrites the stale
+/// row).
+///
+/// Rows scored after the body was already populated — even when the judge
+/// legitimately returns `description_score = 0.0` — are *not* stale.
 ///
 /// Edge cases:
-/// - genuinely empty / very short body (`< THRESHOLD` chars) → not
+/// - genuinely empty / very short body (`< THRESHOLD` bytes) → not
 ///   stale → skipped, preserving the legitimate 0 score
-/// - body that legitimately deserves 0 (bullet list of pure task IDs
-///   etc.) → flagged stale → re-evaluated → judge returns 0 again
-///   (cost: one extra LLM call per such PR per re-run, idempotent)
+/// - legacy rows with `scored_body_len IS NULL` are treated as scored
+///   against an empty body (one re-run populates the column)
+///
+/// When duplicate rows exist (the table has no PK so historical
+/// `INSERT OR REPLACE` calls degraded to plain INSERT), any *fresh*
+/// row suffices — we must not pick an arbitrary stale duplicate.
 pub(crate) fn pr_doc_row_present_and_fresh(
     conn: &Connection,
     pr_id: &str,
     sprint_id: i64,
 ) -> rusqlite::Result<bool> {
-    let row: Option<(f64, i64)> = conn
+    let fresh: Option<i64> = conn
         .query_row(
-            "SELECT pde.description_score,
-                    length(coalesce(pr.body, ''))
+            "SELECT 1
              FROM pr_doc_evaluation pde
              JOIN pull_requests pr ON pr.id = pde.pr_id
-             WHERE pde.pr_id = ? AND pde.sprint_id = ?",
-            params![pr_id, sprint_id],
-            |r| Ok((r.get::<_, f64>(0)?, r.get::<_, i64>(1)?)),
+             WHERE pde.pr_id = ? AND pde.sprint_id = ?
+               AND NOT (
+                 pde.description_score = 0.0
+                 AND length(coalesce(pr.body, '')) >= ?
+                 AND coalesce(pde.scored_body_len, 0) < ?
+               )
+             LIMIT 1",
+            params![
+                pr_id,
+                sprint_id,
+                STALE_BODY_LEN_THRESHOLD,
+                STALE_BODY_LEN_THRESHOLD
+            ],
+            |r| r.get(0),
         )
         .ok();
-    let Some((desc_score, body_len)) = row else {
-        return Ok(false);
-    };
-    let is_stale = desc_score == 0.0 && body_len >= STALE_BODY_LEN_THRESHOLD;
-    Ok(!is_stale)
+    Ok(fresh.is_some())
+}
+
+/// `pr_doc_evaluation` has no declared PRIMARY KEY, so `INSERT OR REPLACE`
+/// degrades to plain INSERT. Always delete the prior row first.
+fn upsert_pr_doc_evaluation(
+    conn: &Connection,
+    pr_id: &str,
+    sprint_id: i64,
+    title_score: f64,
+    description_score: f64,
+    total: f64,
+    justification: &str,
+    scored_body_len: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM pr_doc_evaluation WHERE pr_id = ? AND sprint_id = ?",
+        params![pr_id, sprint_id],
+    )?;
+    conn.execute(
+        "INSERT INTO pr_doc_evaluation
+         (pr_id, sprint_id, title_score, description_score,
+          total_doc_score, justification, scored_body_len)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![
+            pr_id,
+            sprint_id,
+            title_score,
+            description_score,
+            total,
+            justification,
+            scored_body_len,
+        ],
+    )?;
+    Ok(())
 }
 
 // ---- Public entry points ----
@@ -394,6 +446,29 @@ pub fn run_pr_doc_evaluation_for_sprint_id(
     use_llm: bool,
 ) -> rusqlite::Result<usize> {
     let mut count = 0usize;
+
+    // Announce the project (and sprint) before any PR is judged, so a long
+    // serial run is easy to follow / resume from in the logs.
+    let (project_name, sprint_name) = conn
+        .query_row(
+            "SELECT p.name, s.name
+             FROM sprints s JOIN projects p ON p.id = s.project_id
+             WHERE s.id = ?",
+            [sprint_id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                ))
+            },
+        )
+        .unwrap_or_default();
+    info!(
+        project = %project_name,
+        sprint = %sprint_name,
+        sprint_id,
+        "PR doc evaluation: starting project"
+    );
 
     if !use_llm {
         info!("pr_doc_evaluation: heuristic-only path requested");
@@ -654,19 +729,15 @@ fn evaluate_prs_llm(
                 .total_doc_score
                 .unwrap_or(resp.title_score + resp.description_score);
 
-            conn.execute(
-                "INSERT OR REPLACE INTO pr_doc_evaluation
-                 (pr_id, sprint_id, title_score, description_score,
-                  total_doc_score, justification)
-                 VALUES (?, ?, ?, ?, ?, ?)",
-                params![
-                    pr_id,
-                    sprint_id,
-                    resp.title_score,
-                    resp.description_score,
-                    total,
-                    resp.justification
-                ],
+            upsert_pr_doc_evaluation(
+                conn,
+                &pr_id,
+                sprint_id,
+                resp.title_score,
+                resp.description_score,
+                total,
+                &resp.justification,
+                pr_body_byte_len(body.as_deref()),
             )?;
             count += 1;
         }
@@ -738,7 +809,7 @@ fn evaluate_prs_via_cli<B: RubricCliBackend + Sync>(
 
     // Resolve parent-story names ahead of the parallel section so each
     // worker has only the data it needs (no shared Connection).
-    let prepared: Vec<(String, String)> = to_evaluate
+    let prepared: Vec<(String, String, i64)> = to_evaluate
         .into_iter()
         .map(
             |(pr_id, _pr_number, _repo, title, body, task_name, parent_id)| {
@@ -754,13 +825,14 @@ fn evaluate_prs_via_cli<B: RubricCliBackend + Sync>(
                 };
                 let title_str = title.as_deref().unwrap_or("");
                 let task_str = task_name.as_deref().unwrap_or("");
+                let scored_body_len = pr_body_byte_len(body.as_deref());
                 let user_msg = build_pr_judge_user_message(
                     task_str,
                     &parent_story,
                     title_str,
                     body.as_deref(),
                 );
-                (pr_id, user_msg)
+                (pr_id, user_msg, scored_body_len)
             },
         )
         .collect();
@@ -776,15 +848,19 @@ fn evaluate_prs_via_cli<B: RubricCliBackend + Sync>(
             ))))
         })?;
 
-    let results: Vec<(String, Option<PrDocResponse>)> = pool.install(|| {
+    let total_calls = prepared.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let results: Vec<(String, i64, Option<PrDocResponse>)> = pool.install(|| {
         prepared
             .par_iter()
-            .map(|(pr_id, user_msg)| {
+            .map(|(pr_id, user_msg, scored_body_len)| {
+                let call_start = std::time::Instant::now();
                 let raw = match client.complete_rubric(RUBRIC_PR, user_msg) {
                     Ok(r) => r,
                     Err(e) => {
-                        warn!(pr_id = %pr_id, backend = backend_label, error = %e, "CLI call failed");
-                        return (pr_id.clone(), None);
+                        let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        warn!(pr_id = %pr_id, progress = %format!("{n}/{total_calls}"), backend = backend_label, error = %e, "PR doc judge call failed");
+                        return (pr_id.clone(), *scored_body_len, None);
                     }
                 };
                 let parsed = extract_json_object(&raw);
@@ -795,32 +871,36 @@ fn evaluate_prs_via_cli<B: RubricCliBackend + Sync>(
                         None
                     }
                 });
-                (pr_id.clone(), resp)
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                info!(
+                    pr_id = %pr_id,
+                    progress = %format!("{n}/{total_calls}"),
+                    elapsed = %format!("{:.1}s", call_start.elapsed().as_secs_f64()),
+                    scored = resp.is_some(),
+                    "PR doc judge call done"
+                );
+                (pr_id.clone(), *scored_body_len, resp)
             })
             .collect()
     });
 
     let mut count = 0usize;
-    for (pr_id, resp) in results {
+    for (pr_id, scored_body_len, resp) in results {
         let Some(resp) = resp else {
             continue;
         };
         let total = resp
             .total_doc_score
             .unwrap_or(resp.title_score + resp.description_score);
-        conn.execute(
-            "INSERT OR REPLACE INTO pr_doc_evaluation
-             (pr_id, sprint_id, title_score, description_score,
-              total_doc_score, justification)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![
-                pr_id,
-                sprint_id,
-                resp.title_score,
-                resp.description_score,
-                total,
-                resp.justification
-            ],
+        upsert_pr_doc_evaluation(
+            conn,
+            &pr_id,
+            sprint_id,
+            resp.title_score,
+            resp.description_score,
+            total,
+            &resp.justification,
+            scored_body_len,
         )?;
         count += 1;
     }
@@ -858,19 +938,15 @@ pub fn evaluate_prs_heuristic(conn: &Connection, sprint_id: i64) -> rusqlite::Re
         }
         let title_score = heuristic_title_score(title.as_deref());
         let description_score = heuristic_description_score(body.as_deref());
-        conn.execute(
-            "INSERT OR REPLACE INTO pr_doc_evaluation
-             (pr_id, sprint_id, title_score, description_score,
-              total_doc_score, justification)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![
-                pr_id,
-                sprint_id,
-                title_score,
-                description_score,
-                title_score + description_score,
-                "Scored by deterministic heuristics (LLM unavailable)"
-            ],
+        upsert_pr_doc_evaluation(
+            conn,
+            &pr_id,
+            sprint_id,
+            title_score,
+            description_score,
+            title_score + description_score,
+            "Scored by deterministic heuristics (LLM unavailable)",
+            pr_body_byte_len(body.as_deref()),
         )?;
         count += 1;
     }
@@ -1208,14 +1284,18 @@ fn evaluate_tasks_via_cli<B: RubricCliBackend + Sync>(
             ))))
         })?;
 
+    let total_calls = prepared.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
     let results: Vec<(i64, f64, String)> = pool.install(|| {
         prepared
             .par_iter()
             .map(|(task_id, name, user_msg)| {
+                let call_start = std::time::Instant::now();
                 let raw = match client.complete_rubric(RUBRIC_TASK, user_msg) {
                     Ok(r) => r,
                     Err(e) => {
-                        warn!(task_id, backend = backend_label, error = %e, "CLI task call failed");
+                        let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        warn!(task_id, progress = %format!("{n}/{total_calls}"), backend = backend_label, error = %e, "task desc judge call failed (heuristic fallback)");
                         let s = heuristic_task_description_score(name.as_deref());
                         return (
                             *task_id,
@@ -1224,7 +1304,7 @@ fn evaluate_tasks_via_cli<B: RubricCliBackend + Sync>(
                         );
                     }
                 };
-                match extract_json_object(&raw)
+                let out = match extract_json_object(&raw)
                     .and_then(|v| serde_json::from_value::<TaskEvalResponse>(v).ok())
                 {
                     Some(r) => (
@@ -1240,7 +1320,15 @@ fn evaluate_tasks_via_cli<B: RubricCliBackend + Sync>(
                             "Heuristic fallback (CLI response unparseable)".to_string(),
                         )
                     }
-                }
+                };
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                info!(
+                    task_id,
+                    progress = %format!("{n}/{total_calls}"),
+                    elapsed = %format!("{:.1}s", call_start.elapsed().as_secs_f64()),
+                    "task desc judge call done"
+                );
+                out
             })
             .collect()
     });
@@ -1560,6 +1648,7 @@ model_id = "claude-haiku-4-5-20251001"
                 pr_id TEXT, sprint_id INTEGER,
                 title_score REAL, description_score REAL,
                 total_doc_score REAL, justification TEXT,
+                scored_body_len INTEGER,
                 PRIMARY KEY (pr_id, sprint_id));",
         )
         .unwrap();
@@ -1581,18 +1670,30 @@ model_id = "claude-haiku-4-5-20251001"
         title_score: f64,
         description_score: f64,
     ) {
+        seed_eval_row_with_body_len(conn, pr_id, sprint_id, title_score, description_score, 0);
+    }
+
+    fn seed_eval_row_with_body_len(
+        conn: &Connection,
+        pr_id: &str,
+        sprint_id: i64,
+        title_score: f64,
+        description_score: f64,
+        scored_body_len: i64,
+    ) {
         conn.execute(
             "INSERT INTO pr_doc_evaluation
              (pr_id, sprint_id, title_score, description_score,
-              total_doc_score, justification)
-             VALUES (?, ?, ?, ?, ?, ?)",
+              total_doc_score, justification, scored_body_len)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![
                 pr_id,
                 sprint_id,
                 title_score,
                 description_score,
                 title_score + description_score,
-                "x"
+                "x",
+                scored_body_len,
             ],
         )
         .unwrap();
@@ -1642,6 +1743,40 @@ model_id = "claude-haiku-4-5-20251001"
         seed_pr_with_body(&conn, "pr-1", Some(body));
         seed_eval_row(&conn, "pr-1", 10, 1.75, 0.0);
         assert!(!pr_doc_row_present_and_fresh(&conn, "pr-1", 10).unwrap());
+    }
+
+    #[test]
+    fn resume_guard_returns_true_when_duplicate_includes_fresh_row() {
+        // Production table has no PK — duplicates are possible historically.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pull_requests (id TEXT PRIMARY KEY, body TEXT);
+             CREATE TABLE pr_doc_evaluation (
+                pr_id TEXT, sprint_id INTEGER,
+                title_score REAL, description_score REAL,
+                total_doc_score REAL, justification TEXT,
+                scored_body_len INTEGER);",
+        )
+        .unwrap();
+        let body = "## Included tasks\n* Create BuyerProfileFragment + layout: [p1d-353](https://example.org/4600)\n\n## Description\n* Created the layout with profile card and stats row.";
+        let body_len = body.len() as i64;
+        seed_pr_with_body(&conn, "pr-1", Some(body));
+        seed_eval_row_with_body_len(&conn, "pr-1", 10, 1.0, 0.0, 0);
+        seed_eval_row_with_body_len(&conn, "pr-1", 10, 1.0, 0.0, body_len);
+        assert!(pr_doc_row_present_and_fresh(&conn, "pr-1", 10).unwrap());
+    }
+
+    #[test]
+    fn resume_guard_returns_true_when_description_zero_scored_with_long_body() {
+        // Judge legitimately returned 0 for a substantial body — do not
+        // re-score on every restart.
+        let conn = mk_resume_guard_conn();
+        let body = "## Included tasks\n* Create BuyerProfileFragment + layout: [p1d-353](https://example.org/4600)\n\n## Description\n* Created the layout with profile card and stats row.";
+        let body_len = body.len() as i64;
+        assert!(body_len >= STALE_BODY_LEN_THRESHOLD);
+        seed_pr_with_body(&conn, "pr-1", Some(body));
+        seed_eval_row_with_body_len(&conn, "pr-1", 10, 1.0, 0.0, body_len);
+        assert!(pr_doc_row_present_and_fresh(&conn, "pr-1", 10).unwrap());
     }
 
     #[test]

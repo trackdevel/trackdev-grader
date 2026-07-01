@@ -68,6 +68,9 @@ impl Database {
             // EXTRA_TECH: scanner version on inventory runs invalidates the
             // HEAD-SHA cache when the metric-key set / detectors change.
             ("project_inventory_runs", "scanner_version", "TEXT"),
+            // PR-doc resume guard: distinguish rows scored when body was
+            // empty from rows where the judge legitimately returned 0.
+            ("pr_doc_evaluation", "scored_body_len", "INTEGER"),
         ];
         for (table, column, coltype) in migrations {
             let existing: Vec<String> = self.column_names(table)?;
@@ -78,6 +81,25 @@ impl Database {
                 let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {coltype}");
                 self.conn.execute(&sql, [])?;
             }
+        }
+        // `pr_doc_evaluation` has no PRIMARY KEY; historical `INSERT OR REPLACE`
+        // calls degraded to plain INSERT and duplicated rows. Keep the newest
+        // row per (pr_id, sprint_id) and enforce uniqueness going forward.
+        let pde_cols = self.column_names("pr_doc_evaluation").unwrap_or_default();
+        if !pde_cols.is_empty() {
+            self.conn.execute(
+                "DELETE FROM pr_doc_evaluation
+                 WHERE rowid NOT IN (
+                   SELECT MAX(rowid) FROM pr_doc_evaluation
+                   GROUP BY pr_id, sprint_id
+                 )",
+                [],
+            )?;
+            let _ = self.conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_pr_doc_evaluation_pr_sprint
+                 ON pr_doc_evaluation(pr_id, sprint_id)",
+                [],
+            );
         }
         // Retired helper table — drop if present.
         self.conn

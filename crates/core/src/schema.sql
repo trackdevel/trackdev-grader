@@ -211,7 +211,8 @@ CREATE TABLE IF NOT EXISTS pr_doc_evaluation (
     title_score REAL,
     description_score REAL,
     total_doc_score REAL,
-    justification TEXT
+    justification TEXT,
+    scored_body_len INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS cosmetic_rewrites (

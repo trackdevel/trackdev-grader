@@ -51,18 +51,21 @@ pub struct PrPersistRow<'a> {
     pub description_score: f64,
     pub total_doc_score: f64,
     pub justification: String,
+    pub scored_body_len: i64,
 }
 
-/// Insert a single row into `pr_doc_evaluation`. The caller's resume-guard
-/// `NOT IN (SELECT pr_id ...)` filter is the only correctness mechanism
-/// against duplicate insertion — the table has no declared PK, so
-/// `INSERT OR REPLACE` degrades to plain INSERT here.
+/// Upsert a single row into `pr_doc_evaluation`. The table has no declared
+/// PK, so delete-then-insert is required for idempotency.
 pub fn write_pr_row(conn: &Connection, row: &PrPersistRow<'_>) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM pr_doc_evaluation WHERE pr_id = ? AND sprint_id = ?",
+        params![row.pr_id, row.sprint_id],
+    )?;
     conn.execute(
         "INSERT INTO pr_doc_evaluation
             (pr_id, sprint_id, title_score, description_score,
-             total_doc_score, justification)
-         VALUES (?, ?, ?, ?, ?, ?)",
+             total_doc_score, justification, scored_body_len)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         params![
             row.pr_id,
             row.sprint_id,
@@ -70,6 +73,7 @@ pub fn write_pr_row(conn: &Connection, row: &PrPersistRow<'_>) -> rusqlite::Resu
             row.description_score,
             row.total_doc_score,
             &row.justification,
+            row.scored_body_len,
         ],
     )?;
     Ok(())

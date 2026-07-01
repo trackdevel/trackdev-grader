@@ -26,6 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
+use tracing::debug;
 
 #[derive(Debug, Error)]
 pub enum CursorCliError {
@@ -117,6 +118,14 @@ impl CursorCliClient {
 
         // Rubric already ends with "Reply ONLY JSON"; user turn is minimal.
         let combined = format!("{system}\n\n---\n\n{user_prompt}");
+        let call_start = Instant::now();
+        debug!(
+            cli = %self.cli_path,
+            model = %self.model,
+            prompt_chars = combined.len(),
+            timeout_s = self.timeout.as_secs(),
+            "cursor agent: invoking"
+        );
         let mut child = Command::new(&self.cli_path)
             .args(self.build_argv(&combined))
             .stdin(Stdio::null())
@@ -156,6 +165,11 @@ impl CursorCliClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            debug!(
+                status = %output.status,
+                elapsed = format!("{:.1}s", call_start.elapsed().as_secs_f64()),
+                "cursor agent: non-zero exit"
+            );
             return Err(CursorCliError::Cli(format!(
                 "cursor agent CLI exited with {} — stderr: {}",
                 output.status,
@@ -163,7 +177,13 @@ impl CursorCliClient {
             )));
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        debug!(
+            elapsed = format!("{:.1}s", call_start.elapsed().as_secs_f64()),
+            stdout_bytes = stdout.len(),
+            "cursor agent: completed"
+        );
+        Ok(stdout)
     }
 }
 

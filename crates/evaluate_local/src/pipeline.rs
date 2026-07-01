@@ -333,7 +333,15 @@ pub fn run_local_hybrid_batch_with_backend(
             if matches!(llm_outcome, LlmOutcome::FormatUnsupported) {
                 format_unsupported_count += 1;
             }
-            match write_decision(conn, &row.pr_id, sprint_id, &decision, context, llm_outcome) {
+            match write_decision(
+                conn,
+                &row.pr_id,
+                sprint_id,
+                &decision,
+                context,
+                llm_outcome,
+                pr_body_byte_len(row.body.as_deref()),
+            ) {
                 Ok(kind) => match kind {
                     DecisionKind::ShortCircuit => stats.short_circuited += 1,
                     DecisionKind::Snap => stats.regressor_only += 1,
@@ -409,6 +417,7 @@ fn write_decision(
     decision: &Decision,
     context: RegressorContext,
     llm_outcome: LlmOutcome,
+    scored_body_len: i64,
 ) -> rusqlite::Result<DecisionKind> {
     match decision {
         Decision::Snap {
@@ -425,6 +434,7 @@ fn write_decision(
                     description_score: *description,
                     total_doc_score: *total,
                     justification: "local: regressor".to_string(),
+                    scored_body_len,
                 },
             )?;
             Ok(DecisionKind::Snap)
@@ -451,6 +461,7 @@ fn write_decision(
                     description_score,
                     total_doc_score: total,
                     justification: justification.to_string(),
+                    scored_body_len,
                 },
             )?;
             Ok(DecisionKind::ShortCircuit)
@@ -488,6 +499,7 @@ fn write_decision(
                     description_score,
                     total_doc_score: total,
                     justification: justification.to_string(),
+                    scored_body_len,
                 },
             )?;
             Ok(DecisionKind::NeedsLlm)
@@ -495,35 +507,45 @@ fn write_decision(
     }
 }
 
-/// Body length at or above which a `pr_doc_evaluation` row with
-/// `description_score = 0.0` is treated as stale and re-evaluated.
+/// Body length (bytes, matching SQLite `length()`) at or above which a
+/// `pr_doc_evaluation` row with `description_score = 0.0` may be stale.
 /// Mirrors `sprint_grader_evaluate::llm_eval::STALE_BODY_LEN_THRESHOLD`.
 const STALE_BODY_LEN_THRESHOLD: i64 = 50;
 
+fn pr_body_byte_len(body: Option<&str>) -> i64 {
+    body.map(|s| s.len() as i64).unwrap_or(0)
+}
+
 /// Returns true iff the PR already has a *fresh* `pr_doc_evaluation`
 /// row for this sprint. A row is stale (and so re-evaluated) when
-/// `description_score = 0.0` but the current `pull_requests.body` has
-/// at least `STALE_BODY_LEN_THRESHOLD` characters — symptomatic of the
-/// row being scored before the GitHub-detail collect populated body.
+/// `description_score = 0.0`, the current `pull_requests.body` has at
+/// least `STALE_BODY_LEN_THRESHOLD` bytes, and `scored_body_len` shows
+/// the row was produced while the body was still short/empty.
 /// See `sprint_grader_evaluate::llm_eval::pr_doc_row_present_and_fresh`
 /// for the longer rationale (this is the local-hybrid mirror).
 fn pr_already_scored(conn: &Connection, pr_id: &str, sprint_id: i64) -> rusqlite::Result<bool> {
-    let row: Option<(f64, i64)> = conn
+    let fresh: Option<i64> = conn
         .query_row(
-            "SELECT pde.description_score,
-                    length(coalesce(pr.body, ''))
+            "SELECT 1
              FROM pr_doc_evaluation pde
              JOIN pull_requests pr ON pr.id = pde.pr_id
-             WHERE pde.pr_id = ? AND pde.sprint_id = ?",
-            params![pr_id, sprint_id],
-            |r| Ok((r.get::<_, f64>(0)?, r.get::<_, i64>(1)?)),
+             WHERE pde.pr_id = ? AND pde.sprint_id = ?
+               AND NOT (
+                 pde.description_score = 0.0
+                 AND length(coalesce(pr.body, '')) >= ?
+                 AND coalesce(pde.scored_body_len, 0) < ?
+               )
+             LIMIT 1",
+            params![
+                pr_id,
+                sprint_id,
+                STALE_BODY_LEN_THRESHOLD,
+                STALE_BODY_LEN_THRESHOLD
+            ],
+            |r| r.get(0),
         )
         .ok();
-    let Some((desc_score, body_len)) = row else {
-        return Ok(false);
-    };
-    let is_stale = desc_score == 0.0 && body_len >= STALE_BODY_LEN_THRESHOLD;
-    Ok(!is_stale)
+    Ok(fresh.is_some())
 }
 
 fn select_prs_for_sprint(conn: &Connection, sprint_id: i64) -> rusqlite::Result<Vec<PrInputRow>> {
