@@ -35,7 +35,7 @@ const STATUS_CRASHED: &str = "CRASHED";
 /// so the HEAD-SHA cache is invalidated automatically (a repo whose `main` has
 /// not moved is still re-scanned when this differs from the recorded run). Bump
 /// this instead of relying on a one-time `force` from the pipeline.
-const SCANNER_VERSION: &str = "extra_tech_v1";
+const SCANNER_VERSION: &str = "extra_tech_v4";
 
 /// Outcome of a single-repo inventory scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,11 +481,16 @@ fn scan_stack_baseline(repo_path: &Path, stack: Stack) -> StackBaseline {
     let depth = detect::detect_depth(&files, stack);
     let dependencies: Vec<String> = gradle::scan_gradle_coords(repo_path).into_iter().collect();
     // `extra_dependency_count` is a diff output, not a baseline level — drop it.
-    let feature_metrics = depth
+    let mut feature_metrics: std::collections::BTreeMap<String, f64> = depth
         .metrics
         .into_iter()
         .filter(|(k, _)| k != metrics::EXTRA_DEPENDENCY_COUNT)
         .collect();
+    // `io.minio:minio` is already in spring baseline dependencies; IO call-site
+    // depth is scored from zero (parallel to `okhttp_external_api_count`).
+    if stack == Stack::Spring {
+        feature_metrics.insert(metrics::MINIO_OBJECT_IO_SITE_COUNT.into(), 0.0);
+    }
     StackBaseline {
         dependencies,
         source_commit: git_head_sha(repo_path),
@@ -564,5 +569,73 @@ mod tests {
         let s3 = scan_repo_to_db(&conn, &repo, "org/spring-demo", 1, &cat, &base, true).unwrap();
         assert!(!s3.skipped_unchanged);
         assert_eq!(s3.metrics_written, ALL_KEYS.len());
+    }
+
+    #[test]
+    fn minio_io_survives_baseline_when_spring_feature_baseline_is_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("spring-minio");
+        fs::create_dir_all(repo.join("src/main/java/com/x")).unwrap();
+        fs::write(
+            repo.join("src/main/java/com/x/FileService.java"),
+            r#"package com.x;
+import io.minio.GetObjectArgs;
+import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
+import java.util.Optional;
+public class FileService {
+    private final Optional<MinioClient> minioClient;
+    public FileService(Optional<MinioClient> minioClient) { this.minioClient = minioClient; }
+    public void upload() throws Exception {
+        MinioClient client = minioClient.orElseThrow();
+        client.putObject(PutObjectArgs.builder().bucket("b").object("o").build());
+    }
+    public void download() throws Exception {
+        MinioClient client = minioClient.orElseThrow();
+        client.getObject(GetObjectArgs.builder().bucket("b").object("o").build());
+    }
+}"#,
+        )
+        .unwrap();
+        git_init_commit(&repo);
+
+        let conn = Connection::open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, slug, name) VALUES (1, 'team-01', 'Team 01')",
+            [],
+        )
+        .unwrap();
+
+        let mut base = InventoryBaseline::default();
+        base.spring
+            .feature_metrics
+            .insert(crate::metrics::MINIO_OBJECT_IO_SITE_COUNT.into(), 0.0);
+
+        let cat = TechnologyCatalog::default_catalog();
+        let summary = scan_repo_to_db(
+            &conn,
+            &repo,
+            "org/spring-minio",
+            1,
+            &cat,
+            &base,
+            false,
+        )
+        .unwrap();
+        assert!(!summary.skipped_unchanged);
+
+        let stored: f64 = conn
+            .query_row(
+                "SELECT value FROM repo_structural_metrics
+                 WHERE repo_full_name = ? AND metric_key = ?",
+                params![
+                    "org/spring-minio",
+                    crate::metrics::MINIO_OBJECT_IO_SITE_COUNT
+                ],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 2.0);
     }
 }

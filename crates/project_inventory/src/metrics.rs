@@ -39,6 +39,10 @@ pub const EMAIL_SEND_SITE_COUNT: &str = "email_send_site_count";
 pub const GRAPHICS_CUSTOM_DRAW_COUNT: &str = "graphics_custom_draw_count";
 /// Audio/video API uses (MediaPlayer, VideoView, ExoPlayer/media3, …).
 pub const AV_USAGE_COUNT: &str = "av_usage_count";
+/// Distinct external API hosts called via OkHttp in Spring production code.
+pub const OKHTTP_EXTERNAL_API_COUNT: &str = "okhttp_external_api_count";
+/// `MinioClient.putObject` / `.getObject` call sites (Spring object storage).
+pub const MINIO_OBJECT_IO_SITE_COUNT: &str = "minio_object_io_site_count";
 /// Count of new (non-baseline) Gradle dependency coordinates not tied to a
 /// curated feature category (generic breadth).
 pub const EXTRA_DEPENDENCY_COUNT: &str = "extra_dependency_count";
@@ -54,6 +58,8 @@ pub const EXTRA_TECH_KEYS: &[&str] = &[
     EMAIL_SEND_SITE_COUNT,
     GRAPHICS_CUSTOM_DRAW_COUNT,
     AV_USAGE_COUNT,
+    OKHTTP_EXTERNAL_API_COUNT,
+    MINIO_OBJECT_IO_SITE_COUNT,
     EXTRA_DEPENDENCY_COUNT,
 ];
 
@@ -88,5 +94,7 @@ pub const ALL_KEYS: &[&str] = &[
     EMAIL_SEND_SITE_COUNT,
     GRAPHICS_CUSTOM_DRAW_COUNT,
     AV_USAGE_COUNT,
+    OKHTTP_EXTERNAL_API_COUNT,
+    MINIO_OBJECT_IO_SITE_COUNT,
     EXTRA_DEPENDENCY_COUNT,
 ];

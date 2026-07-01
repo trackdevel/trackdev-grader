@@ -202,6 +202,8 @@ export type ProjectGrades = {
   team_quality_penalty?: number;
   team_size: number;
   axes: AxisGrade[];
+  /** Size/complexity work_base before extra_tech merge (mirror of grade_core). */
+  work_base_structural?: number;
   /** EXTRA_TECH aggregate (weighted extra-technologies units; mirror of grade_core). */
   extra_tech?: number;
   /** Per-signal breakdown of extra_tech (only signals with raw > 0). */

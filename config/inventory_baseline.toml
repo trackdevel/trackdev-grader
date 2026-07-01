@@ -28,6 +28,8 @@ fcm_android_room_store = 0.0
 fcm_send_call_count = 0.0
 fcm_sending_endpoint_count = 0.0
 graphics_custom_draw_count = 0.0
+okhttp_external_api_count = 0.0
+minio_object_io_site_count = 0.0
 spec_executor_repo_count = 0.0
 specification_def_count = 0.0
 
@@ -60,5 +62,7 @@ fcm_android_room_store = 0.0
 fcm_send_call_count = 0.0
 fcm_sending_endpoint_count = 0.0
 graphics_custom_draw_count = 0.0
+okhttp_external_api_count = 0.0
+minio_object_io_site_count = 0.0
 spec_executor_repo_count = 0.0
 specification_def_count = 0.0

@@ -170,6 +170,8 @@ export default function ProjectDetail({ db, grades, spec, projectId }: Props) {
         <h3>Team grade</h3>
         <KvTable
           pairs={[
+            ["work_base (structural)", fmtNum(out.grades.work_base_structural ?? 0)],
+            ["work_base (extra_tech)", fmtNum(out.grades.extra_tech ?? 0)],
             ["work_base", fmtAxis(axisScore(out.grades.axes, "work_base"))],
             ["quality_eff", fmtAxis(qualityEff(out.grades.axes))],
             ["quality_multiplier", fmtAxis(axisScore(out.grades.axes, "quality_multiplier"))],
